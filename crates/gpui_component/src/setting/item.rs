@@ -264,6 +264,7 @@ impl SettingItem {
                     field,
                     ..
                 } => {
+                    let item_key = title.clone();
                     let layout = if options.layout().is_vertical() {
                         Axis::Vertical
                     } else {
@@ -304,7 +305,11 @@ impl SettingItem {
                         )
                         .child(div().id("field").child(Self::render_field(
                             field,
-                            options.with_layout(layout).with_disabled(disabled),
+                            options
+                                .clone()
+                                .with_layout(layout)
+                                .with_disabled(disabled)
+                                .with_item_key(item_key),
                             window,
                             cx,
                         )))
@@ -315,7 +320,7 @@ impl SettingItem {
                 } => div()
                     .w_full()
                     .when(disabled, |this| this.opacity(0.5))
-                    .child((render)(&options.with_disabled(disabled), window, cx))
+                    .child((render)(&options.clone().with_disabled(disabled), window, cx))
                     .into_any_element(),
             })
     }

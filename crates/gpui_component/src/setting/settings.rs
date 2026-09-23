@@ -11,8 +11,8 @@ use crate::{
 };
 use gpui::{
     App, AppContext as _, Axis, ElementId, Entity, IntoElement, ParentElement as _, Pixels,
-    RenderOnce, StyleRefinement, Styled, Window, container_query, div, prelude::FluentBuilder as _,
-    px, relative,
+    RenderOnce, SharedString, StyleRefinement, Styled, Window, container_query, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 use rust_i18n::t;
 
@@ -264,11 +264,20 @@ pub(super) struct SettingsState {
 /// ```ignore
 /// item.render_item(&options.with_item_ix(item_ix), window, cx)
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RenderOptions {
     page_ix: usize,
     group_ix: usize,
     item_ix: usize,
+    /// A stable identity for the current item, distinct from its positional
+    /// `item_ix`. Fields use this (falling back to `item_ix` when empty) to
+    /// key per-item render state such as a cached `InputState`. Positional
+    /// indices alone are unsafe here: a `SettingGroup` built conditionally
+    /// (e.g. different items depending on some selected type) can place
+    /// unrelated fields at the same index across renders, which would
+    /// otherwise make them share cached state and silently cross-wire their
+    /// change handlers.
+    item_key: SharedString,
     size: Size,
     group_variant: GroupBoxVariant,
     layout: Axis,
@@ -281,6 +290,7 @@ impl RenderOptions {
             page_ix: 0,
             group_ix: 0,
             item_ix: 0,
+            item_key: SharedString::default(),
             size: Size::default(),
             group_variant: GroupBoxVariant::default(),
             layout: Axis::Horizontal,
@@ -300,6 +310,12 @@ impl RenderOptions {
 
     pub fn with_item_ix(mut self, item_ix: usize) -> Self {
         self.item_ix = item_ix;
+        self
+    }
+
+    /// Set the stable per-item key used for keying cached render state.
+    pub fn with_item_key(mut self, item_key: impl Into<SharedString>) -> Self {
+        self.item_key = item_key.into();
         self
     }
 
@@ -333,6 +349,10 @@ impl RenderOptions {
 
     pub fn item_ix(&self) -> usize {
         self.item_ix
+    }
+
+    pub fn item_key(&self) -> &SharedString {
+        &self.item_key
     }
 
     pub fn size(&self) -> Size {
@@ -399,7 +419,7 @@ impl RenderOnce for Settings {
             )
             .child(
                 resizable_panel().child(container_query(move |size, window, cx| {
-                    let options = options.with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
+                    let options = options.clone().with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
                         Axis::Vertical
                     } else {
                         Axis::Horizontal

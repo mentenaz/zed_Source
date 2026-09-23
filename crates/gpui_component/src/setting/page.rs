@@ -227,14 +227,14 @@ impl SettingPage {
                     .child(
                         list(list_state.clone(), {
                             let query = query.clone();
-                            let options = *options;
+                            let options = options.clone();
                             move |group_ix, window, cx| {
                                 let group = groups[group_ix].clone();
                                 group
                                     .py_4()
                                     .render(
                                         &query,
-                                        &options.with_page_ix(ix).with_group_ix(group_ix),
+                                        &options.clone().with_page_ix(ix).with_group_ix(group_ix),
                                         window,
                                         cx,
                                     )

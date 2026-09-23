@@ -52,7 +52,7 @@ where
                 "string-state-{}-{}-{}",
                 options.page_ix(),
                 options.group_ix(),
-                options.item_ix()
+                options.item_key()
             )),
             cx,
             {

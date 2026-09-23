@@ -101,7 +101,7 @@ impl SettingGroup {
                 if item.is_match(&query, cx) {
                     Some(
                         item.clone()
-                            .render_item(&options.with_item_ix(item_ix), window, cx),
+                            .render_item(&options.clone().with_item_ix(item_ix), window, cx),
                     )
                 } else {
                     None

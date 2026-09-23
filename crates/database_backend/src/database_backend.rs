@@ -16,7 +16,10 @@ pub mod errors;
 pub mod metadata;
 pub mod models;
 
-pub use connection::{ConnectionId, ConnectionRegistry, ConnectionStatus, DatabaseId};
+pub use connection::{
+    ConnectionId, ConnectionRegistry, ConnectionStatus, DatabaseId, NetworkConnectParams,
+    create_database, credential_url, list_databases,
+};
 pub use drivers::DbType;
 pub use errors::DatabaseError;
 pub use metadata::{ColumnInfo, ForeignKey, TableInfo};
