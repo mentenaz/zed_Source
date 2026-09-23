@@ -1,0 +1,259 @@
+//! `flow.json` — the persisted workflow definition. Mirrors
+//! `DOCS/workflow-schema/flow.schema.json` field-for-field; if the two
+//! disagree, that's a real bug, not a style choice — the JSON Schema is
+//! meant to validate exactly what these types (de)serialize.
+//!
+//! Deliberately **not** an enum-per-action-type. See
+//! `DOCS/forge-workflow-engine-design.md` §2's "Locked" note: adding an
+//! action type must stay a pure `ActionDef` registry entry (`registry.rs`),
+//! never a Rust code change — an enum would force every exhaustive `match`
+//! over `Action` (this adapter, the execution engine, the canvas) to be
+//! touched and recompiled per new type, the exact "changing a feature
+//! touches the parser" shape this whole engine replaces ForgeFlow to avoid.
+//! The same reasoning is why the four container constructs
+//! (`Foreach`/`Until`/`If`/`Try`) are optional fields on one flat `Action`
+//! rather than their own enum variants — the schema itself defines "action"
+//! as one object type with conditional-but-optional fields (see its
+//! `allOf`/`if`/`then`), not a discriminated union, and this type matches
+//! that shape exactly.
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// A flow's `actions` map, and every nested `actions`/`else.actions`/
+/// `catch.actions` body — same shape, fully recursive. `IndexMap` (not
+/// `HashMap`) so a round-tripped file doesn't reorder actions the user
+/// didn't touch, even though `runAfter` — not this map's key order — is
+/// what actually determines execution order.
+pub type ActionMap = IndexMap<String, Action>;
+
+/// Any JSONLogic expression (<https://jsonlogic.com>), evaluated by
+/// `datalogic-rs`. Deliberately opaque here — JSONLogic's own grammar is
+/// the source of truth for what's inside, not this schema.
+pub type JsonLogicExpr = Value;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub actions: ActionMap,
+    #[serde(default)]
+    pub outputs: IndexMap<String, JsonLogicExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Action {
+    #[serde(rename = "type")]
+    pub type_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Untyped, per-type shape defined only by the `ActionDef` registry
+    /// entry for `type_id` (`registry.rs`) — see the module doc's "Locked"
+    /// note. Not validated here; the canvas/execution engine consult the
+    /// registry for that.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub inputs: serde_json::Map<String, Value>,
+    /// Empty = no dependency (a parallel root, or the first action of a
+    /// nested body). Each key is another action id *in the same
+    /// `ActionMap`* (nesting levels don't cross) whose listed outcome(s)
+    /// must occur before this action runs. `["Succeeded", "Failed"]` is
+    /// how "continue on failure" is expressed — see the design doc's
+    /// "Locked" note on why that's not a separate bool field.
+    #[serde(
+        default,
+        rename = "runAfter",
+        skip_serializing_if = "IndexMap::is_empty"
+    )]
+    pub run_after: IndexMap<String, Vec<RunOutcome>>,
+    /// Canvas position `[x, y]` — flow-space, relative to this action's own
+    /// parent scope for a nested action (same convention as
+    /// `gpui_flow::FlowNode::parent`'s local-position rule), absolute for a
+    /// top-level one. `None` for an action never placed on the canvas yet
+    /// (or hand-written), in which case `workflow_json::load` falls back to
+    /// its placeholder stacked layout for just that action.
+    ///
+    /// **Revises** the design doc's original "canvas position is not
+    /// stored in `flow.json`" decision — that assumed a `flow.layout.json`
+    /// sidecar would exist to hold it instead. It doesn't, and until it
+    /// does, saving a flow with no position field silently discarded every
+    /// manual arrangement on the next open (confirmed live: dragging nodes,
+    /// saving, reopening reset them). Embedding `pos` directly is strictly
+    /// worse for the "matches an external spec exactly" goal that
+    /// motivated the sidecar, but strictly better than the actual observed
+    /// behavior of losing user edits. Revisit if/when the sidecar gets
+    /// built for real.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pos: Option<(f32, f32)>,
+
+    // ── Foreach/Until only ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<JsonLogicExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<JsonLogicExpr>,
+    /// Mandatory on every real `Until` action (enforced by the JSON Schema's
+    /// conditional `allOf`, not by this field being non-`Option` — the
+    /// schema comment explains why the type system can't express
+    /// "required only when type_id == Until" cleanly on one flat struct).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<Limit>,
+
+    /// Foreach/Until body, or If's true-branch body, or Try's try-body —
+    /// same recursive `ActionMap` shape every time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<ActionMap>,
+
+    // ── If only ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<JsonLogicExpr>,
+    #[serde(default, rename = "else", skip_serializing_if = "Option::is_none")]
+    pub else_branch: Option<Branch>,
+
+    // ── Try only ──
+    /// Optional — see the design doc §3a. Runs only if something inside
+    /// `actions` (the try body) actually ends `Failed` at runtime, not a
+    /// JSONLogic condition decided up front (that's the concrete reason
+    /// `Try` needed its own construct instead of reusing `If`). Omitting
+    /// `catch` is legal — an unhandled `Try` just fails openly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch: Option<Branch>,
+}
+
+impl Action {
+    pub fn new(type_id: impl Into<String>) -> Self {
+        Self {
+            type_id: type_id.into(),
+            label: None,
+            inputs: serde_json::Map::new(),
+            run_after: IndexMap::new(),
+            pos: None,
+            foreach: None,
+            until: None,
+            limit: None,
+            actions: None,
+            expression: None,
+            else_branch: None,
+            catch: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Branch {
+    pub actions: ActionMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Limit {
+    pub count: u32,
+    /// ISO 8601 duration, e.g. `"PT30S"` — kept as the raw string (not
+    /// parsed into `std::time::Duration`, which has no ISO 8601 `serde`
+    /// support) since parsing it is an execution-engine concern, not this
+    /// schema layer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RunOutcome {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+/// `script` action `inputs.source` — §4's two source modes, discriminated
+/// by `kind`. The one shape the JSON Schema constrains beyond "untyped
+/// per-registry", since it's part of §4 itself, not registry-specific.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ScriptSource {
+    Inline {
+        /// `dotnet` deliberately excluded at the JSON Schema level (no
+        /// equivalent to executing a loose code string) — not re-enforced
+        /// by this Rust type, which accepts any `ScriptRuntime`; validate
+        /// against `flow.schema.json` for that constraint, don't duplicate
+        /// it silently and incompletely here.
+        runtime: ScriptRuntime,
+        code: String,
+    },
+    File {
+        /// Always resolved against the solution root, never the running
+        /// process's own working directory — direct lesson from
+        /// ForgeFlow's `uri_to_path` bug (design doc §4).
+        path: String,
+        /// Override only — normally inferred from `path`'s extension.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<ScriptRuntime>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptRuntime {
+    Python,
+    Node,
+    Dotnet,
+    Powershell,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The actual worked example from `DOCS/workflow-schema/example-flow.json`
+    /// must deserialize cleanly through these types — if the JSON Schema and
+    /// this Rust type ever drift apart, this is where it shows up first.
+    #[test]
+    fn parses_the_reference_example_flow() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("DOCS/workflow-schema/example-flow.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let def: WorkflowDefinition = serde_json::from_str(&text).expect("parse example-flow.json");
+        assert_eq!(def.id, "order-processing");
+        assert!(def.actions.contains_key("waitForApi"));
+        assert!(def.actions.contains_key("foreach"));
+
+        let foreach = &def.actions["foreach"];
+        assert_eq!(foreach.type_id, "Foreach");
+        assert!(foreach.foreach.is_some());
+        let body = foreach.actions.as_ref().expect("foreach body");
+        let try_charge = &body["tryCharge"];
+        assert_eq!(try_charge.type_id, "Try");
+        assert!(try_charge.catch.is_some());
+
+        let until = &def.actions["until"];
+        assert_eq!(until.type_id, "Until");
+        assert!(until.limit.is_some());
+
+        let if_vip = &def.actions["ifVip"];
+        assert_eq!(if_vip.type_id, "If");
+        assert!(if_vip.else_branch.is_some());
+    }
+
+    #[test]
+    fn round_trips_through_serde() {
+        let mut action = Action::new("http");
+        action
+            .inputs
+            .insert("method".into(), Value::String("GET".into()));
+        action.run_after.insert(
+            "root".into(),
+            vec![RunOutcome::Succeeded, RunOutcome::Failed],
+        );
+
+        let mut actions = ActionMap::new();
+        actions.insert("fetch".into(), action);
+        let def = WorkflowDefinition {
+            id: "x".into(),
+            name: "X".into(),
+            actions,
+            outputs: IndexMap::new(),
+        };
+
+        let json = serde_json::to_string(&def).unwrap();
+        let back: WorkflowDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(def, back);
+    }
+}

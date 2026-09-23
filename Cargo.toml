@@ -32,6 +32,7 @@ members = [
     "crates/cloud_api_client",
     "crates/cloud_api_types",
     "crates/cloud_llm_client",
+    "crates/cockpit_panel",
     "crates/codestral",
     "crates/collab",
     "crates/collab_ui",
@@ -47,13 +48,19 @@ members = [
     "crates/credentials_provider",
     "crates/dap",
     "crates/dap_adapters",
+    "crates/database_backend",
+    "crates/database_panel",
     "crates/db",
     "crates/debug_adapter_extension",
     "crates/debugger_tools",
     "crates/debugger_ui",
+    "crates/dashboard_panel",
     "crates/deepseek",
+    "crates/designer_panel",
     "crates/dev_container",
     "crates/diagnostics",
+    "crates/dotnet_backend",
+    "crates/dotnet_panel",
     "crates/docs_preprocessor",
     "crates/edit_prediction",
     "crates/edit_prediction_cli",
@@ -79,6 +86,7 @@ members = [
     "crates/feedback",
     "crates/file_finder",
     "crates/file_icons",
+    "crates/flows_panel",
     "crates/fs",
     "crates/fs_benchmarks",
     "crates/fuzzy",
@@ -91,6 +99,13 @@ members = [
     "crates/google_ai",
     "crates/gpui",
     "crates/gpui_apple",
+    "crates/gpui_base",
+    "crates/gpui_component",
+    "crates/gpui_component_assets",
+    "crates/gpui_component_fps",
+    "crates/gpui_component_macros",
+    "crates/gpui_component_story",
+    "crates/gpui_flow",
     "crates/gpui_linux",
     "crates/gpui_macos",
     "crates/gpui_macros",
@@ -145,6 +160,7 @@ members = [
     "crates/net",
     "crates/node_runtime",
     "crates/notifications",
+    "crates/nuget_manager_panel",
     "crates/oauth_callback_server",
     "crates/ollama",
     "crates/onboarding",
@@ -161,6 +177,7 @@ members = [
     "crates/picker_preview",
     "crates/platform_title_bar",
     "crates/prettier",
+    "crates/processes_panel",
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
@@ -168,6 +185,13 @@ members = [
     "crates/prompt_store",
     "crates/proto",
     "crates/proxy_handshake",
+"crates/node_backend",
+"crates/node_panel",
+"crates/npm_backend",
+"crates/npm_manager_panel",
+"crates/python_backend",
+    "crates/python_manager_panel",
+    "crates/python_panel",
     "crates/recent_projects",
     "crates/refineable",
     "crates/refineable/derive_refineable",
@@ -182,6 +206,7 @@ members = [
     "crates/sandbox",
     "crates/scheduler",
     "crates/schema_generator",
+    "crates/script_runner_panel",
     "crates/search",
     "crates/session",
     "crates/settings",
@@ -232,6 +257,7 @@ members = [
     "crates/web_search_providers",
     "crates/which_key",
     "crates/windows_resources",
+    "crates/workflow_engine",
     "crates/workspace",
     "crates/worktree",
     "crates/worktree_benchmarks",
@@ -305,6 +331,8 @@ clock = { path = "crates/clock" }
 cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
+cockpit_panel = { path = "crates/cockpit_panel" }
+dashboard_panel = { path = "crates/dashboard_panel" }
 codestral = { path = "crates/codestral" }
 collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
@@ -322,12 +350,16 @@ crashes = { path = "crates/crashes" }
 credentials_provider = { path = "crates/credentials_provider" }
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
+database_backend = { path = "crates/database_backend" }
+database_panel = { path = "crates/database_panel" }
+datalogic-rs = { version = "5", features = ["serde_json"] }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 deepseek = { path = "crates/deepseek" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
+designer_panel = { path = "crates/designer_panel" }
 dev_container = { path = "crates/dev_container" }
 diagnostics = { path = "crates/diagnostics" }
 edit_prediction = { path = "crates/edit_prediction" }
@@ -348,6 +380,7 @@ feature_flags_macros = { path = "crates/feature_flags_macros" }
 feedback = { path = "crates/feedback" }
 file_finder = { path = "crates/file_finder" }
 file_icons = { path = "crates/file_icons" }
+flows_panel = { path = "crates/flows_panel" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
@@ -359,6 +392,7 @@ go_to_line = { path = "crates/go_to_line" }
 google_ai = { path = "crates/google_ai" }
 gpui = { path = "crates/gpui", default-features = false }
 gpui_apple = { path = "crates/gpui_apple" }
+gpui_flow = { path = "crates/gpui_flow" }
 gpui_linux = { path = "crates/gpui_linux", default-features = false }
 gpui_macos = { path = "crates/gpui_macos", default-features = false }
 gpui_macros = { path = "crates/gpui_macros" }
@@ -369,6 +403,12 @@ gpui_util = { path = "crates/gpui_util" }
 gpui_web = { path = "crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
+gpui-base = { path = "crates/gpui_base" }
+gpui-component = { path = "crates/gpui_component" }
+gpui-component-assets = { path = "crates/gpui_component_assets" }
+gpui-component-macros = { path = "crates/gpui_component_macros" }
+gpui-component-story = { path = "crates/gpui_component_story" }
+gpui-fps = { path = "crates/gpui_component_fps" }
 grammars = { path = "crates/grammars" }
 html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
@@ -430,12 +470,23 @@ picker = { path = "crates/picker" }
 picker_preview = { path = "crates/picker_preview" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 prettier = { path = "crates/prettier" }
+processes_panel = { path = "crates/processes_panel" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
 project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 proxy_handshake = { path = "crates/proxy_handshake" }
+dotnet_backend = { path = "crates/dotnet_backend" }
+dotnet_panel = { path = "crates/dotnet_panel" }
+node_backend = { path = "crates/node_backend" }
+node_panel = { path = "crates/node_panel" }
+npm_backend = { path = "crates/npm_backend" }
+npm_manager_panel = { path = "crates/npm_manager_panel" }
+nuget_manager_panel = { path = "crates/nuget_manager_panel" }
+python_backend = { path = "crates/python_backend" }
+python_manager_panel = { path = "crates/python_manager_panel" }
+python_panel = { path = "crates/python_panel" }
 recent_projects = { path = "crates/recent_projects" }
 refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
@@ -449,6 +500,7 @@ rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
 sandbox = { path = "crates/sandbox" }
 scheduler = { path = "crates/scheduler" }
+script_runner_panel = { path = "crates/script_runner_panel" }
 search = { path = "crates/search" }
 session = { path = "crates/session" }
 settings = { path = "crates/settings" }
@@ -497,6 +549,7 @@ watch = { path = "crates/watch" }
 web_search = { path = "crates/web_search" }
 web_search_providers = { path = "crates/web_search_providers" }
 which_key = { path = "crates/which_key" }
+workflow_engine = { path = "crates/workflow_engine" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
@@ -680,6 +733,22 @@ livekit = { version = "0.7.32", features = ["tokio", "rustls-tls-native-roots"] 
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 lru = "0.16"
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "f1783e63a7f4eb4397bf51d4148b4895a1f7ab16" }
+
+# gpui-component (vendored 0.5.2) workspace deps
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+ropey = { version = "=2.0.0-beta.1", features = [
+    "metric_chars",
+    "metric_lines_lf",
+    "metric_utf16",
+] }
+rust-i18n = "4.2.0"
+serde_repr = "0.1"
+sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
+
+# `[patch.crates-io]` re-sources `notify` from the zed fork; this version string
+# only needs to be satisfied by that fork for `notify.workspace = true` in
+# vendored crates to resolve.
+notify = { version = "9.0.0-rc.4" }
 mach2 = "0.5"
 markup5ever_rcdom = "0.39"
 metal = "0.33"
@@ -813,6 +882,7 @@ rsa = "0.9.6"
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 rust-embed = { version = "8.11", features = ["include-exclude", "compression"] }
 rustc-hash = "2.1.0"
 rustix = { version = "1.1", features = ["fs"] }
@@ -847,6 +917,11 @@ strsim = "0.11"
 strum = { version = "0.28", features = ["derive"] }
 swash = "0.2.6"
 syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
+syntect = { version = "5.3.0", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
 sys-locale = "0.3.1"
 sysinfo = "0.39"
 take-until = "0.2.0"

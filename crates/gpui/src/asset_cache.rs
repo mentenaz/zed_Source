@@ -131,7 +131,12 @@ where
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         let load = T::load(source, cx);
-        load.inspect_err(|e| log::error!("Failed to load asset: {:?}", e))
+        // Asset load failures are non-fatal: a request that hits a dead link,
+        // an offline network, or a malformed SVG just renders as a missing/
+        // empty image in the UI. Log at debug so content loaders (e.g. the
+        // README images of the npm manager's details pane) don't spam the log
+        // with "error" lines for conditions the app recovers from by design.
+        load.inspect_err(|e| log::debug!("Failed to load asset: {:?}", e))
     }
 }
 

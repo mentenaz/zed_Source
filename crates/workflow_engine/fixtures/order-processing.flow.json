@@ -1,0 +1,498 @@
+{
+  "id": "order-processing",
+  "name": "Order Processing",
+  "actions": {
+    "waitForApi": {
+      "type": "WaitForPort",
+      "label": "Wait For API",
+      "inputs": {
+        "port": 4000,
+        "timeout_ms": 30000
+      },
+      "pos": [
+        645.0,
+        -86.0
+      ]
+    },
+    "setRegion": {
+      "type": "SetEnv",
+      "label": "Set Region",
+      "inputs": {
+        "key": "FORGE_REGION",
+        "value": "eu-west"
+      },
+      "pos": [
+        -78.0,
+        -50.0
+      ]
+    },
+    "fetchOrder": {
+      "type": "http",
+      "label": "Fetch Order",
+      "inputs": {
+        "method": "GET",
+        "url": "https://api.forge.dev/v1/order",
+        "body": "typed-body-value"
+      },
+      "runAfter": {
+        "waitForApi": [
+          "Succeeded",
+          "Failed"
+        ]
+      },
+      "pos": [
+        899.0,
+        212.0
+      ]
+    },
+    "fetchCustomer": {
+      "type": "http",
+      "label": "Fetch Customer",
+      "inputs": {
+        "method": "GET",
+        "url": "https://api.forge.dev/v1/customer"
+      },
+      "runAfter": {
+        "waitForApi": [
+          "Succeeded",
+          "Failed"
+        ]
+      },
+      "pos": [
+        239.0,
+        210.0
+      ]
+    },
+    "validate": {
+      "type": "script",
+      "label": "Validate Order",
+      "inputs": {
+        "source": {
+          "kind": "inline",
+          "runtime": "python",
+          "code": "import json,sys\ndata = json.load(sys.stdin)\nprint(json.dumps({\"valid\": data.get(\"total\", 0) > 0}))\n"
+        },
+        "args": {
+          "total": 100
+        }
+      },
+      "runAfter": {
+        "fetchOrder": [
+          "Failed"
+        ],
+        "fetchCustomer": [
+          "Succeeded"
+        ]
+      },
+      "pos": [
+        203.0,
+        413.0
+      ]
+    },
+    "handleError": {
+      "type": "sendEmail",
+      "label": "Email Ops Team",
+      "inputs": {
+        "to": "ops@forge.dev",
+        "subject": "Order validation failed",
+        "body": {
+          "var": "validate.outputs.error"
+        }
+      },
+      "runAfter": {
+        "validate": [
+          "Failed"
+        ]
+      },
+      "pos": [
+        1027.0,
+        630.0
+      ]
+    },
+    "foreach": {
+      "type": "Foreach",
+      "label": "Foreach Line Item",
+      "runAfter": {
+        "validate": [
+          "Succeeded"
+        ]
+      },
+      "pos": [
+        -166.25,
+        599.75
+      ],
+      "foreach": {
+        "or": [
+          {
+            "var": "fetchOrder.outputs.items"
+          },
+          [
+            "ITEM-1",
+            "ITEM-2"
+          ]
+        ]
+      },
+      "actions": {
+        "normalize": {
+          "type": "transform",
+          "label": "Normalize",
+          "inputs": {
+            "expression": {
+              "var": "$item"
+            }
+          },
+          "pos": [
+            20.0,
+            20.0
+          ]
+        },
+        "tryCharge": {
+          "type": "Try",
+          "label": "Try Charge Line Item",
+          "runAfter": {
+            "normalize": [
+              "Succeeded"
+            ]
+          },
+          "pos": [
+            20.0,
+            150.0
+          ],
+          "actions": {
+            "chargeItem": {
+              "type": "http",
+              "label": "Charge Line Item",
+              "inputs": {
+                "method": "POST",
+                "url": "https://api.forge.dev/v1/charge",
+                "body": {
+                  "var": "normalize.outputs.result"
+                }
+              },
+              "pos": [
+                20.0,
+                20.0
+              ]
+            }
+          },
+          "catch": {
+            "actions": {
+              "logChargeFailure": {
+                "type": "log",
+                "label": "Log Charge Failure",
+                "inputs": {
+                  "level": "error",
+                  "message": {
+                    "var": "tryCharge.outputs.error.message"
+                  }
+                },
+                "pos": [
+                  20.0,
+                  20.0
+                ]
+              },
+              "notifyChargeFailure": {
+                "type": "notify",
+                "label": "Notify Ops (Charge Failed)",
+                "inputs": {
+                  "url": "https://hooks.forge.dev/services/ops",
+                  "channel": "ops",
+                  "message": "Line item charge failed — see log"
+                },
+                "runAfter": {
+                  "logChargeFailure": [
+                    "Succeeded"
+                  ]
+                },
+                "pos": [
+                  20.0,
+                  150.0
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "until": {
+      "type": "Until",
+      "label": "Until Confirmed",
+      "runAfter": {
+        "foreach": [
+          "Succeeded",
+          "Failed"
+        ]
+      },
+      "pos": [
+        48.75,
+        1292.5
+      ],
+      "until": {
+        "==": [
+          {
+            "var": "checkDone.outputs.confirmed"
+          },
+          true
+        ]
+      },
+      "limit": {
+        "count": 3,
+        "timeout": "PT30S"
+      },
+      "actions": {
+        "pollStatus": {
+          "type": "http",
+          "label": "Poll Status",
+          "inputs": {
+            "method": "GET",
+            "url": "https://api.forge.dev/v1/order/status"
+          },
+          "pos": [
+            20.0,
+            20.0
+          ]
+        },
+        "backoff": {
+          "type": "delay",
+          "label": "Backoff",
+          "inputs": {
+            "ms": 500
+          },
+          "runAfter": {
+            "pollStatus": [
+              "Succeeded",
+              "Failed"
+            ]
+          },
+          "pos": [
+            20.0,
+            150.0
+          ]
+        },
+        "checkDone": {
+          "type": "transform",
+          "label": "Check Confirmed",
+          "inputs": {
+            "expression": {
+              "var": "pollStatus.outputs.body.confirmed"
+            }
+          },
+          "runAfter": {
+            "backoff": [
+              "Succeeded"
+            ]
+          },
+          "pos": [
+            20.0,
+            280.0
+          ]
+        },
+        "log1": {
+          "type": "log",
+          "label": "Log 1",
+          "inputs": {
+            "level": "info",
+            "message": "Polling order status"
+          },
+          "pos": [
+            220.0,
+            160.0
+          ]
+        }
+      }
+    },
+    "ifVip": {
+      "type": "If",
+      "label": "If VIP Customer",
+      "runAfter": {
+        "until": [
+          "Succeeded",
+          "Failed"
+        ]
+      },
+      "pos": [
+        -113.75,
+        1831.25
+      ],
+      "actions": {
+        "applyDiscount": {
+          "type": "transform",
+          "label": "Apply VIP Discount",
+          "inputs": {
+            "expression": {
+              "*": [
+                {
+                  "or": [
+                    {
+                      "var": "fetchOrder.outputs.total"
+                    },
+                    0
+                  ]
+                },
+                0.9
+              ]
+            }
+          },
+          "pos": [
+            20.0,
+            20.0
+          ]
+        },
+        "notifyVip": {
+          "type": "notify",
+          "label": "Notify VIP",
+          "inputs": {
+            "url": "https://hooks.forge.dev/services/vip-desk",
+            "channel": "vip-desk",
+            "message": "VIP order processed"
+          },
+          "runAfter": {
+            "applyDiscount": [
+              "Succeeded"
+            ]
+          },
+          "pos": [
+            20.0,
+            150.0
+          ]
+        },
+        "logVip": {
+          "type": "log",
+          "label": "Log VIP Applied",
+          "inputs": {
+            "level": "info",
+            "message": "VIP discount applied"
+          },
+          "runAfter": {
+            "notifyVip": [
+              "Succeeded"
+            ]
+          },
+          "pos": [
+            20.0,
+            280.0
+          ]
+        }
+      },
+      "expression": {
+        "==": [
+          {
+            "var": "fetchCustomer.outputs.tier"
+          },
+          "vip"
+        ]
+      },
+      "else": {
+        "actions": {
+          "standardPricing": {
+            "type": "transform",
+            "label": "Standard Pricing",
+            "inputs": {
+              "expression": {
+                "or": [
+                  {
+                    "var": "fetchOrder.outputs.total"
+                  },
+                  0
+                ]
+              }
+            },
+            "pos": [
+              20.0,
+              20.0
+            ]
+          },
+          "applyTax": {
+            "type": "transform",
+            "label": "Apply Tax",
+            "inputs": {
+              "expression": {
+                "*": [
+                  {
+                    "var": "standardPricing.outputs.result"
+                  },
+                  1.08
+                ]
+              }
+            },
+            "runAfter": {
+              "standardPricing": [
+                "Succeeded"
+              ]
+            },
+            "pos": [
+              20.0,
+              150.0
+            ]
+          },
+          "logStandard": {
+            "type": "log",
+            "label": "Log Standard Applied",
+            "inputs": {
+              "level": "info",
+              "message": "Standard pricing applied"
+            },
+            "runAfter": {
+              "applyTax": [
+                "Succeeded"
+              ]
+            },
+            "pos": [
+              20.0,
+              280.0
+            ]
+          },
+          "notify2": {
+            "type": "notify",
+            "label": "Notify 2",
+            "inputs": {
+              "url": "https://hooks.forge.dev/services/customer",
+              "channel": "customer",
+              "message": "Standard pricing applied"
+            },
+            "pos": [
+              220.0,
+              160.0
+            ]
+          }
+        }
+      }
+    },
+    "notifyDone": {
+      "type": "notify",
+      "label": "Notify Customer",
+      "inputs": {
+        "url": "https://hooks.forge.dev/services/customer",
+        "channel": "customer",
+        "message": "Your order has been processed"
+      },
+      "runAfter": {
+        "ifVip": [
+          "Succeeded"
+        ]
+      },
+      "pos": [
+        -21.25,
+        2566.25
+      ]
+    },
+    "logFinal": {
+      "type": "log",
+      "label": "Log Completion",
+      "inputs": {
+        "level": "info",
+        "message": "Order processing complete"
+      },
+      "runAfter": {
+        "ifVip": [
+          "Succeeded"
+        ]
+      },
+      "pos": [
+        393.75,
+        2525.0
+      ]
+    }
+  },
+  "outputs": {}
+}

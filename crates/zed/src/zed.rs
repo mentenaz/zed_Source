@@ -23,6 +23,7 @@ use assets::Assets;
 
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
+use cockpit_panel::CockpitPanel;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
 use editor::{Editor, MultiBuffer};
@@ -56,19 +57,25 @@ use migrator::migrate_keymap;
 use onboarding::multibuffer_hint::MultibufferHint;
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
+use flows_panel::FlowsPanel;
 use paths::{
     local_debug_file_relative_path, local_settings_file_relative_path,
     local_tasks_file_relative_path,
 };
+use processes_panel::ProcessesPanel;
 use project::{
     DirectoryLister, DisableAiSettings, ProjectItem,
     project_settings::{SettingsObserver, SettingsObserverEvent},
 };
 use project_panel::ProjectPanel;
+use node_panel::NodePanel;
+use dotnet_panel::DotNetPanel;
+use python_panel::PythonPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use rope::Rope;
+use script_runner_panel::ScriptRunnerPanel;
 use search::project_search::ProjectSearchBar;
 use settings::{
     BaseKeymap, DEFAULT_KEYMAP_PATH, DefaultOpenBehavior, InvalidSettingsError, KeybindSource,
@@ -781,6 +788,16 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
+        let cockpit_panel = CockpitPanel::load(workspace_handle.clone(), cx.clone());
+        let database_panel =
+            database_panel::DatabasePanel::load(workspace_handle.clone(), cx.clone());
+        let script_runner_panel =
+            ScriptRunnerPanel::load(workspace_handle.clone(), cx.clone());
+        let processes_panel = ProcessesPanel::load(workspace_handle.clone(), cx.clone());
+        let python_panel = PythonPanel::load(workspace_handle.clone(), cx.clone());
+        let node_panel = NodePanel::load(workspace_handle.clone(), cx.clone());
+        let dotnet_panel = DotNetPanel::load(workspace_handle.clone(), cx.clone());
+        let flows_panel = FlowsPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -798,6 +815,64 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             }
         }
 
+        // `node_panel` and `python_panel`'s script rows/quick actions need
+        // somewhere to send runs; `script_runner_panel` is that
+        // destination. All three are loaded above as bare futures (not yet
+        // awaited) so they can be joined with the other panels below —
+        // await them together here instead, wire node_panel/python_panel ->
+        // script_runner_panel once all three resolve, then add each to the
+        // dock the same way `add_panel_when_ready` does. Own clones of
+        // `cx`/`workspace_handle`, matching `add_panel_when_ready`'s owned
+        // `cx: AsyncWindowContext` param, so this future doesn't hold a
+        // live borrow of the outer `cx` across the `cx.clone()` calls below
+        // it in the `futures::join!`.
+        let script_runner_wiring_workspace_handle = workspace_handle.clone();
+        let mut script_runner_wiring_cx = cx.clone();
+        let script_runner_dependent_panels = async move {
+            let script_runner_panel = script_runner_panel
+                .await
+                .context("failed to load panel")
+                .log_err();
+            let node_panel = node_panel.await.context("failed to load panel").log_err();
+            let python_panel = python_panel.await.context("failed to load panel").log_err();
+
+            if let Some(script_runner_panel) = &script_runner_panel {
+                let weak_script_runner = script_runner_panel.downgrade();
+                if let Some(node_panel) = &node_panel {
+                    node_panel.update(&mut script_runner_wiring_cx, |panel, _cx| {
+                        panel.set_script_runner(weak_script_runner.clone());
+                    });
+                }
+                if let Some(python_panel) = &python_panel {
+                    python_panel.update(&mut script_runner_wiring_cx, |panel, _cx| {
+                        panel.set_script_runner(weak_script_runner.clone());
+                    });
+                }
+            }
+
+            if let Some(panel) = script_runner_panel {
+                script_runner_wiring_workspace_handle
+                    .update_in(&mut script_runner_wiring_cx, |workspace, window, cx| {
+                        workspace.add_panel(panel, window, cx);
+                    })
+                    .log_err();
+            }
+            if let Some(panel) = node_panel {
+                script_runner_wiring_workspace_handle
+                    .update_in(&mut script_runner_wiring_cx, |workspace, window, cx| {
+                        workspace.add_panel(panel, window, cx);
+                    })
+                    .log_err();
+            }
+            if let Some(panel) = python_panel {
+                script_runner_wiring_workspace_handle
+                    .update_in(&mut script_runner_wiring_cx, |workspace, window, cx| {
+                        workspace.add_panel(panel, window, cx);
+                    })
+                    .log_err();
+            }
+        };
+
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
@@ -805,6 +880,12 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(cockpit_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
+            script_runner_dependent_panels,
+            add_panel_when_ready(processes_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(dotnet_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(flows_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
@@ -2330,6 +2411,11 @@ fn reload_keymaps(cx: &mut App, mut user_key_bindings: Vec<KeyBinding>) {
         key_binding.set_meta(KeybindSource::User.meta());
     }
     cx.bind_keys(filter_disabled_ai_bindings(user_key_bindings, cx));
+    // `clear_key_bindings` above wipes out gpui-component's own default
+    // shortcuts too (Input's Backspace/Ctrl+Backspace, the inspector
+    // toggle, etc.) — they aren't part of this JSON-driven keymap, so they
+    // need re-registering every time this runs, not just once at startup.
+    gpui_component::rebind_default_keys(cx);
     reload_menus(cx);
     // On Windows, this is set in the `update_jump_list` method of the `HistoryManager`.
     #[cfg(not(target_os = "windows"))]
@@ -6171,6 +6257,10 @@ mod tests {
             git_ui::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
+            // Required before any `gpui_component`-based panel (Cockpit) renders —
+            // `cx.theme()` reads a global this sets up, and panics if it's missing.
+            gpui_component::init(cx);
+            cockpit_panel::init(cx);
             terminal_view::init(cx);
             let credentials_provider = zed_credentials_provider::global(cx);
             copilot_chat::init(

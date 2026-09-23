@@ -5,7 +5,7 @@ use crate::commit_context_menu::{
     CommitContextMenuData, CommitContextMenuSource, commit_context_menu,
 };
 use crate::commit_modal::CommitModal;
-use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
+use crate::commit_tooltip::{CommitAvatar, CommitTooltip, resolve_commit_avatar_url};
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{DeployBranchDiff, Diff, ProjectDiff};
@@ -53,6 +53,8 @@ use gpui::{
     TaskExt, TextStyle, UniformListScrollHandle, WeakEntity, actions, anchored, deferred,
     uniform_list,
 };
+use gpui_component::chart::{BarChart, LineChart};
+use gpui_component::{Sizable as _, Theme as GpuiComponentTheme, avatar::Avatar as GpuiAvatar};
 use itertools::Itertools;
 use language::{Buffer, BufferEvent, File};
 use language_model::{
@@ -86,7 +88,7 @@ use std::rc::Rc;
 use std::{sync::Arc, time::Duration};
 use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use ui::{
     ButtonLike, Checkbox, Chip, ContextMenu, ContextMenuEntry, Divider, DocumentationSide,
     ElevationIndex, IndentGuideColors, KeyBinding, PopoverMenu, PopoverMenuHandle,
@@ -162,6 +164,8 @@ actions!(
         ActivateChangesTab,
         /// Activates the History tab.
         ActivateHistoryTab,
+        /// Activates the Details tab.
+        ActivateDetailsTab,
     ]
 );
 
@@ -560,6 +564,19 @@ struct SerializedCommitMessage {
 enum GitPanelTab {
     Changes,
     History,
+    Details,
+}
+
+const DETAILS_COMMIT_WINDOW: usize = 200;
+
+#[derive(Debug, Clone)]
+enum DetailsData {
+    Loading,
+    Loaded {
+        commit_stats: Rc<[CommitData]>,
+        file_changes: Rc<[(RepoPath, usize)]>,
+    },
+    Error,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1156,6 +1173,7 @@ pub struct GitPanel {
     active_tab: GitPanelTab,
     commit_history_scroll_handle: UniformListScrollHandle,
     commit_history: CommitHistory,
+    details_data: DetailsData,
     focused_history_entry: Option<usize>,
     history_keyboard_nav: bool,
     _commit_message_buffer_subscription: Option<Subscription>,
@@ -1470,6 +1488,7 @@ impl GitPanel {
                 active_tab: GitPanelTab::Changes,
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
                 commit_history: CommitHistory::Loading,
+                details_data: DetailsData::Loading,
                 focused_history_entry: None,
                 history_keyboard_nav: false,
                 _commit_message_buffer_subscription: None,
@@ -1876,6 +1895,7 @@ impl GitPanel {
             match self.active_tab {
                 GitPanelTab::Changes => dispatch_context.add("ChangesList"),
                 GitPanelTab::History => dispatch_context.add("HistoryList"),
+                GitPanelTab::Details => {}
             }
         }
 
@@ -6947,11 +6967,24 @@ impl GitPanel {
             )
             .child(tab(
                 ElementId::Name("history-tab".into()),
-                active_tab != GitPanelTab::Changes,
+                active_tab == GitPanelTab::History,
                 false,
                 "History".into(),
                 GitPanelTab::History,
                 ActivateHistoryTab.boxed_clone(),
+            ))
+            .child(
+                Divider::vertical()
+                    .color(ui::DividerColor::BorderFaded)
+                    .h_full(),
+            )
+            .child(tab(
+                ElementId::Name("details-tab".into()),
+                active_tab == GitPanelTab::Details,
+                false,
+                "Details".into(),
+                GitPanelTab::Details,
+                ActivateDetailsTab.boxed_clone(),
             ))
     }
 
@@ -6984,6 +7017,179 @@ impl GitPanel {
             .flex_1()
             .justify_center()
             .child(Label::new(message).color(Color::Muted))
+    }
+
+    fn render_details_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().flex_1().size_full().overflow_hidden().map(|this| {
+            let has_repo = self.active_repository.is_some();
+            match &self.details_data {
+                _ if !has_repo => {
+                    this.child(Self::render_history_placeholder("No repository found"))
+                }
+                DetailsData::Error => this.child(Self::render_history_placeholder(
+                    "Failed to load commit details",
+                )),
+                DetailsData::Loading => {
+                    this.child(Self::render_history_placeholder("Loading Details…"))
+                }
+                DetailsData::Loaded {
+                    commit_stats,
+                    file_changes,
+                } if commit_stats.is_empty() => {
+                    this.child(Self::render_history_placeholder("No commits yet"))
+                }
+                DetailsData::Loaded {
+                    commit_stats,
+                    file_changes,
+                } => this.child(
+                    v_flex()
+                        .id("details-tab-content")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .p_2()
+                        .gap_4()
+                        .child(self.render_commit_activity_section(commit_stats, cx))
+                        .child(self.render_top_files_section(file_changes, cx))
+                        .child(self.render_collaborators_section(commit_stats, window, cx)),
+                ),
+            }
+        })
+    }
+
+    fn render_details_section(
+        &self,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        v_flex()
+            .gap_2()
+            .child(
+                Label::new(title.into())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(div().w_full().h(px(1.)).bg(cx.theme().colors().border_variant))
+    }
+
+    fn render_commit_activity_section(
+        &self,
+        commit_stats: &[CommitData],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut by_day: BTreeMap<Date, usize> = BTreeMap::new();
+        for stat in commit_stats {
+            if let Ok(dt) = OffsetDateTime::from_unix_timestamp(stat.commit_timestamp) {
+                *by_day.entry(dt.date()).or_insert(0) += 1;
+            }
+        }
+        let data: Vec<(SharedString, f64)> = by_day
+            .into_iter()
+            .map(|(date, count)| {
+                (
+                    format!("{}/{}", date.month() as u8, date.day()).into(),
+                    count as f64,
+                )
+            })
+            .collect();
+
+        let stroke = GpuiComponentTheme::global(cx).chart_1;
+
+        self.render_details_section("Commit Activity", cx).child(
+            div().h(px(160.)).child(
+                LineChart::new(data)
+                    .id("details-commit-activity-chart")
+                    .name("Commits")
+                    .x(|(day, _)| day.clone())
+                    .y(|(_, count)| *count)
+                    .stroke(stroke)
+                    .natural()
+                    .x_axis(true)
+                    .grid(true),
+            ),
+        )
+    }
+
+    fn render_top_files_section(
+        &self,
+        file_changes: &[(RepoPath, usize)],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let data: Vec<(SharedString, f64)> = file_changes
+            .iter()
+            .take(10)
+            .map(|(path, count)| {
+                let name = path.file_name().unwrap_or_else(|| path.as_unix_str());
+                (SharedString::from(name.to_string()), *count as f64)
+            })
+            .collect();
+
+        self.render_details_section("Most Changed Files", cx).child(
+            div().h(px(200.)).child(
+                BarChart::new(data)
+                    .id("details-top-files-chart")
+                    .name("Changes")
+                    .band(|(name, _)| name.clone())
+                    .value(|(_, count)| *count)
+                    .label_axis(true)
+                    .value_axis(true)
+                    .grid(true),
+            ),
+        )
+    }
+
+    fn render_collaborators_section(
+        &self,
+        commit_stats: &[CommitData],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut order: Vec<(Oid, SharedString, SharedString, usize)> = Vec::new();
+        let mut index_by_email: HashMap<SharedString, usize> = HashMap::default();
+        for stat in commit_stats {
+            match index_by_email.get(&stat.author_email) {
+                Some(&ix) => order[ix].3 += 1,
+                None => {
+                    index_by_email.insert(stat.author_email.clone(), order.len());
+                    order.push((stat.sha, stat.author_name.clone(), stat.author_email.clone(), 1));
+                }
+            }
+        }
+        order.sort_by(|a, b| b.3.cmp(&a.3));
+
+        let remote = self.git_remote(cx);
+
+        self.render_details_section("Collaborators", cx).child(
+            h_flex().flex_wrap().gap_3().children(order.into_iter().map(
+                |(sha, author_name, author_email, commit_count)| {
+                    let sha: SharedString = sha.to_string().into();
+                    let avatar_url = resolve_commit_avatar_url(
+                        sha,
+                        Some(author_email.clone()),
+                        remote.as_ref(),
+                        window,
+                        cx,
+                    );
+
+                    h_flex()
+                        .id(ElementId::Name(
+                            format!("collaborator-{author_email}").into(),
+                        ))
+                        .gap_1()
+                        .child(
+                            avatar_url
+                                .map(|url| GpuiAvatar::new().src(url).name(author_name.clone()))
+                                .unwrap_or_else(|| GpuiAvatar::new().name(author_name.clone()))
+                                .with_size(px(24.)),
+                        )
+                        .child(
+                            Label::new(commit_count.to_string())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .tooltip(Tooltip::text(format!("{author_name} · {commit_count} commits")))
+                },
+            )),
+        )
     }
 
     fn commit_history_entries(&self) -> &[CommitHistoryEntry] {
@@ -7095,6 +7301,15 @@ impl GitPanel {
         self.set_active_tab(GitPanelTab::History, window, cx);
     }
 
+    fn activate_details_tab(
+        &mut self,
+        _: &ActivateDetailsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_active_tab(GitPanelTab::Details, window, cx);
+    }
+
     fn set_active_tab(&mut self, tab: GitPanelTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab == tab {
             return;
@@ -7105,12 +7320,48 @@ impl GitPanel {
             GitPanelTab::History => {
                 self.load_commit_history(cx);
             }
+            GitPanelTab::Details => {
+                self.load_details_data(cx);
+            }
             GitPanelTab::Changes => {
                 self.set_commit_history(CommitHistory::Loading, cx);
                 self._repo_subscriptions.clear();
             }
         }
         cx.notify();
+    }
+
+    fn load_details_data(&mut self, cx: &mut Context<Self>) {
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+
+        self.details_data = DetailsData::Loading;
+        cx.notify();
+
+        let stats_rx = active_repository
+            .update(cx, |repository, _| {
+                repository.recent_commit_stats(DETAILS_COMMIT_WINDOW)
+            });
+        let files_rx = active_repository.update(cx, |repository, _| {
+            repository.file_change_frequency(DETAILS_COMMIT_WINDOW)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let (stats, files) = futures::join!(stats_rx, files_rx);
+            this.update(cx, |this, cx| {
+                this.details_data = match (stats, files) {
+                    (Ok(Ok(commit_stats)), Ok(Ok(file_changes))) => DetailsData::Loaded {
+                        commit_stats: commit_stats.into(),
+                        file_changes: file_changes.into(),
+                    },
+                    _ => DetailsData::Error,
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn preload_commit_history(&mut self, cx: &mut Context<Self>) {
@@ -9024,6 +9275,7 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::activate_changes_tab))
             .on_action(cx.listener(Self::activate_history_tab))
+            .on_action(cx.listener(Self::activate_details_tab))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
@@ -9060,6 +9312,7 @@ impl Render for GitPanel {
                                 this.children(self.render_previous_commit(window, cx))
                             }),
                         GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
+                        GitPanelTab::Details => this.child(self.render_details_tab(window, cx)),
                     })
                     .into_any_element(),
             )

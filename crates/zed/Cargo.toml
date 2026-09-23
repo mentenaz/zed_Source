@@ -88,6 +88,7 @@ clap.workspace = true
 cli.workspace = true
 client.workspace = true
 clock = { workspace = true, optional = true }
+cockpit_panel.workspace = true
 codestral.workspace = true
 collab_ui.workspace = true
 collections.workspace = true
@@ -98,12 +99,16 @@ copilot_chat.workspace = true
 copilot_ui.workspace = true
 crashes.workspace = true
 dap_adapters.workspace = true
+dashboard_panel.workspace = true
+database_panel.workspace = true
 db.workspace = true
 debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
 debugger_ui.workspace = true
+designer_panel.workspace = true
 dev_container.workspace = true
 diagnostics.workspace = true
+dotnet_panel.workspace = true
 editor.workspace = true
 encoding_selector.workspace = true
 env_logger.workspace = true
@@ -113,6 +118,7 @@ extensions_ui.workspace = true
 feature_flags.workspace = true
 feedback.workspace = true
 file_finder.workspace = true
+flows_panel.workspace = true
 fs.workspace = true
 futures.workspace = true
 git.workspace = true
@@ -121,6 +127,8 @@ git_ui = { workspace = true, features = ["call"] }
 git_ui_core.workspace = true
 go_to_line.workspace = true
 gpui = { workspace = true, features = ["profiler", "stacker"] }
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
 gpui_platform = { workspace = true, features = [
     "screen-capture",
     "font-kit",
@@ -167,6 +175,9 @@ migrator.workspace = true
 mimalloc = { version = "0.1", optional = true }
 miniprofiler_ui.workspace = true
 node_runtime.workspace = true
+node_panel.workspace = true
+npm_manager_panel.workspace = true
+nuget_manager_panel.workspace = true
 notifications.workspace = true
 onboarding.workspace = true
 outline.workspace = true
@@ -174,12 +185,15 @@ outline_panel.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true
+processes_panel.workspace = true
 profiling.workspace = true
 project.workspace = true
 project_panel.workspace = true
 project_symbols.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
+python_manager_panel.workspace = true
+python_panel.workspace = true
 recent_projects.workspace = true
 release_channel.workspace = true
 remote.workspace = true
@@ -188,6 +202,7 @@ reqwest.workspace = true
 reqwest_client.workspace = true
 rope.workspace = true
 sandbox.workspace = true
+script_runner_panel.workspace = true
 search.workspace = true
 serde.workspace = true
 serde_json.workspace = true

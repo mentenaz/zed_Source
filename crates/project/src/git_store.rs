@@ -7243,6 +7243,38 @@ impl Repository {
         )
     }
 
+    pub fn recent_commit_stats(
+        &mut self,
+        max_commits: usize,
+    ) -> oneshot::Receiver<Result<Vec<CommitData>>> {
+        self.send_job("recent_commit_stats", None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.recent_commit_stats(max_commits).await
+                }
+                RepositoryState::Remote(_) => {
+                    anyhow::bail!("recent commit stats is only supported locally")
+                }
+            }
+        })
+    }
+
+    pub fn file_change_frequency(
+        &mut self,
+        max_commits: usize,
+    ) -> oneshot::Receiver<Result<Vec<(RepoPath, usize)>>> {
+        self.send_job("file_change_frequency", None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.file_change_frequency(max_commits).await
+                }
+                RepositoryState::Remote(_) => {
+                    anyhow::bail!("file change frequency is only supported locally")
+                }
+            }
+        })
+    }
+
     pub fn get_graph_data(
         &self,
         log_source: LogSource,

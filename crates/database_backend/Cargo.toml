@@ -1,0 +1,24 @@
+[package]
+name = "database_backend"
+description = "Database panel backend — connection lifecycle, credentials, and schema metadata for SQLite, PostgreSQL, MySQL/MariaDB, and MSSQL."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/database_backend.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+credentials_provider.workspace = true
+gpui.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zed_credentials_provider.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -198,6 +198,104 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 }
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
+/// Combines Zed's own embedded assets with `gpui-component`'s icon set (used
+/// by the Cockpit panel), trying Zed's assets first and falling back to
+/// gpui-component's for anything Zed doesn't have — e.g. `icons/chevron-down.svg`.
+struct AppAssets;
+
+impl gpui::AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Ok(Some(data)) = Assets.load(path) {
+            return Ok(Some(data));
+        }
+        gpui_component_assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        let mut entries = Assets.list(path)?;
+        entries.extend(gpui_component_assets::Assets.list(path)?);
+        Ok(entries)
+    }
+}
+
+/// Bridges Zed's active theme into `gpui-component`'s separate theme
+/// system, which `gpui_component::init` otherwise leaves on its own
+/// hardcoded light default with no awareness of Zed's theme at all.
+///
+/// Only maps the core tones (background/foreground/border/accent/status
+/// colors, chrome backgrounds, chart colors) that `gpui-component` widgets
+/// actually read for a Zed-shaped look; anything more niche (table/list/tab
+/// row states, sliders, switches, ...) keeps whichever of gpui-component's
+/// own light/dark presets `Theme::change` selected below, since Zed has no
+/// equivalent token for those to borrow from.
+///
+/// Call once at startup, and again on every settings change (theme switches
+/// route through `SettingsStore`) — see the `cx.observe_global` call at this
+/// function's call site.
+fn sync_gpui_component_theme(cx: &mut App) {
+    let zed_theme = theme::ActiveTheme::theme(cx).clone();
+    let colors = zed_theme.colors().clone();
+    let status = zed_theme.status().clone();
+    let accents = zed_theme.accents().0.clone();
+    let accent = |index: usize| accents.get(index).copied().unwrap_or(colors.text_accent);
+
+    let mode = match zed_theme.appearance {
+        theme::Appearance::Light => gpui_component::ThemeMode::Light,
+        theme::Appearance::Dark => gpui_component::ThemeMode::Dark,
+    };
+    gpui_component::Theme::change(mode, None, cx);
+
+    let theme = gpui_component::Theme::global_mut(cx);
+    theme.background = colors.background;
+    theme.foreground = colors.text;
+    theme.border = colors.border;
+    theme.muted = colors.element_background;
+    theme.muted_foreground = colors.text_muted;
+    theme.primary = colors.text_accent;
+    theme.danger = status.error;
+    theme.warning = status.warning;
+    theme.success = status.success;
+    theme.info = status.info;
+    theme.sidebar = colors.panel_background;
+    theme.sidebar_foreground = colors.text;
+    theme.sidebar_border = colors.border;
+    theme.popover = colors.elevated_surface_background;
+    theme.popover_foreground = colors.text;
+    theme.input = colors.element_background;
+    theme.ring = colors.border_focused;
+    theme.selection = colors.element_selection_background;
+    theme.link = colors.text_accent;
+    theme.scrollbar = colors.scrollbar_track_background;
+    theme.scrollbar_thumb = colors.scrollbar_thumb_background;
+    theme.scrollbar_thumb_hover = colors.scrollbar_thumb_hover_background;
+    theme.title_bar = colors.title_bar_background;
+    theme.title_bar_border = colors.border;
+    theme.status_bar = colors.status_bar_background;
+    theme.status_bar_border = colors.border;
+    theme.tab = colors.tab_inactive_background;
+    theme.tab_active = colors.tab_active_background;
+    theme.tab_bar = colors.tab_bar_background;
+    theme.window_border = colors.border;
+    theme.chart_1 = accent(0);
+    theme.chart_2 = accent(1);
+    theme.chart_3 = accent(2);
+    theme.chart_4 = accent(3);
+    theme.chart_5 = accent(4);
+    theme.chart_bullish = status.success;
+    theme.chart_bearish = status.error;
+
+    // `theme.tokens` is a *snapshot* of `theme.colors` taken once by
+    // `Theme::change`/`Theme::from` (`ThemeTokens::from(colors)`) — it isn't
+    // live-derived, so the field-by-field overrides above (written through
+    // `Theme`'s `Deref<Target = ThemeColor>` to `theme.colors`) leave it
+    // stale at gpui-component's own built-in preset. Components that read
+    // `cx.theme().tokens.*` directly (e.g. `gpui_component::sidebar::Sidebar`,
+    // used by the `Settings`-page widgets like the npm manager panel) would
+    // otherwise never pick up Zed's actual theme colors. Recompute it from
+    // the now-updated colors so both surfaces agree.
+    theme.tokens = gpui_component::ThemeTokens::from(&theme.colors);
+}
+
 fn main() {
     STARTUP_TIME.get_or_init(|| Instant::now());
 
@@ -340,7 +438,7 @@ fn main() {
     check_for_conpty_dll();
 
     let app = build_application()
-        .with_assets(Assets)
+        .with_assets(AppAssets)
         .with_restart_arguments(restart_arguments);
 
     let app_db = db::AppDatabase::new();
@@ -747,6 +845,25 @@ fn main() {
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
+        // Required before any `gpui_component`-based panel (Cockpit) renders —
+        // `cx.theme()` reads a global this sets up, and panics if it's missing.
+        gpui_component::init(cx);
+        sync_gpui_component_theme(cx);
+        cx.observe_global::<SettingsStore>(|cx| sync_gpui_component_theme(cx))
+            .detach();
+        cockpit_panel::init(cx);
+        database_panel::init(cx);
+        script_runner_panel::init(cx);
+        processes_panel::init(cx);
+        python_panel::init(cx);
+        python_manager_panel::init(cx);
+        node_panel::init(cx);
+        npm_manager_panel::init(cx);
+        dotnet_panel::init(cx);
+        nuget_manager_panel::init(cx);
+        flows_panel::init(cx);
+        designer_panel::init(cx);
+        dashboard_panel::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);

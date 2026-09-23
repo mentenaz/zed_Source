@@ -1,0 +1,22 @@
+[package]
+name = "dotnet_panel"
+description = ".NET SDK/runtime panel, built on gpui-component."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/dotnet_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+dotnet_backend.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+nuget_manager_panel.workspace = true
+script_runner_panel.workspace = true
+sysinfo.workspace = true
+ui.workspace = true
+workspace.workspace = true

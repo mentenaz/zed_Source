@@ -1626,6 +1626,32 @@ impl GitRepository for FakeGitRepository {
         async move { Ok(vec![FileHistoryChangedFileSets::default(); paths.len()]) }.boxed()
     }
 
+    fn recent_commit_stats(&self, max_commits: usize) -> BoxFuture<'_, Result<Vec<CommitData>>> {
+        let fs = self.fs.clone();
+        let dot_git_path = self.dot_git_path.clone();
+        async move {
+            fs.with_git_state(&dot_git_path, false, |state| {
+                state
+                    .graph_commits
+                    .iter()
+                    .take(max_commits)
+                    .filter_map(|commit| match state.commit_data.get(&commit.sha)? {
+                        FakeCommitDataEntry::Success(data) => Some(data.clone()),
+                        FakeCommitDataEntry::Fail(_) => None,
+                    })
+                    .collect()
+            })
+        }
+        .boxed()
+    }
+
+    fn file_change_frequency(
+        &self,
+        _max_commits: usize,
+    ) -> BoxFuture<'_, Result<Vec<(RepoPath, usize)>>> {
+        async move { Ok(Vec::new()) }.boxed()
+    }
+
     fn commit_data_reader(&self) -> Result<CommitDataReader> {
         let fs = self.fs.clone();
         let dot_git_path = self.dot_git_path.clone();

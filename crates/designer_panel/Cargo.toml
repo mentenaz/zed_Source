@@ -1,0 +1,26 @@
+[package]
+name = "designer_panel"
+description = "The workflow Designer: a gpui-flow canvas tab for viewing, editing, and running .flow.json workflows."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/designer_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+db.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui_flow.workspace = true
+indexmap.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+workflow_engine.workspace = true
+workspace.workspace = true
