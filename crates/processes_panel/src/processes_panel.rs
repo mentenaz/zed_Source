@@ -790,19 +790,19 @@ impl Panel for ProcessesPanel {
     }
 
     fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Right
+        DockPosition::Bottom
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Right)
+        matches!(position, DockPosition::Bottom)
     }
 
     fn set_position(&mut self, _position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
-        // Fixed to the right dock — see `position_is_valid`.
+        // Fixed to the bottom dock — see `position_is_valid`.
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        gpui::px(340.)
+        gpui::px(300.)
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
