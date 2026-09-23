@@ -21,17 +21,20 @@
 //! form is a natural follow-up, not required to make editing usable.
 
 mod project_item;
+mod persistence;
 mod run_results;
 mod run_state;
 mod workflow_json;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
+use editor::Editor;
 use gpui::{
     Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
@@ -54,6 +57,7 @@ use gpui_flow::{
     Controls, FlowEdge, FlowGraph, FlowNode, FlowPoint, FlowState, HandleDef, HandlePosition,
     Minimap, NodeId,
 };
+use notifications::status_toast::StatusToast;
 use project::Project;
 use run_state::{ActionRun, RunLogLine, RunPhase, RunState, SharedRunState};
 use workflow_engine::{
@@ -61,7 +65,7 @@ use workflow_engine::{
     ActionHistoryRecord, RunHistoryEntry, RunOutcome, RunStatus, StatusSink, WorkflowDefinition,
     run_workflow,
 };
-use workspace::{OpenOptions, Pane, ProjectItem, Workspace, item::Item};
+use workspace::{ItemId, Pane, ProjectItem, SerializableItem, Workspace, WorkspaceId, item::Item};
 
 pub use project_item::FlowFile;
 pub use workflow_json::{apply_saved_layout, auto_layout, load, save};
@@ -120,24 +124,68 @@ pub struct ViewRaw(PathBuf);
 #[action(namespace = designer_panel, no_json)]
 pub struct ViewRunResults(PathBuf);
 
-/// Registers the "View Raw" and "Results" handlers on every workspace. Call
-/// once at app startup, alongside the other panels' `init` functions — and
-/// see `DesignerPanel::for_project_item`'s doc comment for why `.flow.json`
-/// opening as the Designer doesn't need a matching registration here (it's
-/// wired via `workspace::register_project_item` instead).
+/// Fired by `DesignerPanel::build` when a flow fails to parse. Carries just
+/// the flow's display name — dispatched via `window.dispatch_action` rather
+/// than resolved through `self.workspace` (which is `None` for designers
+/// opened via `ProjectItem::for_project_item`, e.g. double-click/quick-open
+/// — exactly the case that needs this toast most) so it reaches the
+/// workspace-wide handler below regardless of how the designer was opened.
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = designer_panel, no_json)]
+pub struct ShowInvalidFlowToast(String);
+
+/// Registers the "View Raw", "Results", and invalid-flow-toast handlers on
+/// every workspace. Call once at app startup, alongside the other panels'
+/// `init` functions — and see `DesignerPanel::for_project_item`'s doc
+/// comment for why `.flow.json` opening as the Designer doesn't need a
+/// matching registration here (it's wired via
+/// `workspace::register_project_item` instead).
 pub fn init(cx: &mut gpui::App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, action: &ViewRaw, window, cx| {
-            workspace
-                .open_abs_path(action.0.clone(), OpenOptions::default(), window, cx)
-                .detach_and_log_err(cx);
+            // Deliberately not `workspace.open_abs_path` — that still routes
+            // through `ProjectItemRegistry`, which re-claims `.flow.json`
+            // via `FlowFile::try_open` and just reopens the Designer canvas
+            // again. Building the plain-text `Editor` directly and adding
+            // it to the pane is what actually bypasses that routing.
+            let abs_path = action.0.clone();
+            let project = workspace.project().clone();
+            let Some(project_path) = project.read(cx).project_path_for_absolute_path(&abs_path, cx)
+            else {
+                log::warn!("View Raw: {abs_path:?} isn't inside a worktree of this project");
+                return;
+            };
+
+            cx.spawn_in(window, async move |workspace, cx| {
+                let buffer = project
+                    .update(cx, |project, cx| project.open_buffer(project_path, cx))
+                    .await?;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    let editor =
+                        cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
+                    workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+                })
+            })
+            .detach_and_log_err(cx);
         });
         workspace.register_action(|workspace, action: &ViewRunResults, window, cx| {
             run_results::RunResults::open(workspace, &action.0, window, cx);
         });
+        workspace.register_action(|workspace, action: &ShowInvalidFlowToast, _window, cx| {
+            let flow_name = action.0.clone();
+            let status_toast = StatusToast::new(
+                format!(
+                    "{flow_name}\nInvalid flow configuration — please fix the JSON and try again"
+                ),
+                cx,
+                |this, _cx| this.icon(ui::Icon::new(ui::IconName::Warning).color(ui::Color::Error)),
+            );
+            workspace.toggle_status_toast(status_toast, cx);
+        });
     })
     .detach();
     workspace::register_project_item::<DesignerPanel>(cx);
+    workspace::register_serializable_item::<DesignerPanel>(cx);
 }
 
 fn node_label(node: &FlowNode) -> String {
@@ -236,6 +284,25 @@ struct PropertyRow {
     _sub: Subscription,
 }
 
+/// The content-dependent half of `DesignerPanel`'s state — everything that
+/// comes from parsing and laying out the flow's own JSON, as opposed to
+/// panel-lifetime state (run history, theme subscription, property-editor
+/// inputs) that should survive a reload untouched. Built once by
+/// `DesignerPanel::load` at construction, and rebuilt by the same function
+/// whenever the file-watcher (`watch_file`) detects the file changed on
+/// disk out from under an already-open tab.
+struct LoadedFlow {
+    error: Option<String>,
+    flow_id: String,
+    flow_name: String,
+    state: Entity<FlowState>,
+    context_target: Rc<RefCell<ContextTarget>>,
+    flow: Entity<FlowGraph>,
+    minimap: Entity<Minimap>,
+    controls: Entity<Controls>,
+    state_sub: Subscription,
+}
+
 pub struct DesignerPanel {
     focus_handle: FocusHandle,
     /// Not read yet — reserved for wiring `flows_panel::persistence::DesignerDb`
@@ -246,6 +313,21 @@ pub struct DesignerPanel {
     /// `Some` when opened via `flows_panel`'s "Graph" button, which has it.
     #[allow(dead_code)]
     workspace: Option<WeakEntity<Workspace>>,
+    /// Used to resolve this flow's worktree for `watch_file`, and to build
+    /// the "Raw" tab's `Editor` — see `ViewRaw`'s handler in `init`.
+    project: Entity<Project>,
+    /// The exact file content last used to (re)build the canvas — compared
+    /// against on every file-watcher event so a reload triggered by this
+    /// panel's own "Save" (or a redundant duplicate filesystem event for one
+    /// logical write) is a no-op instead of a rebuild/flicker. Updated both
+    /// on load and immediately after every successful save.
+    last_raw: String,
+    _file_watch: Option<Subscription>,
+    /// Debounce handle for `watch_file`'s reload — assigning a new `Task`
+    /// here drops (cancels) any still-pending one, which is what coalesces
+    /// several rapid filesystem events for one logical external write into
+    /// a single `reload_from_disk` call.
+    _reload_debounce: gpui::Task<()>,
     path: PathBuf,
     root: PathBuf,
     flow_id: String,
@@ -294,10 +376,11 @@ impl DesignerPanel {
         path: PathBuf,
         root: PathBuf,
         workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
-        cx.new(|cx| Self::build(path, root, Some(workspace), window, cx))
+        cx.new(|cx| Self::build(path, root, Some(workspace), project, window, cx))
     }
 
     /// Reads and builds the canvas state for `path`, applying its
@@ -312,10 +395,75 @@ impl DesignerPanel {
         path: PathBuf,
         root: PathBuf,
         workspace: Option<WeakEntity<Workspace>>,
+        project: Entity<Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (mut def, error) = match std::fs::read_to_string(&path)
+        let (last_raw, loaded) = Self::load_from_raw(&path, window, cx);
+
+        if loaded.error.is_some() {
+            window.dispatch_action(Box::new(ShowInvalidFlowToast(loaded.flow_name.clone())), cx);
+        }
+
+        let _theme_sub = cx.observe_global::<Theme>(|this: &mut Self, cx| {
+            this.sync_canvas_colors(cx);
+        });
+        let new_prop_key = cx.new(|cx| InputState::new(window, cx).placeholder("property"));
+        let new_prop_value = cx.new(|cx| InputState::new(window, cx).placeholder("value"));
+
+        let run_state: SharedRunState = Arc::new(Mutex::new(RunState::default()));
+        run_state::register_run_state(path.clone(), run_state.clone());
+
+        let mut this = Self {
+            focus_handle: cx.focus_handle(),
+            workspace,
+            project,
+            last_raw,
+            _file_watch: None,
+            _reload_debounce: gpui::Task::ready(()),
+            path,
+            root,
+            flow_id: loaded.flow_id,
+            flow_name: loaded.flow_name,
+            state: loaded.state,
+            context_target: loaded.context_target,
+            flow: loaded.flow,
+            minimap: loaded.minimap,
+            controls: loaded.controls,
+            label_input: None,
+            _label_sub: None,
+            property_rows: Vec::new(),
+            selected_node_id: None,
+            new_prop_key,
+            new_prop_value,
+            running: false,
+            status: None,
+            error: loaded.error,
+            run_state,
+            run_snapshot: RunState::default(),
+            run_revision: 0,
+            show_log: false,
+            log_scroll: ScrollHandle::default(),
+            _state_sub: loaded.state_sub,
+            _theme_sub,
+        };
+        this.watch_file(window, cx);
+        this
+    }
+
+    /// Reads `path` and builds the content-dependent half of the panel's
+    /// state — everything `build` needs for a fresh tab, and everything
+    /// `reload_from_disk` (the file-watcher's callback) needs to refresh an
+    /// already-open one. Same infallible-by-design contract as `build`
+    /// itself: a missing/unreadable/invalid file still produces a `LoadedFlow`
+    /// (empty canvas, `error` set), never a `Result` the caller has to
+    /// unwind through. Returns the exact raw file content alongside it (or
+    /// `""` if the file couldn't be read) so callers can track `last_raw`.
+    fn load_from_raw(path: &Path, _window: &mut Window, cx: &mut Context<Self>) -> (String, LoadedFlow) {
+        let raw_result = std::fs::read_to_string(path);
+        let raw = raw_result.as_deref().unwrap_or("").to_string();
+
+        let (mut def, error) = match raw_result
             .map_err(|e| format!("couldn't read {}: {e}", path.display()))
             .and_then(|raw| {
                 serde_json::from_str::<WorkflowDefinition>(&raw)
@@ -342,14 +490,14 @@ impl DesignerPanel {
         };
 
         if error.is_none() {
-            if let Some(layout) = workflow_engine::layout::load(&path) {
+            if let Some(layout) = workflow_engine::layout::load(path) {
                 workflow_json::apply_saved_layout(&mut def, &layout);
             }
             let newly_placed = workflow_json::auto_layout(&mut def);
             if !newly_placed.positions.is_empty() {
-                let mut layout = workflow_engine::layout::load(&path).unwrap_or_default();
+                let mut layout = workflow_engine::layout::load(path).unwrap_or_default();
                 layout.positions.extend(newly_placed.positions);
-                let _ = workflow_engine::layout::save(&path, &layout);
+                let _ = workflow_engine::layout::save(path, &layout);
             }
         }
 
@@ -400,46 +548,95 @@ impl DesignerPanel {
 
         let flow_id = def.id.clone();
         let flow_name = def.name.clone();
+        let state_sub = cx.observe(&state, |_this, _state, cx| cx.notify());
 
-        let _state_sub = cx.observe(&state, |_this, _state, cx| cx.notify());
-        let _theme_sub = cx.observe_global::<Theme>(|this: &mut Self, cx| {
-            this.sync_canvas_colors(cx);
-        });
-        let new_prop_key = cx.new(|cx| InputState::new(window, cx).placeholder("property"));
-        let new_prop_value = cx.new(|cx| InputState::new(window, cx).placeholder("value"));
+        (
+            raw,
+            LoadedFlow {
+                error,
+                flow_id,
+                flow_name,
+                state,
+                context_target,
+                flow,
+                minimap,
+                controls,
+                state_sub,
+            },
+        )
+    }
 
-        let run_state: SharedRunState = Arc::new(Mutex::new(RunState::default()));
-        run_state::register_run_state(path.clone(), run_state.clone());
-
-        Self {
-            focus_handle: cx.focus_handle(),
-            workspace,
-            path,
-            root,
-            flow_id,
-            flow_name,
-            state,
-            context_target,
-            flow,
-            minimap,
-            controls,
-            label_input: None,
-            _label_sub: None,
-            property_rows: Vec::new(),
-            selected_node_id: None,
-            new_prop_key,
-            new_prop_value,
-            running: false,
-            status: None,
-            error,
-            run_state,
-            run_snapshot: RunState::default(),
-            run_revision: 0,
-            show_log: false,
-            log_scroll: ScrollHandle::default(),
-            _state_sub,
-            _theme_sub,
+    /// Re-reads `self.path` and, if its content genuinely differs from
+    /// `self.last_raw`, replaces the content-dependent half of this panel's
+    /// state with a freshly parsed/laid-out one. Called by `watch_file`'s
+    /// debounced file-change handler. The `last_raw` comparison is what
+    /// keeps this from re-triggering on this panel's own "Save" (which
+    /// updates `last_raw` immediately after writing, before the filesystem
+    /// event even arrives) or on duplicate events for one logical write —
+    /// see `LoadedFlow`'s doc comment.
+    fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (raw, loaded) = Self::load_from_raw(&self.path, window, cx);
+        if raw == self.last_raw {
+            return;
         }
+        self.last_raw = raw;
+        self.error = loaded.error;
+        self.flow_id = loaded.flow_id;
+        self.flow_name = loaded.flow_name;
+        self.state = loaded.state;
+        self.context_target = loaded.context_target;
+        self.flow = loaded.flow;
+        self.minimap = loaded.minimap;
+        self.controls = loaded.controls;
+        self._state_sub = loaded.state_sub;
+        if self.error.is_some() {
+            window.dispatch_action(Box::new(ShowInvalidFlowToast(self.flow_name.clone())), cx);
+        }
+        cx.notify();
+    }
+
+    /// Subscribes to this flow's worktree so external edits (the "Raw" tab,
+    /// or any tool outside Zed) refresh the canvas automatically instead of
+    /// requiring a manual close/reopen. Debounces briefly to coalesce a
+    /// multi-step external write into one reload, then re-reads and applies
+    /// via `reload_from_disk` (whose `last_raw` check is what prevents this
+    /// panel's own "Save" from re-triggering itself). No-ops quietly if
+    /// `self.path` isn't inside a worktree of `self.project` (e.g. a flow
+    /// opened from outside any open project).
+    fn watch_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project_path) = self.project.read(cx).find_project_path(&self.path, cx) else {
+            return;
+        };
+        let Some(worktree) = self
+            .project
+            .read(cx)
+            .worktree_for_id(project_path.worktree_id, cx)
+        else {
+            return;
+        };
+
+        self._file_watch = Some(cx.subscribe_in(&worktree, window, {
+            let watched_path = project_path.path.clone();
+            move |this, _worktree, event, window, cx| {
+                let worktree::Event::UpdatedEntries(changes) = event else {
+                    return;
+                };
+                let matched = changes.iter().any(|(entry_path, _, change)| {
+                    *entry_path == watched_path && !matches!(change, worktree::PathChange::Removed)
+                });
+                if !matched {
+                    return;
+                }
+
+                this._reload_debounce = cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    this.update_in(cx, |this, window, cx| this.reload_from_disk(window, cx))
+                        .ok();
+                });
+            }
+        }));
     }
 
     /// Re-applies the canvas chrome from the active theme. The node renderers
@@ -591,11 +788,16 @@ impl DesignerPanel {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(&self.path, json) {
+        if let Err(e) = std::fs::write(&self.path, &json) {
             self.error = Some(format!("Couldn't write {}: {e}", self.path.display()));
             cx.notify();
             return;
         }
+        // Update before the file-watcher's event even arrives — that's what
+        // makes `reload_from_disk`'s `last_raw` comparison treat this save
+        // as a no-op instead of an unwanted rebuild/flicker right after
+        // saving. See `LoadedFlow`'s doc comment.
+        self.last_raw = json;
         if let Err(e) = workflow_engine::layout::save(&self.path, &layout) {
             self.error = Some(format!("Saved the flow, but couldn't save its layout: {e}"));
             cx.notify();
@@ -1055,7 +1257,17 @@ impl DesignerPanel {
                             .label("Run")
                             .on_click(cx.listener(|this, _, window, cx| this.on_run_click(window, cx)))
                             .into_any_element()
-                    }),
+                    })
+                    .child(
+                        Button::new("designer-view-raw")
+                            .ghost()
+                            .xsmall()
+                            .label("Raw")
+                            .tooltip("Open the flow's underlying JSON as text")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.dispatch_action(Box::new(ViewRaw(this.path.clone())), cx);
+                            })),
+                    ),
             )
     }
 
@@ -1268,7 +1480,75 @@ impl ProjectItem for DesignerPanel {
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
             .unwrap_or_default();
 
-        Self::build(path, root, None, window, cx)
+        Self::build(path, root, None, project, window, cx)
+    }
+}
+
+impl SerializableItem for DesignerPanel {
+    fn serialized_item_kind() -> &'static str {
+        "designer_flow"
+    }
+
+    fn deserialize(
+        project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        workspace_id: WorkspaceId,
+        item_id: ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<Entity<Self>>> {
+        let db = persistence::DesignerDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let path = db
+                .flow_path(item_id, workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("No Designer flow path found for item"))?;
+            let path = PathBuf::from(path);
+            let (worktree, _) = project
+                .update(cx, |project, cx| {
+                    project.find_or_create_worktree(path.clone(), false, cx)
+                })
+                .await
+                .context("Flow path is not inside a project worktree")?;
+            let root = worktree.read_with(cx, |worktree, _| worktree.abs_path().to_path_buf());
+
+            cx.update(|window, cx| {
+                let workspace = workspace
+                    .upgrade()
+                    .ok_or_else(|| anyhow::anyhow!("Workspace released before Designer restore"))?;
+                Ok(cx.new(|cx| {
+                    Self::build(path, root, Some(workspace.downgrade()), project, window, cx)
+                }))
+            })?
+        })
+    }
+
+    fn cleanup(
+        workspace_id: WorkspaceId,
+        alive_items: Vec<ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<()>> {
+        let db = persistence::DesignerDb::global(cx);
+        cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: ItemId,
+        _closing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<anyhow::Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let path = self.path.to_string_lossy().into_owned();
+        let db = persistence::DesignerDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_flow(item_id, workspace_id, path).await
+        }))
+    }
+
+    fn should_serialize(&self, _event: &Self::Event) -> bool {
+        false
     }
 }
 

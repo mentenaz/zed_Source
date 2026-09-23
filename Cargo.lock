@@ -5242,16 +5242,20 @@ dependencies = [
  "anyhow",
  "chrono",
  "db",
+ "editor",
  "gpui",
  "gpui-component",
  "gpui_flow",
  "indexmap 2.14.0",
+ "log",
+ "notifications",
  "project",
  "serde",
  "serde_json",
  "ui",
  "workflow_engine",
  "workspace",
+ "worktree",
 ]
 
 [[package]]

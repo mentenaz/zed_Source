@@ -16,6 +16,7 @@ const SCHEMA_URI_PREFIX: &str = "zed://schemas/";
 
 const TSCONFIG_SCHEMA: &str = include_str!("schemas/tsconfig.json");
 const PACKAGE_JSON_SCHEMA: &str = include_str!("schemas/package.json");
+const FLOW_SCHEMA: &str = include_str!("schemas/flow.schema.json");
 
 static TASKS_SCHEMA: LazyLock<String> = LazyLock::new(|| {
     serde_json::to_string(&task::TaskTemplates::generate_json_schema())
@@ -175,6 +176,7 @@ fn resolve_static_schema(path: &str) -> Option<String> {
     match schema_name {
         "tsconfig" => Some(TSCONFIG_SCHEMA.to_string()),
         "package_json" => Some(PACKAGE_JSON_SCHEMA.to_string()),
+        "flow" => Some(FLOW_SCHEMA.to_string()),
         "tasks" => Some(TASKS_SCHEMA.clone()),
         "snippets" => Some(SNIPPETS_SCHEMA.clone()),
         "jsonc" => Some(JSONC_SCHEMA.clone()),
@@ -474,6 +476,10 @@ pub fn all_schema_file_associations(
         {
             "fileMatch": ["package.json"],
             "url": format!("{SCHEMA_URI_PREFIX}package_json")
+        },
+        {
+            "fileMatch": ["*.flow.json"],
+            "url": format!("{SCHEMA_URI_PREFIX}flow")
         },
         {
             "fileMatch": &jsonc_globs,

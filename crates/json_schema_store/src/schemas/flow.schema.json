@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Structural (v1) schema for .flow.json — mirrors workflow_engine::schema::{WorkflowDefinition, Action} field-for-field. Deliberately permissive on the four container-only fields (foreach/until/limit/actions/expression/else/catch) and on `inputs` (whose real per-action-type shape lives in the ActionDef registry at runtime, not statically knowable here) rather than enforcing the allOf/if/then per-`type` conditional rules a stricter v2 could add. Goal is to catch malformed JSON, wrong field types, and typo'd field names without false-positiving on legitimate flows.",
+  "title": "Workflow Definition",
+  "type": "object",
+  "required": ["id", "name"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable identifier for this flow."
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name shown in the Designer canvas tab and flows panel."
+    },
+    "actions": {
+      "type": "object",
+      "description": "Top-level actions map. Keys are action ids, unique within this map.",
+      "additionalProperties": { "$ref": "#/definitions/action" }
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Flow-level outputs, each a JSONLogic expression evaluated against run state.",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "action": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Action type id, resolved against the ActionDef registry at runtime — not enumerated here."
+        },
+        "label": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "object",
+          "description": "Per-action-type input shape, defined by the ActionDef registry — deliberately unvalidated here.",
+          "additionalProperties": true
+        },
+        "runAfter": {
+          "type": "object",
+          "description": "Maps a dependency action id (in the same actions map) to the outcome(s) that must occur before this action runs.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["Succeeded", "Failed", "Skipped"]
+            }
+          }
+        },
+        "pos": {
+          "type": "array",
+          "description": "Canvas position [x, y].",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "foreach": {
+          "description": "Foreach-only: a JSONLogic expression evaluating to the collection to iterate."
+        },
+        "until": {
+          "description": "Until-only: a JSONLogic expression evaluating to the loop's exit condition."
+        },
+        "limit": {
+          "type": "object",
+          "description": "Until-only (mandatory on every real Until action, not enforced structurally here).",
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "duration": {
+              "type": "string",
+              "description": "ISO 8601 duration, e.g. \"PT30S\"."
+            }
+          }
+        },
+        "actions": {
+          "type": "object",
+          "description": "Foreach/Until body, or If's true-branch body, or Try's try-body — same recursive shape as the top-level actions map.",
+          "additionalProperties": { "$ref": "#/definitions/action" }
+        },
+        "expression": {
+          "description": "If-only: a JSONLogic expression deciding which branch runs."
+        },
+        "else": { "$ref": "#/definitions/branch" },
+        "catch": { "$ref": "#/definitions/branch" }
+      },
+      "additionalProperties": false
+    },
+    "branch": {
+      "type": "object",
+      "required": ["actions"],
+      "properties": {
+        "actions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/action" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

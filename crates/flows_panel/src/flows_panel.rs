@@ -379,7 +379,9 @@ impl FlowsPanel {
         };
         let workspace_weak = self.workspace.clone();
         workspace.update(cx, |workspace, cx| {
-            let item = designer_panel::DesignerPanel::open(path, root, workspace_weak, window, cx);
+            let project = workspace.project().clone();
+            let item =
+                designer_panel::DesignerPanel::open(path, root, workspace_weak, project, window, cx);
             workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
         });
         self.error = None;
