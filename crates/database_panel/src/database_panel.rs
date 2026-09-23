@@ -405,7 +405,7 @@ impl DatabasePanel {
                         let connect_entity = connect_entity.clone();
                         h_flex()
                             .gap_2()
-                            .child(Button::new("browse-sqlite-path").label("Browse…").on_click(
+                            .child(Button::new("browse-sqlite-path").outline().label("Browse…").on_click(
                                 move |_, window, cx| {
                                     let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
                                         files: true,
@@ -477,6 +477,7 @@ impl DatabasePanel {
                             .when(is_connected, |this| {
                                 this.child(
                                     Button::new(("refresh-schema", id.0))
+                                        .outline()
                                         .label("Refresh")
                                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                             this.fetch_schema(id, cx);
@@ -485,12 +486,14 @@ impl DatabasePanel {
                             })
                             .child(if is_connected {
                                 Button::new(("disconnect", id.0))
+                                    .outline()
                                     .label("Disconnect")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.disconnect(id, cx);
                                     }))
                             } else {
                                 Button::new(("connect", id.0))
+                                    .primary()
                                     .label("Connect")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.connect(id, cx);
@@ -498,6 +501,7 @@ impl DatabasePanel {
                             })
                             .child(
                                 Button::new(("delete", id.0))
+                                    .danger()
                                     .icon(Icon::new(GIconName::Delete))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.delete_connection(id, cx);
@@ -539,6 +543,7 @@ impl DatabasePanel {
                 )
                 .child(
                     Button::new(("retry-schema", id.0))
+                        .outline()
                         .label("Retry")
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.fetch_schema(id, cx);
