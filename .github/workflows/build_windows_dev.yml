@@ -1,0 +1,66 @@
+name: build_windows_dev
+
+# Manual, no-release build: click "Run workflow" (Actions tab) on any
+# branch, download the zipped zed.exe from the run's Artifacts section once
+# it finishes. Does not create a GitHub Release and does not code-sign —
+# for local testing of a branch's build only. See script/bundle-windows.ps1
+# for the full signed-installer pipeline this intentionally skips.
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Cargo package to build
+        required: false
+        type: string
+        default: zed
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_windows_x86_64:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build (release)
+        shell: pwsh
+        run: cargo build --release --package ${{ inputs.package }}
+
+      - name: Package build output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "target/release/${{ inputs.package }}.exe" dist/ -ErrorAction Stop
+          # Best-effort: pick up any runtime DLLs cargo's build scripts placed
+          # next to the binary (e.g. conpty.dll) so the .exe has a chance of
+          # running standalone. The full installer pipeline
+          # (script/bundle-windows.ps1) collects these more thoroughly.
+          Get-ChildItem "target/release" -Filter *.dll -ErrorAction SilentlyContinue |
+            Copy-Item -Destination dist/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath "${{ inputs.package }}-windows-x86_64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-windows-x86_64
+          path: ${{ inputs.package }}-windows-x86_64.zip
+          if-no-files-found: error
