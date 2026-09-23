@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct TableInfo {
     pub name: String,
     pub columns: Vec<ColumnInfo>,
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 /// A single column's shape, as shown by the schema tree's expanded rows.

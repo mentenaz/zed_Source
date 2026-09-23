@@ -70,6 +70,13 @@ impl ConnectionRegistry {
     pub fn is_connected(&self, id: ConnectionId) -> bool {
         self.sqlite.contains_key(&id)
     }
+
+    /// Returns a cloned handle to the live SQLite connection registered
+    /// under `id`, if any, so callers (e.g. a schema fetch) can run queries
+    /// off the main thread without holding a live borrow of the registry.
+    pub fn sqlite_handle(&self, id: ConnectionId) -> Option<Arc<Mutex<SqliteConnection>>> {
+        self.sqlite.get(&id).cloned()
+    }
 }
 
 #[cfg(test)]
