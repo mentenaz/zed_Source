@@ -13,6 +13,15 @@ on:
         required: false
         type: string
         default: zed
+      isolate:
+        description: >-
+          Build as a separate app ("ZedDevBuild") with its own settings/data
+          dir and instance lock, so it doesn't share state with or refuse to
+          launch alongside your regular installed Zed. Only patches the
+          checked-out CI copy — never the committed source.
+        required: false
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,6 +49,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+
+      - name: Isolate this build as a separate app
+        if: ${{ inputs.isolate }}
+        shell: pwsh
+        run: |
+          # Changes the app name used for the settings/data directory
+          # (%APPDATA%\Zed -> %APPDATA%\ZedDevBuild) and the Windows
+          # single-instance mutex, so this build neither reads/writes your
+          # regular Zed's settings and workspace database nor refuses to
+          # launch because your regular Zed is already running. Only edits
+          # this ephemeral checkout inside the runner — never committed.
+          $paths = 'crates/paths/src/paths.rs'
+          (Get-Content $paths -Raw) `
+            -replace 'pub const APP_NAME: &str = "Zed";', 'pub const APP_NAME: &str = "ZedDevBuild";' |
+            Set-Content $paths -NoNewline
+
+          $instance = 'crates/zed/src/zed/windows_only_instance.rs'
+          (Get-Content $instance -Raw) `
+            -replace '"\{\}-Instance-Mutex"', '"{}-CI-Instance-Mutex"' |
+            Set-Content $instance -NoNewline
 
       - name: Build (release)
         shell: pwsh
