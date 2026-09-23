@@ -179,6 +179,16 @@ Editing or clarifying existing rules is always welcome. New rules must meet **al
 
 Rules that apply to a single crate belong in that crate's own `.rules` file, not the repo root.
 
+# Designer flow files
+
+Files ending in `.flow.json` are Designer documents and must open as the
+`designer_panel` flow graph, not as ordinary JSON editor buffers. The Designer
+registers a project-item matcher for normal opens and a serializable workspace
+item (`designer_flow`) so restored tabs reopen through `DesignerPanel`. Keep
+the flow path in Designer persistence; use the existing `View Raw` tab action
+when plain JSON editing is explicitly requested. The `.flow.layout.json`
+sidecar remains a regular JSON file.
+
 ## What NOT to put in `.rules`
 Avoid architectural descriptions of a crate (module layout, data flow, key types). These go stale fast and the agent can gather them by reading the code. Rules should be **traps to avoid**, not **maps to follow**.
 
