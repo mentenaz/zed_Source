@@ -13,3 +13,17 @@ pub enum DbType {
     MySql,
     MsSql,
 }
+
+impl DbType {
+    /// Stable identifier used in credential-store keys and dropdown values —
+    /// distinct from any user-facing label so a future label wording change
+    /// can't silently orphan saved credentials.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DbType::Sqlite => "sqlite",
+            DbType::Postgres => "postgres",
+            DbType::MySql => "mysql",
+            DbType::MsSql => "mssql",
+        }
+    }
+}

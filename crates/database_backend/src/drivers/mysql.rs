@@ -10,6 +10,7 @@ use mysql_async::{OptsBuilder, Pool, SslOpts, params};
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
 use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::query::QueryResult;
 
 /// Opens a MySQL/MariaDB connection pool and proves it works with a trivial
 /// query — matching every other driver's eager-validation behavior (a
@@ -83,6 +84,97 @@ pub async fn create_database(params: NetworkConnectParams, name: &str) -> Result
         .await
         .map_err(|e| DatabaseError::Connection(format!("failed to close connection: {e}")))?;
     Ok(())
+}
+
+/// Runs one ad-hoc SQL statement — the SQL workbench's entry point.
+///
+/// Unlike Postgres/MSSQL, `mysql_async` has no single call that uniformly
+/// hands back either a result set or an affected-row count — a write
+/// statement run through the row-returning path errors instead of just
+/// returning zero rows. So the statement's leading keyword decides which
+/// path to take, matching Forge's own `db_query` (confirmed via
+/// `src-tauri/src/database.rs`).
+pub async fn execute_query(pool: &Pool, sql: &str) -> Result<QueryResult, DatabaseError> {
+    let start = std::time::Instant::now();
+    let mut conn = pool
+        .get_conn()
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let is_read = upper.starts_with("SELECT")
+        || upper.starts_with("WITH")
+        || upper.starts_with("EXPLAIN")
+        || upper.starts_with("SHOW")
+        || upper.starts_with("DESCRIBE")
+        || upper.starts_with("DESC ");
+
+    if is_read {
+        let mut result = conn
+            .query_iter(sql)
+            .await
+            .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+        let columns: Vec<String> = result
+            .columns()
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.name_str().to_string())
+            .collect();
+        let raw: Vec<mysql_async::Row> = result
+            .collect()
+            .await
+            .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+        let rows = raw
+            .into_iter()
+            .map(|mut row| {
+                (0..row.len())
+                    .map(|i| mysql_cell(row.take(i).unwrap_or(mysql_async::Value::NULL)))
+                    .collect()
+            })
+            .collect();
+
+        Ok(QueryResult {
+            columns,
+            rows,
+            rows_affected: None,
+            exec_ms: start.elapsed().as_millis() as u64,
+        })
+    } else {
+        conn.query_drop(sql)
+            .await
+            .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+        let rows_affected = conn.affected_rows();
+
+        Ok(QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: Some(rows_affected),
+            exec_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+}
+
+fn mysql_cell(value: mysql_async::Value) -> Option<String> {
+    use mysql_async::Value;
+    match value {
+        Value::NULL => None,
+        Value::Bytes(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        Value::Int(n) => Some(n.to_string()),
+        Value::UInt(n) => Some(n.to_string()),
+        Value::Float(f) => Some(f.to_string()),
+        Value::Double(d) => Some(d.to_string()),
+        Value::Date(year, month, day, hour, min, sec, _) => Some(format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}"
+        )),
+        Value::Time(negative, days, hours, minutes, seconds, _) => Some(format!(
+            "{}{:02}:{:02}:{:02}",
+            if negative { "-" } else { "" },
+            days as u32 * 24 + hours as u32,
+            minutes,
+            seconds
+        )),
+    }
 }
 
 /// Discovers every user table's columns and foreign keys in the connected

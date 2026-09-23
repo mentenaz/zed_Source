@@ -11,6 +11,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
 use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::query::QueryResult;
 
 /// Opens a PostgreSQL connection and proves it works with a trivial query.
 ///
@@ -99,6 +100,58 @@ pub async fn create_database(params: NetworkConnectParams, name: &str) -> Result
 fn quote_ident(name: &str) -> String {
     let sanitized: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
     format!("\"{sanitized}\"")
+}
+
+/// Runs one ad-hoc SQL statement — the SQL workbench's entry point.
+///
+/// Uses the simple query protocol (`simple_query`) rather than
+/// `prepare`+`query`: it handles a row-returning statement and a plain
+/// write/DDL statement uniformly (a `CommandComplete` message carries the
+/// affected-row count either way), so there's no need to sniff the SQL
+/// keyword upfront the way the MySQL driver has to. Simple-query results
+/// come back already stringified (Postgres's text wire format), so no
+/// per-type cell conversion is needed here either.
+pub async fn execute_query(client: &Client, sql: &str) -> Result<QueryResult, DatabaseError> {
+    use tokio_postgres::SimpleQueryMessage;
+
+    let start = std::time::Instant::now();
+    let messages = client
+        .simple_query(sql)
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut command_complete_count: Option<u64> = None;
+
+    for message in messages {
+        match message {
+            SimpleQueryMessage::Row(row) => {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                rows.push((0..row.columns().len()).map(|i| row.get(i).map(str::to_string)).collect());
+            }
+            SimpleQueryMessage::CommandComplete(n) => command_complete_count = Some(n),
+            _ => {}
+        }
+    }
+
+    // Only surface "N rows affected" for a statement that returned no result
+    // set at all — a SELECT also gets a CommandComplete tag, but `rows`
+    // (however empty) is the right thing for the UI to render for those.
+    let rows_affected = if columns.is_empty() {
+        command_complete_count
+    } else {
+        None
+    };
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        rows_affected,
+        exec_ms: start.elapsed().as_millis() as u64,
+    })
 }
 
 fn load_root_certs() -> rustls::RootCertStore {

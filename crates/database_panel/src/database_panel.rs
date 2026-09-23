@@ -1,13 +1,17 @@
 //! Database panel UI.
 //!
 //! See `crates/gpui_component/DATABASE_PANEL_SPEC.md` for the full
-//! architecture and phased delivery plan. This is Delivery Phase 3: on top
-//! of Phase 2's SQLite-only connect/disconnect + schema tree, the panel now
-//! also speaks PostgreSQL, MySQL/MariaDB, and MSSQL. Passwords are never
-//! persisted on `ConnectionConfig` — they're read/written exclusively
-//! through `zed_credentials_provider`, keyed by `credential_url(db_type,
-//! host, port)`. Reconnect is manual only (no automatic dead-connection
-//! detection/retry yet — flagged as a later follow-up, not in scope here).
+//! architecture and phased delivery plan. This is the Phase 1 explorer shell:
+//! on top of the existing multi-driver connect/disconnect + database
+//! discovery/create/register flow, the connection body is now a proper
+//! `gpui_component` three-pane experience — a searchable schema explorer
+//! (left), Overview/Tables/Views/Relationships content tabs (center) and an
+//! object inspector (right) — all resizable via `h_resizable`/`resizable_panel`.
+//! The SQL workbench is deferred (backend support stays intact in
+//! `database_backend`); Views shows an empty state until backend introspection
+//! lands. Passwords are never persisted on `ConnectionConfig` — they're
+//! read/written exclusively through `zed_credentials_provider`, keyed by
+//! `credential_url(db_type, host, port)`. Reconnect is manual only.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,17 +25,17 @@ use db::kvp::KeyValueStore;
 use gpui::{
     App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Task, WeakEntity, Window, actions, div,
-    prelude::FluentBuilder as _, px,
+    Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window, actions, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName as GIconName,
+    ActiveTheme as _, Icon, IconName as GIconName, Sizable as _, Size, h_flex,
     button::{Button, ButtonVariants as _},
-    h_flex,
-    input::{Input, InputState},
-    list::ListItem,
+    input::{Input, InputEvent, InputState},
+    resizable::{h_resizable, resizable_panel},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    tree::{TreeItem, TreeState, tree},
+    spinner::Spinner,
+    tab::{Tab, TabBar, TabVariant},
+    tree::{TreeItem, TreeState},
     v_flex,
 };
 use ui::{Color, Label, LabelCommon as _, LabelSize};
@@ -39,6 +43,11 @@ use workspace::{
     SERIALIZATION_THROTTLE_TIME, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
+
+mod content;
+mod explorer;
+mod header;
+mod inspector;
 
 const DATABASE_CONNECTIONS_KVP_KEY: &str = "database-panel-connections";
 const DATABASE_SCHEMA_CACHE_KVP_KEY: &str = "database-panel-schema-cache";
@@ -51,6 +60,59 @@ enum SchemaState {
     Error(String),
 }
 
+/// The panel's center-pane content tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ContentTab {
+    #[default]
+    Overview,
+    Tables,
+    Views,
+    Relationships,
+}
+
+impl ContentTab {
+    pub(crate) const ALL: [ContentTab; 4] = [
+        ContentTab::Overview,
+        ContentTab::Tables,
+        ContentTab::Views,
+        ContentTab::Relationships,
+    ];
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            ContentTab::Overview => 0,
+            ContentTab::Tables => 1,
+            ContentTab::Views => 2,
+            ContentTab::Relationships => 3,
+        }
+    }
+
+    pub(crate) fn from_index(ix: usize) -> Self {
+        match ix {
+            1 => ContentTab::Tables,
+            2 => ContentTab::Views,
+            3 => ContentTab::Relationships,
+            _ => ContentTab::Overview,
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            ContentTab::Overview => "Overview",
+            ContentTab::Tables => "Tables",
+            ContentTab::Views => "Views",
+            ContentTab::Relationships => "Relationships",
+        }
+    }
+}
+
+/// What's currently selected in the schema explorer tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SchemaSelection {
+    Table { name: String },
+    Column { table: String, column: String },
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct SerializedSchemaCache {
     schemas: HashMap<ConnectionId, Vec<TableInfo>>,
@@ -60,20 +122,42 @@ struct SerializedSchemaCache {
 /// per column. Column labels bake in type/PK/nullability, since `TreeItem`
 /// carries only an id and a display label — there's no separate typed slot
 /// for a renderer to inspect, so `render_item` differentiates tables from
-/// columns purely by `TreeEntry::depth()`.
-fn table_tree_item(table: &TableInfo) -> TreeItem {
-    let children = table.columns.iter().map(|column| {
-        let pk_suffix = if column.primary_key { " · PK" } else { "" };
-        let null_suffix = if column.nullable { "" } else { " · NOT NULL" };
-        TreeItem::new(
-            format!("{}::{}", table.name, column.name),
-            format!(
-                "{}  {}{}{}",
-                column.name, column.type_name, pk_suffix, null_suffix
-            ),
-        )
-    });
-    TreeItem::new(table.name.clone(), table.name.clone()).children(children)
+/// columns purely by `TreeEntry::depth()`. When `needle` is non-empty, only
+/// matching columns are included as children.
+fn table_tree_item(table: &TableInfo, needle: &str) -> TreeItem {
+    let children = table
+        .columns
+        .iter()
+        .filter(|column| needle.is_empty() || column.name.to_lowercase().contains(needle))
+        .map(|column| {
+            let pk_suffix = if column.primary_key { " · PK" } else { "" };
+            let null_suffix = if column.nullable { "" } else { " · NOT NULL" };
+            TreeItem::new(
+                format!("{}::{}", table.name, column.name),
+                format!(
+                    "{}  {}{}{}",
+                    column.name, column.type_name, pk_suffix, null_suffix
+                ),
+            )
+        });
+    TreeItem::new(
+        table.name.clone(),
+        format!("{}  ({})", table.name, table.columns.len()),
+    )
+    .expanded(true)
+    .children(children)
+}
+
+/// Whether `table` matches the explorer's filter `needle`: its own name, or
+/// any of its columns' names (case-insensitive). An empty needle matches
+/// everything.
+fn table_matches(table: &TableInfo, needle: &str) -> bool {
+    needle.is_empty()
+        || table.name.to_lowercase().contains(needle)
+        || table
+            .columns
+            .iter()
+            .any(|column| column.name.to_lowercase().contains(needle))
 }
 
 /// The default port to pre-fill when a network type is first selected in the
@@ -132,6 +216,11 @@ struct SerializedDatabasePanel {
 pub struct DatabasePanel {
     focus_handle: FocusHandle,
     connections: Vec<ConnectionConfig>,
+    /// Which connection's tab is showing in the content area. `None` shows
+    /// the Add Connection form (the tab strip's trailing "+" tab). Defaults
+    /// to the first connection on load/whenever the panel would otherwise
+    /// render blank with connections present — see `render`.
+    active_connection: Option<ConnectionId>,
     registry: ConnectionRegistry,
     /// Set while `self.registry` has been temporarily moved into an
     /// in-flight async connect/schema-fetch task (see `connect_network`'s
@@ -143,6 +232,12 @@ pub struct DatabasePanel {
     statuses: HashMap<ConnectionId, ConnectionStatus>,
     schemas: HashMap<ConnectionId, SchemaState>,
     tree_states: HashMap<ConnectionId, Entity<TreeState>>,
+    /// Shared filter for the schema explorer. Only one connection tab is
+    /// visible at a time, so a single `InputState` is enough for now.
+    schema_filter: Entity<InputState>,
+    /// The active center-pane tab. Shared across connections (per-connection
+    /// tab state is a natural follow-up, not done here).
+    content_tab: ContentTab,
     new_connection_title: String,
     new_connection_db_type: DbType,
     new_connection_path: String,
@@ -159,6 +254,7 @@ pub struct DatabasePanel {
     /// expanded" navigation model.
     creating_database_for: Option<ConnectionId>,
     new_database_name: Entity<InputState>,
+    _filter_subscription: Subscription,
     _persist_task: Task<()>,
     _schema_persist_task: Task<()>,
 }
@@ -194,7 +290,7 @@ impl DatabasePanel {
             let mut schemas = HashMap::default();
             let mut tree_states = HashMap::default();
             for (id, tables) in cached_schemas {
-                let items: Vec<TreeItem> = tables.iter().map(table_tree_item).collect();
+                let items: Vec<TreeItem> = tables.iter().map(|table| table_tree_item(table, "")) .collect();
                 let tree_state = cx.new(|cx| TreeState::new(cx).items(items));
                 tree_states.insert(id, tree_state);
                 schemas.insert(id, SchemaState::Loaded(tables.into()));
@@ -203,15 +299,26 @@ impl DatabasePanel {
             let new_connection_password =
                 cx.new(|cx| InputState::new(window, cx).masked(true));
             let new_database_name = cx.new(|cx| InputState::new(window, cx));
+            let schema_filter = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Filter tables or columns…")
+            });
+
+            let _filter_subscription =
+                cx.subscribe_in(&schema_filter, window, Self::on_schema_filter_changed);
+
+            let active_connection = connections.first().map(|connection| connection.id);
 
             Self {
                 focus_handle: cx.focus_handle(),
                 connections,
+                active_connection,
                 registry: ConnectionRegistry::new(),
                 registry_busy: false,
                 statuses: HashMap::default(),
                 schemas,
                 tree_states,
+                schema_filter,
+                content_tab: ContentTab::default(),
                 new_connection_title: String::new(),
                 new_connection_db_type: DbType::Sqlite,
                 new_connection_path: String::new(),
@@ -224,6 +331,7 @@ impl DatabasePanel {
                 next_database_id: 1,
                 creating_database_for: None,
                 new_database_name,
+                _filter_subscription,
                 _persist_task: Task::ready(()),
                 _schema_persist_task: Task::ready(()),
             }
@@ -357,9 +465,14 @@ impl DatabasePanel {
     }
 
     /// Creates or updates the connection's `TreeState` with `tables`'
-    /// current shape.
+    /// current shape, applying the active schema filter.
     fn update_tree_items(&mut self, id: ConnectionId, tables: &[TableInfo], cx: &mut Context<Self>) {
-        let items: Vec<TreeItem> = tables.iter().map(table_tree_item).collect();
+        let needle = self.schema_filter.read(cx).value().to_lowercase();
+        let items: Vec<TreeItem> = tables
+            .iter()
+            .filter(|table| table_matches(table, &needle))
+            .map(|table| table_tree_item(table, &needle))
+            .collect();
         match self.tree_states.get(&id) {
             Some(tree_state) => {
                 tree_state.update(cx, |tree_state, cx| tree_state.set_items(items, cx));
@@ -368,6 +481,94 @@ impl DatabasePanel {
                 let tree_state = cx.new(|cx| TreeState::new(cx).items(items));
                 self.tree_states.insert(id, tree_state);
             }
+        }
+    }
+
+    /// The schema explorer filter input changed — re-filter the active
+    /// connection's tree, preserving a previously selected table when it
+    /// still matches.
+    fn on_schema_filter_changed(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let Some(id) = self.active_connection else {
+            return;
+        };
+        let Some(SchemaState::Loaded(tables)) = self.schemas.get(&id) else {
+            return;
+        };
+        let tables = tables.clone();
+        let previous = self.selected_schema_item(id, cx);
+        self.update_tree_items(id, &tables, cx);
+
+        let Some(SchemaSelection::Table { name }) = previous else {
+            return;
+        };
+        let needle = self.schema_filter.read(cx).value().to_lowercase();
+        let Some(table) = tables.iter().find(|table| table.name == name) else {
+            return;
+        };
+        if !table_matches(table, &needle) {
+            return;
+        }
+        if let Some(tree_state) = self.tree_states.get(&id) {
+            let item = table_tree_item(table, &needle);
+            tree_state.update(cx, |tree_state, cx| {
+                tree_state.set_selected_item(Some(&item), cx);
+            });
+        }
+    }
+
+    /// What (if anything) is selected in `id`'s schema tree, decoded from the
+    /// item's id (`table_name` vs `table::column`).
+    fn selected_schema_item(&self, id: ConnectionId, cx: &App) -> Option<SchemaSelection> {
+        let tree_state = self.tree_states.get(&id)?;
+        let item = tree_state.read(cx).selected_item()?;
+        let id_str = item.id.as_str();
+        if let Some((table, column)) = id_str.split_once("::") {
+            Some(SchemaSelection::Column {
+                table: table.to_string(),
+                column: column.to_string(),
+            })
+        } else {
+            Some(SchemaSelection::Table { name: id_str.to_string() })
+        }
+    }
+
+    /// The table (and optional selected column) behind `connection`'s current
+    /// tree selection, if any.
+    fn selected_table<'a>(
+        &self,
+        connection: &ConnectionConfig,
+        tables: &'a [TableInfo],
+        cx: &App,
+    ) -> Option<(Option<String>, &'a TableInfo)> {
+        let selection = self.selected_schema_item(connection.id, cx)?;
+        match selection {
+            SchemaSelection::Table { name } => tables
+                .iter()
+                .find(|table| table.name == name)
+                .map(|table| (None, table)),
+            SchemaSelection::Column { table, column } => tables
+                .iter()
+                .find(|candidate| candidate.name == table)
+                .map(|table| (Some(column), table)),
+        }
+    }
+
+    /// Clears the explorer tree's selection (used by the content pane's
+    /// "Back to list" action).
+    fn clear_tree_selection(&self, id: ConnectionId, cx: &mut Context<Self>) {
+        if let Some(tree_state) = self.tree_states.get(&id) {
+            tree_state.update(cx, |tree_state, cx| {
+                tree_state.set_selected_index(None, cx);
+            });
         }
     }
 
@@ -440,6 +641,7 @@ impl DatabasePanel {
 
         self.next_connection_id += 1;
         self.connections.push(config.clone());
+        self.active_connection = Some(id);
         self.persist_connections(cx);
 
         let password = self.new_connection_password.read(cx).value().to_string();
@@ -953,7 +1155,18 @@ impl DatabasePanel {
         self.registry.disconnect(id).ok();
         self.statuses.remove(&id);
         self.connections.retain(|connection| connection.id != id);
+        if self.active_connection == Some(id) {
+            self.active_connection = self.connections.first().map(|connection| connection.id);
+        }
         self.persist_connections(cx);
+        cx.notify();
+    }
+
+    /// Handles a click on the connection tab strip: `ix < connections.len()`
+    /// selects that connection; the trailing index (the "+" tab) opens the
+    /// Add Connection form instead.
+    fn select_connection_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.active_connection = self.connections.get(ix).map(|connection| connection.id);
         cx.notify();
     }
 
@@ -1166,7 +1379,12 @@ impl DatabasePanel {
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                        .child(Input::new(&password_state).mask_toggle())
+                        .child(
+                            Input::new(&password_state)
+                                .mask_toggle()
+                                .border_1()
+                                .border_color(input_border),
+                        )
                         .into_any_element()
                 }))
                 .item(SettingItem::new("SSL", ssl_field))
@@ -1191,225 +1409,192 @@ impl DatabasePanel {
             .page(SettingPage::new("Add Connection").group(group))
     }
 
-    fn render_connection_row(&self, connection: &ConnectionConfig, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = connection.id;
-        let (indicator, color) = self.status_indicator(id);
-        let is_connected = self.registry.is_connected(id);
-        let error_message = match self.statuses.get(&id) {
-            Some(ConnectionStatus::Error(message)) => Some(message.clone()),
-            _ => None,
-        };
-
-        v_flex()
-            .w_full()
-            .child(
-                h_flex()
-                    .id(("database-connection-row", id.0))
-                    .w_full()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Label::new(indicator).color(color))
-                            .child(Label::new(connection.title.clone())),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .when(is_connected, |this| {
-                                this.child(
-                                    Button::new(("refresh-schema", id.0))
-                                        .outline()
-                                        .label("Refresh")
-                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                            this.fetch_schema(id, cx);
-                                        })),
-                                )
-                            })
-                            .child(if is_connected {
-                                Button::new(("disconnect", id.0))
-                                    .outline()
-                                    .label("Disconnect")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.disconnect(id, cx);
-                                    }))
-                            } else {
-                                Button::new(("connect", id.0))
-                                    .primary()
-                                    .label("Connect")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.connect(id, cx);
-                                    }))
-                            })
-                            .child(
-                                Button::new(("delete", id.0))
-                                    .danger()
-                                    .icon(Icon::new(GIconName::Delete))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.delete_connection(id, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .when_some(error_message, |this, message| {
-                this.child(
-                    div().px_2().pb_1().child(
-                        Label::new(message)
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    ),
-                )
-            })
-            .when(!is_connected && !connection.databases.is_empty(), |this| {
-                this.child(self.render_database_picker(connection, cx))
-            })
-            .children(self.render_schema_section(id, is_connected, cx))
-    }
-
-    /// Renders the discovered-database picker for a not-yet-activated
-    /// network connection: a clickable list of every database `discover_databases`
-    /// found, plus "+ Create database" / "Register existing database"
-    /// actions — mirrors the original Forge panel's post-connect database
-    /// browser and `DATABASE_PANEL_SPEC.md`'s Navigation Phase 3 layout.
-    fn render_database_picker(
+    /// Renders the selected connection tab's body: the connection header
+    /// (`DatabaseHeader`: status/actions + database tab strip) on top, and
+    /// the three-pane explorer split below — or a centered state/error view
+    /// while connecting, loading, failing, or when the schema is empty.
+    fn render_connection_body(
         &self,
         connection: &ConnectionConfig,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = connection.id;
-        let is_creating = self.creating_database_for == Some(id);
+        let is_connected = self.registry.is_connected(id);
 
         v_flex()
             .w_full()
-            .px_4()
-            .py_1()
-            .gap_1()
-            .child(
-                Label::new("No databases connected")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .children(connection.databases.iter().map(|database| {
-                let name = database.name.clone();
-                ListItem::new(("database-picker-item", database.id.0))
-                    .child(Label::new(database.name.clone()).size(LabelSize::Small))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.select_database(id, name.clone(), cx);
-                    }))
-            }))
-            .child(if is_creating {
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(Input::new(&self.new_database_name).w_48())
-                    .child(
-                        Button::new(("create-database", id.0))
-                            .outline()
-                            .label("Create")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.submit_create_database(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("register-database", id.0))
-                            .outline()
-                            .label("Register")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.submit_register_database(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("cancel-database", id.0))
-                            .ghost()
-                            .label("Cancel")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.cancel_create_database(cx);
-                            })),
-                    )
-                    .into_any_element()
-            } else {
-                Button::new(("start-create-database", id.0))
-                    .ghost()
-                    .label("+ Create database")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.start_create_database(id, window, cx);
-                    }))
-                    .into_any_element()
-            })
+            .size_full()
+            .child(self.render_connection_header(connection, cx))
+            .child(self.render_body_split(connection, id, is_connected, cx))
     }
 
-    fn render_schema_section(
+    /// The three-pane explorer shell: `h_resizable` split with a resizable
+    /// explorer sidebar (left) and inspector (right) around a flex-grow
+    /// content pane. Only rendered once a schema is actually loaded;
+    /// everything else routes to `render_connection_state` /
+    /// `render_connection_error`.
+    fn render_body_split(
         &self,
+        connection: &ConnectionConfig,
         id: ConnectionId,
         is_connected: bool,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> impl IntoElement {
         if !is_connected {
-            return None;
+            return self.render_connection_state(connection, cx).into_any_element();
         }
 
-        let element = match self.schemas.get(&id) {
-            None | Some(SchemaState::Loading) => h_flex()
-                .px_4()
-                .py_1()
-                .child(
-                    Label::new("Loading schema…")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
-            Some(SchemaState::Error(message)) => v_flex()
-                .px_4()
-                .py_1()
-                .gap_1()
-                .child(
-                    Label::new(format!("Failed to load schema: {message}"))
-                        .size(LabelSize::Small)
-                        .color(Color::Error),
-                )
-                .child(
-                    Button::new(("retry-schema", id.0))
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.fetch_schema(id, cx);
-                        })),
-                )
-                .into_any_element(),
-            Some(SchemaState::Loaded(tables)) if tables.is_empty() => h_flex()
-                .px_4()
-                .py_1()
-                .child(
-                    Label::new("No tables")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
-            Some(SchemaState::Loaded(_)) => {
-                let Some(tree_state) = self.tree_states.get(&id) else {
-                    return None;
-                };
-                h_flex()
-                    .w_full()
-                    .px_2()
-                    .child(tree(tree_state, |ix, entry, _selected, _window, _cx| {
-                        let is_table = entry.depth() == 0;
-                        let color = if is_table { Color::Default } else { Color::Muted };
-                        ListItem::new(ix)
-                            .pl(px(16.) * entry.depth() + px(8.))
-                            .child(
-                                Label::new(entry.item().label.clone())
-                                    .size(LabelSize::Small)
-                                    .color(color),
-                            )
-                    }))
-                    .into_any_element()
+        let tables = match self.schemas.get(&id) {
+            None | Some(SchemaState::Loading) => {
+                return self.render_connection_state(connection, cx).into_any_element()
             }
+            Some(SchemaState::Error(message)) => {
+                return self.render_connection_error(connection, message, cx).into_any_element()
+            }
+            Some(SchemaState::Loaded(tables)) if tables.is_empty() => {
+                return self.render_connection_state(connection, cx).into_any_element()
+            }
+            Some(SchemaState::Loaded(tables)) => tables.clone(),
         };
 
-        Some(element)
+        h_resizable(("database-body", id.0))
+            .child(
+                resizable_panel()
+                    .size(px(280.))
+                    .size_range(px(200.)..px(420.))
+                    .flex_none()
+                    .child(self.render_explorer_pane(connection, &tables, cx)),
+            )
+            .child(
+                resizable_panel()
+                    .child(self.render_content_pane(connection, &tables, cx)),
+            )
+            .child(
+                resizable_panel()
+                    .size(px(320.))
+                    .size_range(px(240.)..px(560.))
+                    .flex_none()
+                    .child(self.render_inspector_pane(connection, &tables, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The centered "not connected / loading / empty schema" state.
+    fn render_connection_state(
+        &self,
+        connection: &ConnectionConfig,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = connection.id;
+        let is_connected = self.registry.is_connected(id);
+        let is_loading = matches!(self.schemas.get(&id), None | Some(SchemaState::Loading));
+
+        let body: gpui::AnyElement = if is_connected && is_loading {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Spinner::new().with_size(Size::Medium))
+                .child(
+                    Label::new("Loading schema…")
+                        .size(LabelSize::Default)
+                        .color(Color::Muted),
+                )
+                .into_any_element()
+        } else if is_connected {
+            v_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::new(GIconName::Inbox)
+                        .with_size(Size::Large)
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(Label::new("No tables").size(LabelSize::Large))
+                .child(
+                    Label::new("This database has no tables yet.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element()
+        } else {
+            let detail = match self.statuses.get(&id) {
+                Some(ConnectionStatus::Error(message)) => {
+                    format!("Could not connect: {message}")
+                }
+                _ => "Connect to this database to explore its schema.".to_string(),
+            };
+            v_flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    Icon::new(GIconName::Inbox)
+                        .with_size(Size::Large)
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(Label::new("Not connected").size(LabelSize::Large))
+                .child(
+                    Label::new(detail)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Button::new(("connect", id.0))
+                        .primary()
+                        .label("Connect")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.connect(id, cx);
+                        })),
+                )
+                .into_any_element()
+        };
+
+        v_flex()
+            .w_full()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .px_6()
+            .child(body)
+    }
+
+    /// The centered "schema failed to load" state with a Retry action.
+    fn render_connection_error(
+        &self,
+        connection: &ConnectionConfig,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = connection.id;
+        v_flex()
+            .w_full()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_6()
+            .child(
+                Icon::new(GIconName::TriangleAlert)
+                    .with_size(Size::Large)
+                    .text_color(cx.theme().danger_foreground),
+            )
+            .child(
+                Label::new("Failed to load schema")
+                    .size(LabelSize::Large)
+                    .color(Color::Error),
+            )
+            .child(
+                Label::new(message.to_string())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new(("retry-schema", id.0))
+                    .outline()
+                    .label("Retry")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.fetch_schema(id, cx);
+                    })),
+            )
     }
 }
 
@@ -1448,7 +1633,7 @@ impl Panel for DatabasePanel {
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(320.)
+        px(440.)
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
@@ -1468,37 +1653,52 @@ impl Panel for DatabasePanel {
     }
 }
 
+impl DatabasePanel {
+    /// The top-of-panel connection tab strip — one `Tab` per connection plus
+    /// a trailing "+" tab that opens the Add Connection form, mirroring
+    /// `npm_manager_panel`'s `project_tabs` (see its doc comment) and the
+    /// original Forge panel's connection pills.
+    fn render_connection_tabs(&self, connections: &[ConnectionConfig], cx: &mut Context<Self>) -> impl IntoElement {
+        let add_tab_ix = connections.len();
+        let selected_index = self
+            .active_connection
+            .and_then(|id| connections.iter().position(|connection| connection.id == id))
+            .unwrap_or(add_tab_ix);
+
+        TabBar::new("database-connection-tabs")
+            .with_variant(TabVariant::Underline)
+            .children(connections.iter().map(|connection| {
+                let (indicator, color) = self.status_indicator(connection.id);
+                Tab::new()
+                    .prefix(Label::new(indicator).color(color))
+                    .label(connection.title.clone())
+            }))
+            .child(Tab::new().prefix(Icon::new(GIconName::Plus)).label("Add Connection"))
+            .selected_index(selected_index)
+            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                this.select_connection_tab(*ix, cx);
+            }))
+    }
+}
+
 impl Render for DatabasePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let connections = self.connections.clone();
-        let connection_rows = connections
-            .iter()
-            .map(|connection| self.render_connection_row(connection, cx).into_any_element())
-            .collect::<Vec<_>>();
+        let active_connection = self
+            .active_connection
+            .and_then(|id| connections.iter().find(|connection| connection.id == id).cloned());
+
+        let body = match active_connection {
+            Some(connection) => self.render_connection_body(&connection, cx).into_any_element(),
+            None => self.render_add_connection_form(cx).into_any_element(),
+        };
 
         v_flex()
             .id("database-panel")
             .track_focus(&self.focus_handle(cx))
             .size_full()
             .bg(cx.theme().sidebar)
-            .child(
-                v_flex()
-                    .p_2()
-                    .gap_1()
-                    .child(
-                        Label::new("Connections")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .children(connection_rows)
-                    .when(connections.is_empty(), |this| {
-                        this.child(
-                            Label::new("No connections yet")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                    }),
-            )
-            .child(self.render_add_connection_form(cx))
+            .child(self.render_connection_tabs(&connections, cx))
+            .child(body)
     }
 }

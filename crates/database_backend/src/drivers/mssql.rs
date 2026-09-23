@@ -16,6 +16,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
 use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::query::QueryResult;
 
 /// A connected MSSQL client, over a plain TCP stream wrapped for tiberius's
 /// `AsyncRead + AsyncWrite` expectations.
@@ -85,6 +86,82 @@ pub async fn create_database(params: NetworkConnectParams, name: &str) -> Result
         .await
         .map_err(|e| DatabaseError::Connection(format!("failed to create database: {e}")))?;
     Ok(())
+}
+
+/// Runs one ad-hoc SQL statement — the SQL workbench's entry point.
+///
+/// A zero-column result (nothing in `into_first_result()`'s rows, so the
+/// column-name loop never ran) means this wasn't a row-returning statement
+/// at all — that's when `rows_affected` is populated, from the row count
+/// tiberius reports for the affected statement.
+pub async fn execute_query(client: &mut MsSqlClient, sql: &str) -> Result<QueryResult, DatabaseError> {
+    let start = std::time::Instant::now();
+    let stream = client
+        .query(sql, &[])
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("SQL error: {e}")))?;
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut rows_affected = None;
+
+    if let Ok(result_rows) = stream.into_first_result().await {
+        for row in &result_rows {
+            if columns.is_empty() {
+                columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+            }
+            rows.push((0..columns.len()).map(|i| mssql_cell(row, i)).collect());
+        }
+        // Only non-row-returning statements (INSERT/UPDATE/DELETE) leave
+        // `columns` empty here — a SELECT that matched nothing still ran the
+        // column-name loop above via at least its header, so this check
+        // only fires for the former.
+        if columns.is_empty() {
+            rows_affected = Some(result_rows.len() as u64);
+        }
+    }
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        rows_affected,
+        exec_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+/// Reads column `i` as a string, trying the common wire types in turn (see
+/// `fetch_schema`'s doc comment on `tiberius::Row::get()` panicking on a
+/// type mismatch — `try_get` is required here for the same reason). Dates,
+/// UUIDs, and `DECIMAL`/`NUMERIC` aren't covered yet (no `chrono`/`uuid`/
+/// `tiberius`'s `numeric` feature wired into this crate) — those cells
+/// render as empty for now rather than pulling in new dependencies for the
+/// workbench's first pass.
+fn mssql_cell(row: &tiberius::Row, i: usize) -> Option<String> {
+    if let Ok(Some(v)) = row.try_get::<&str, usize>(i) {
+        return Some(v.to_owned());
+    }
+    if let Ok(Some(v)) = row.try_get::<i64, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<i32, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<i16, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<u8, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<f64, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<f32, usize>(i) {
+        return Some(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<bool, usize>(i) {
+        return Some(if v { "1" } else { "0" }.to_owned());
+    }
+    None
 }
 
 /// Discovers every user table's columns and foreign keys in the connected

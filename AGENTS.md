@@ -31,3 +31,15 @@ shipped the corrected pattern: `dotnet_panel`'s quick actions run for real via
 `nuget_manager_panel` follows the restored npm-manager pattern
 (`setting::{Settings, SettingPage, …}` + `h_resizable`). The rule above
 governs any future rework of `node_panel` and all new ports.
+
+# Database Panel & Schema Graph (`database_panel`)
+
+The architecture and design specification for the Database Schema Graph Visualizer lives in
+[`crates/database_panel/DB_SCHEMA_GRAPH_ARCHITECTURE.md`](file:///E:/zed_Source/crates/database_panel/DB_SCHEMA_GRAPH_ARCHITECTURE.md).
+
+Key architectural guidelines for `database_panel`:
+- Built on **`gpui_component`** widgets and **`gpui_flow`** graph engine.
+- Supports multi-dialect DB introspection (SQLite, PostgreSQL, MySQL, MSSQL) via a normalized `SchemaIR`.
+- Employs a 4-stage **Sugiyama Layered DAG** layout engine for automatic graph positioning based on foreign-key dependency hierarchy.
+- Uses **column-level handle anchoring** (`HandleDef::source` / `HandleDef::target` with column handle IDs) on table card elements.
+- Provides a read-only schema explorer with search, relationship highlighting, minimap, and zoom/pan controls.

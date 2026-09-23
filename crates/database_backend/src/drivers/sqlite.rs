@@ -13,6 +13,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::errors::DatabaseError;
 use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::query::QueryResult;
 
 /// Wraps an identifier for interpolation into a PRAGMA statement.
 ///
@@ -121,6 +122,60 @@ fn table_foreign_keys(conn: &Connection, table: &str) -> Result<Vec<ForeignKey>,
     .map_err(|err| {
         DatabaseError::Connection(format!("failed to read foreign keys for {table}: {err}"))
     })
+}
+
+/// Runs one ad-hoc SQL statement — the SQL workbench's entry point.
+///
+/// `PRAGMA` statements aside, a non-row-returning statement (INSERT/UPDATE/
+/// DELETE/DDL) has zero result *columns*, not just zero rows — that's how
+/// this tells "wrote N rows" apart from "a SELECT matched nothing" (which
+/// still has columns, just an empty `rows` vec).
+pub fn execute_query(conn: &Connection, sql: &str) -> Result<QueryResult, DatabaseError> {
+    let start = std::time::Instant::now();
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|err| DatabaseError::Connection(format!("SQL error: {err}")))?;
+    let column_count = stmt.column_count();
+    let columns: Vec<String> = (0..column_count)
+        .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+        .collect();
+
+    let mut rows = Vec::new();
+    let mut rows_iter = stmt
+        .query([])
+        .map_err(|err| DatabaseError::Connection(format!("SQL error: {err}")))?;
+    while let Some(row) = rows_iter
+        .next()
+        .map_err(|err| DatabaseError::Connection(format!("SQL error: {err}")))?
+    {
+        rows.push((0..column_count).map(|i| sqlite_cell(row, i)).collect());
+    }
+    drop(rows_iter);
+    drop(stmt);
+
+    let rows_affected = if column_count == 0 {
+        Some(conn.changes())
+    } else {
+        None
+    };
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        rows_affected,
+        exec_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+fn sqlite_cell(row: &rusqlite::Row, i: usize) -> Option<String> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(i).ok()? {
+        ValueRef::Null => None,
+        ValueRef::Integer(v) => Some(v.to_string()),
+        ValueRef::Real(v) => Some(v.to_string()),
+        ValueRef::Text(v) => Some(String::from_utf8_lossy(v).into_owned()),
+        ValueRef::Blob(_) => Some("[BLOB]".to_string()),
+    }
 }
 
 fn stmt_for<'a>(

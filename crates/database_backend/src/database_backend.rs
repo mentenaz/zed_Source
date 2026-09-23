@@ -15,6 +15,7 @@ pub mod drivers;
 pub mod errors;
 pub mod metadata;
 pub mod models;
+pub mod query;
 
 pub use connection::{
     ConnectionId, ConnectionRegistry, ConnectionStatus, DatabaseId, NetworkConnectParams,
@@ -24,3 +25,4 @@ pub use drivers::DbType;
 pub use errors::DatabaseError;
 pub use metadata::{ColumnInfo, ForeignKey, TableInfo};
 pub use models::{ConnectionConfig, SavedDatabase};
+pub use query::QueryResult;

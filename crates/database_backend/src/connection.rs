@@ -235,6 +235,32 @@ impl ConnectionRegistry {
             }
         }
     }
+
+    /// Runs one ad-hoc SQL statement against `id`'s live connection,
+    /// dispatching to whichever driver it's actually connected with — the
+    /// SQL workbench's entry point.
+    pub async fn execute_query(
+        &self,
+        id: ConnectionId,
+        sql: &str,
+    ) -> Result<crate::query::QueryResult, DatabaseError> {
+        match self.connections.get(&id) {
+            None => Err(DatabaseError::NotFound(id)),
+            Some(DbConn::Sqlite(conn)) => {
+                let conn = conn.lock().unwrap();
+                sqlite::execute_query(&conn, sql)
+            }
+            Some(DbConn::Postgres(client)) => {
+                let client = client.lock().await;
+                postgres::execute_query(&client, sql).await
+            }
+            Some(DbConn::MySql(pool)) => mysql::execute_query(pool, sql).await,
+            Some(DbConn::MsSql(client)) => {
+                let mut client = client.lock().await;
+                mssql::execute_query(&mut client, sql).await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
