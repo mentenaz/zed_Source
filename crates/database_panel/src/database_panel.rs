@@ -1012,6 +1012,18 @@ impl DatabasePanel {
         if self.registry_busy {
             return;
         }
+        // Tuple-key routing: re-selecting a database that is ALREADY connected
+        // under `(id, name)` never re-dials — the live session is already in
+        // the tuple-key registry, so we just re-point the connection's active
+        // database to it and fetch its (cached) schema. Only an unconnected
+        // database falls through to a fresh network dial.
+        if self.registry.is_database_connected(id, &name) {
+            self.registry.set_active_database(id, &name);
+            self.fetch_schema(id, cx);
+            self.persist_connections(cx);
+            cx.notify();
+            return;
+        }
         let Some(connection) = self.connections.iter_mut().find(|c| c.id == id) else {
             return;
         };

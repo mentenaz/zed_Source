@@ -177,7 +177,7 @@ impl DatabasePanel {
 
     /// The discovered-database tab strip for a network connection: one `Tab`
     /// per database `discover_databases` found (the active database, if any,
-    /// highlighted), plus "+ Create database" / "Register existing database"
+    /// highlighted), plus "+ Create database" / "+ Add database"
     /// actions — mirrors the original Forge panel's post-connect database
     /// browser and `DATABASE_PANEL_SPEC.md`'s Navigation Phase 3 layout,
     /// using `gpui_component`'s `Tab`/`TabBar` (the same pattern
@@ -190,7 +190,7 @@ impl DatabasePanel {
         let id = connection.id;
         let is_creating = self.creating_database_for == Some(id);
         let input_border = cx.theme().border;
-        let active_ix = connection.database.as_ref().and_then(|active| {
+        let active_ix = self.registry.active_database(id).as_ref().and_then(|active| {
             connection
                 .databases
                 .iter()
@@ -243,9 +243,9 @@ impl DatabasePanel {
                             })),
                     )
                     .child(
-                        Button::new(("register-database", id.0))
+                        Button::new(("add-database", id.0))
                             .outline()
-                            .label("Register")
+                            .label("Add")
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.submit_register_database(window, cx);
                             })),
