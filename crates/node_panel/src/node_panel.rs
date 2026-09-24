@@ -47,6 +47,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     menu::ContextMenuExt,
+    panel_header::PanelHeader,
     spinner::Spinner,
     tag::Tag,
 };
@@ -1288,31 +1289,12 @@ fn render_package_json_body(
 
 impl Render for NodePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel_header = div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .px_3()
-                    .py_2()
-                    .child(
-                        svg()
-                            .path("icons/node.svg")
-                            .size(px(16.0))
-                            .text_color(cx.theme().foreground),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .child("Node"),
-                    ),
-            )
-            .child(div().h(px(1.0)).w_full().bg(cx.theme().border));
+        let panel_header = PanelHeader::new("Node").icon(
+            svg()
+                .path("icons/node.svg")
+                .size(px(16.0))
+                .text_color(cx.theme().foreground),
+        );
 
         if self.not_found {
             return div()

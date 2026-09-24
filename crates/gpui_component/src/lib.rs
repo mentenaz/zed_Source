@@ -52,6 +52,7 @@ pub mod menu;
 pub mod native_menu;
 pub mod notification;
 pub mod pagination;
+pub mod panel_header;
 pub mod plot;
 pub mod popover;
 pub mod progress;

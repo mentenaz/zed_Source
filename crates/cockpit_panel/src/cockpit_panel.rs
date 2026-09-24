@@ -20,7 +20,13 @@ use gpui::{
     Focusable, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, Styled, Task,
     WeakEntity, Window, actions, px,
 };
-use gpui_component::{ActiveTheme, IconName, scroll::ScrollableElement as _, v_flex};
+use gpui_component::{
+    ActiveTheme, Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    panel_header::PanelHeader,
+    scroll::ScrollableElement as _,
+    v_flex,
+};
 use sysinfo::{Disks, Networks, System};
 use workspace::{
     Workspace,
@@ -409,16 +415,23 @@ impl Render for CockpitPanel {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(header::cockpit_header(
-                IconName::ForgeCockpit2,
-                "Cockpit",
-                cx.theme().foreground,
-                cx.theme().border,
-                !self.embedded,
-                cx.listener(|_this, _e, window, cx| {
-                    window.dispatch_action(Box::new(OpenDashboard), cx);
-                }),
-            ))
+            .child({
+                let mut header = PanelHeader::new("Cockpit")
+                    .icon(Icon::new(IconName::ForgeCockpit2).text_color(cx.theme().foreground));
+                if !self.embedded {
+                    header = header.action(
+                        Button::new("cockpit-open-dashboard")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::LayoutDashboard)
+                            .label("Dashboard")
+                            .on_click(cx.listener(|_this, _e, window, cx| {
+                                window.dispatch_action(Box::new(OpenDashboard), cx);
+                            })),
+                    );
+                }
+                header
+            })
             .child(header::system_header(
                 self.cores,
                 self.uptime,

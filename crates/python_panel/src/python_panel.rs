@@ -61,6 +61,7 @@ use gpui_component::{
     collapsible::Collapsible,
     h_flex,
     label::Label,
+    panel_header::PanelHeader,
     spinner::Spinner,
     tag::Tag,
     v_flex,
@@ -692,31 +693,12 @@ impl Render for PythonPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        let panel_header = div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .px_3()
-                    .py_2()
-                    .child(
-                        svg()
-                            .path("icons/python.svg")
-                            .size(px(16.0))
-                            .text_color(theme.foreground),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_sm()
-                            .text_color(theme.foreground)
-                            .child("Python"),
-                    ),
-            )
-            .child(div().h(px(1.0)).w_full().bg(theme.border));
+        let panel_header = PanelHeader::new("Python").icon(
+            svg()
+                .path("icons/python.svg")
+                .size(px(16.0))
+                .text_color(theme.foreground),
+        );
 
         if self.py_ver.is_none() && !self.scanning {
             return div()

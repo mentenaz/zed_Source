@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Render, Styled as _, Subscription, Task, TextAlign, WeakEntity, Window, actions, div,
     prelude::FluentBuilder as _,
 };
@@ -33,6 +33,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::PopupMenu,
+    panel_header::PanelHeader,
     table::{Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableState},
     tag::Tag,
     v_flex,
@@ -51,34 +52,6 @@ const PROCESSES_TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// under what name/bucket — mirrors the source's `AppState::adopted`, just
 /// owned by this panel instead of a host app state.
 type Adopted = Arc<Mutex<HashMap<u32, (String, String)>>>;
-
-/// The icon + title heading block with a separator underneath — the same
-/// header row every ported `forge_shell` panel starts with.
-fn panel_header(
-    icon: IconName,
-    title: &'static str,
-    foreground: Hsla,
-    border: Hsla,
-) -> impl IntoElement {
-    v_flex()
-        .flex_shrink_0()
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .px_3()
-                .py_2()
-                .child(Icon::new(icon).text_color(foreground))
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_sm()
-                        .text_color(foreground)
-                        .child(title),
-                ),
-        )
-        .child(div().h(gpui::px(1.0)).w_full().bg(border))
-}
 
 // ── Actions ────────────────────────────────────────────────────────────
 // Dispatched by the table's right-click `PopupMenu` at runtime; the panel
@@ -834,12 +807,10 @@ impl Render for ProcessesPanel {
             .on_action(cx.listener(Self::on_adopt))
             .on_action(cx.listener(Self::on_release))
             .on_action(cx.listener(Self::on_kill))
-            .child(panel_header(
-                IconName::Cpu,
-                "Processes",
-                cx.theme().foreground,
-                cx.theme().border,
-            ))
+            .child(
+                PanelHeader::new("Processes")
+                    .icon(Icon::new(IconName::Cpu).text_color(cx.theme().foreground)),
+            )
             .when_some(self.pending_kill.clone(), |el, (pid, name)| {
                 el.child(self.render_kill_confirm(pid, &name, cx))
             })
