@@ -18,8 +18,9 @@ use crate::{DatabasePanel, SchemaState};
 
 impl DatabasePanel {
     /// The primary schema browser: filter + tree. One `tree_state` per
-    /// connection, so expansion state and rows for a connection survive tab
-    /// switches and re-renders.
+    /// `(connection, database)`, so expansion state and rows for one survive
+    /// tab switches and re-renders without leaking into another database on
+    /// the same connection.
     pub(crate) fn render_explorer_pane(
         &self,
         connection: &ConnectionConfig,
@@ -27,10 +28,9 @@ impl DatabasePanel {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = connection.id;
-        let is_loading =
-            matches!(self.schemas.get(&id), None | Some(SchemaState::Loading));
+        let is_loading = matches!(self.active_schema_state(id), None | Some(SchemaState::Loading));
         let schema_filter = self.schema_filter.clone();
-        let tree_state = self.tree_states.get(&id).cloned();
+        let tree_state = self.active_tree_state(id);
 
         v_flex()
             .id(("database-explorer", id.0))

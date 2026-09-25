@@ -6,8 +6,9 @@ pub mod postgres;
 pub mod sqlite;
 
 /// The database types the panel supports, per the spec's goals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum DbType {
+    #[default]
     Sqlite,
     Postgres,
     MySql,

@@ -41,6 +41,7 @@ impl DatabasePanel {
             .min_w_0()
             .child(
                 TabBar::new(("database-content-tabs", id.0))
+                    .px_3()
                     .children(ContentTab::ALL.iter().map(|tab| Tab::new().label(tab.title())))
                     .selected_index(self.content_tab.index())
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
