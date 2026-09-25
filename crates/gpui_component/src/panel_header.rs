@@ -69,7 +69,7 @@ impl RenderOnce for PanelHeader {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_sm()
+                            .text_lg()
                             .text_color(cx.theme().foreground)
                             .child(self.title),
                     )
