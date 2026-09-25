@@ -42,6 +42,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     collapsible::Collapsible,
     h_flex,
+    panel_header::PanelHeader,
     spinner::Spinner,
     tag::Tag,
 };
@@ -647,31 +648,12 @@ fn section_container(
 
 impl Render for DotNetPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel_header = div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .px_3()
-                    .py_2()
-                    .child(
-                        svg()
-                            .path("icons/dotnet.svg")
-                            .size(px(16.0))
-                            .text_color(cx.theme().foreground),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .child("Dotnet"),
-                    ),
-            )
-            .child(div().h(px(1.0)).w_full().bg(cx.theme().border));
+        let panel_header = PanelHeader::new("Dotnet").icon(
+            svg()
+                .path("icons/dotnet.svg")
+                .size(px(16.0))
+                .text_color(cx.theme().foreground),
+        );
 
         if self.not_found {
             return div()
