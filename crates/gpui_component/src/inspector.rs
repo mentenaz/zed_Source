@@ -8,8 +8,7 @@ use gpui::{
     inspector_reflection::FunctionReflection, prelude::FluentBuilder, px,
 };
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Diagnostic,
-    DiagnosticSeverity, Position, TextEdit,
+    CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticMessage, DiagnosticSeverity, Position, TextEdit,
 };
 use ropey::Rope;
 
@@ -48,10 +47,11 @@ pub(crate) fn init(cx: &mut App) {
         });
     });
 
-    cx.register_inspector_element(move |window, cx| {
-        let el = cx.new(|cx| DivInspector::new(window, cx));
-        move |id, state: &DivInspectorState, window, cx| {
-            el.update(cx, |this, cx| {
+    cx.register_inspector_element(|window, cx| {
+        let div_inspector = cx.new(|cx| DivInspector::new(window, cx));
+
+        move |id, state: &DivInspectorState, window: &mut Window, cx: &mut App| {
+            div_inspector.update(cx, |this, cx| {
                 this.update_inspected_element(id, state.clone(), window, cx);
                 this.render(window, cx).into_any_element()
             })
@@ -385,13 +385,13 @@ fn rust_to_style(mut style: StyleRefinement, source: &str) -> (StyleRefinement, 
         match style_methods.map.get(method.as_str()) {
             Some(method_reflection) => style = method_reflection.invoke(style),
             None => {
-                let message = format!("unknown method `{}`", method);
+                let message= format!("unknown method `{}`", method);
                 let start = rope.offset_to_position(offset.saturating_sub(method.len()));
                 let end = rope.offset_to_position(offset);
                 let diagnostic = lsp_types::Diagnostic {
                     range: lsp_types::Range::new(start, end),
                     severity: Some(DiagnosticSeverity::ERROR),
-                    message: lsp_types::DiagnosticMessage::String(message),
+                    message: DiagnosticMessage::String(message),
                     ..Default::default()
                 };
 
