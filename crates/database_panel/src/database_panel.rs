@@ -8,10 +8,9 @@
 //! (left), Overview/Tables/Views/Relationships content tabs (center) and an
 //! object inspector (right) — all resizable via `h_resizable`/`resizable_panel`.
 //! The SQL workbench is deferred (backend support stays intact in
-//! `database_backend`); Views shows an empty state until backend introspection
-//! lands. Passwords are never persisted on `ConnectionConfig` — they're
+//! `database_backend`). Passwords are never persisted on `ConnectionConfig` — they're
 //! read/written exclusively through `zed_credentials_provider`, keyed by
-//! `credential_url(db_type, host, port)`. Reconnect is manual only.
+//! `credential_url(db_type, host, port)`.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -19,7 +18,7 @@ use std::rc::Rc;
 use anyhow::Result;
 use database_backend::{
     ConnectionConfig, ConnectionId, ConnectionRegistry, ConnectionStatus, DatabaseId, DbType,
-    NetworkConnectParams, SavedDatabase, TableInfo, credential_url,
+    NetworkConnectParams, SavedDatabase, TableInfo, ViewInfo, credential_url,
 };
 use db::kvp::KeyValueStore;
 use gpui::{
@@ -29,8 +28,9 @@ use gpui::{
     WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName as GIconName, Sizable as _, Size, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName as GIconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
+    h_flex,
     input::{Input, InputEvent, InputState},
     panel_header::PanelHeader,
     resizable::{h_resizable, resizable_panel},
@@ -48,8 +48,14 @@ use workspace::{
 
 mod content;
 mod explorer;
+mod graph;
 mod header;
 mod inspector;
+mod ir;
+mod layout;
+mod workbench;
+
+use workbench::WorkbenchState;
 
 const DATABASE_CONNECTIONS_KVP_KEY: &str = "database-panel-connections";
 const DATABASE_SCHEMA_CACHE_KVP_KEY: &str = "database-panel-schema-cache";
@@ -58,7 +64,10 @@ const DATABASE_SCHEMA_CACHE_KVP_KEY: &str = "database-panel-schema-cache";
 #[derive(Clone)]
 enum SchemaState {
     Loading,
-    Loaded(Rc<[TableInfo]>),
+    Loaded {
+        tables: Rc<[TableInfo]>,
+        views: Rc<[ViewInfo]>,
+    },
     Error(String),
 }
 
@@ -77,14 +86,16 @@ pub(crate) enum ContentTab {
     Tables,
     Views,
     Relationships,
+    SchemaGraph,
 }
 
 impl ContentTab {
-    pub(crate) const ALL: [ContentTab; 4] = [
+    pub(crate) const ALL: [ContentTab; 5] = [
         ContentTab::Overview,
         ContentTab::Tables,
         ContentTab::Views,
         ContentTab::Relationships,
+        ContentTab::SchemaGraph,
     ];
 
     pub(crate) fn index(self) -> usize {
@@ -93,6 +104,7 @@ impl ContentTab {
             ContentTab::Tables => 1,
             ContentTab::Views => 2,
             ContentTab::Relationships => 3,
+            ContentTab::SchemaGraph => 4,
         }
     }
 
@@ -101,6 +113,7 @@ impl ContentTab {
             1 => ContentTab::Tables,
             2 => ContentTab::Views,
             3 => ContentTab::Relationships,
+            4 => ContentTab::SchemaGraph,
             _ => ContentTab::Overview,
         }
     }
@@ -111,6 +124,7 @@ impl ContentTab {
             ContentTab::Tables => "Tables",
             ContentTab::Views => "Views",
             ContentTab::Relationships => "Relationships",
+            ContentTab::SchemaGraph => "Schema Graph",
         }
     }
 }
@@ -120,6 +134,24 @@ impl ContentTab {
 pub(crate) enum SchemaSelection {
     Table { name: String },
     Column { table: String, column: String },
+    Index { table: String, index: String },
+    View { name: String },
+    ViewColumn { view: String, column: String },
+}
+
+/// The table behind the explorer tree's current selection, plus which single
+/// column or index (if either) within it is selected — see `selected_table`.
+pub(crate) struct TableSelection<'a> {
+    pub(crate) selected_column: Option<String>,
+    pub(crate) selected_index: Option<String>,
+    pub(crate) table: &'a TableInfo,
+}
+
+/// The view behind the explorer tree's current selection, plus which single
+/// column (if any) within it is selected — see `selected_view`.
+pub(crate) struct ViewSelection<'a> {
+    pub(crate) selected_column: Option<String>,
+    pub(crate) view: &'a ViewInfo,
 }
 
 /// One `(connection, database)` slot's cached schema, as persisted. A flat
@@ -130,6 +162,8 @@ struct SerializedSchemaCacheEntry {
     connection_id: ConnectionId,
     database: String,
     tables: Vec<TableInfo>,
+    #[serde(default)]
+    views: Vec<ViewInfo>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -138,13 +172,16 @@ struct SerializedSchemaCache {
 }
 
 /// Builds the tree items for one table: the table itself, with a child item
-/// per column. Column labels bake in type/PK/nullability, since `TreeItem`
-/// carries only an id and a display label — there's no separate typed slot
-/// for a renderer to inspect, so `render_item` differentiates tables from
-/// columns purely by `TreeEntry::depth()`. When `needle` is non-empty, only
-/// matching columns are included as children.
+/// per column followed by a child item per index. Column/index labels bake
+/// in their details, since `TreeItem` carries only an id and a display label
+/// — there's no separate typed slot for a renderer to inspect, so
+/// `render_item` differentiates tables/columns/indexes purely by
+/// `TreeEntry::depth()` plus the id shape `selected_schema_item` decodes
+/// (`table`, `table::column`, `table::idx::index`, checked in that order of
+/// specificity). When `needle` is non-empty, only matching columns/indexes
+/// are included as children.
 fn table_tree_item(table: &TableInfo, needle: &str) -> TreeItem {
-    let children = table
+    let column_children = table
         .columns
         .iter()
         .filter(|column| needle.is_empty() || column.name.to_lowercase().contains(needle))
@@ -159,17 +196,33 @@ fn table_tree_item(table: &TableInfo, needle: &str) -> TreeItem {
                 ),
             )
         });
+    let index_children = table
+        .indexes
+        .iter()
+        .filter(|index| needle.is_empty() || index.name.to_lowercase().contains(needle))
+        .map(|index| {
+            let unique_suffix = if index.unique { " · UNIQUE" } else { "" };
+            TreeItem::new(
+                format!("{}::idx::{}", table.name, index.name),
+                format!(
+                    "{}  ({}){}",
+                    index.name,
+                    index.columns.join(", "),
+                    unique_suffix
+                ),
+            )
+        });
     TreeItem::new(
         table.name.clone(),
         format!("{}  ({})", table.name, table.columns.len()),
     )
     .expanded(true)
-    .children(children)
+    .children(column_children.chain(index_children))
 }
 
 /// Whether `table` matches the explorer's filter `needle`: its own name, or
-/// any of its columns' names (case-insensitive). An empty needle matches
-/// everything.
+/// any of its columns'/indexes' names (case-insensitive). An empty needle
+/// matches everything.
 fn table_matches(table: &TableInfo, needle: &str) -> bool {
     needle.is_empty()
         || table.name.to_lowercase().contains(needle)
@@ -177,6 +230,59 @@ fn table_matches(table: &TableInfo, needle: &str) -> bool {
             .columns
             .iter()
             .any(|column| column.name.to_lowercase().contains(needle))
+        || table
+            .indexes
+            .iter()
+            .any(|index| index.name.to_lowercase().contains(needle))
+}
+
+/// Builds the tree item for one view: the view itself (id `view::{name}`, so
+/// `selected_schema_item` can tell it apart from a table at a glance), with a
+/// child item per column (id `view::{name}::{column}`). Mirrors
+/// `table_tree_item`'s shape, minus indexes/foreign keys — a view has neither.
+fn view_tree_item(view: &ViewInfo, needle: &str) -> TreeItem {
+    let children = view
+        .columns
+        .iter()
+        .filter(|column| needle.is_empty() || column.name.to_lowercase().contains(needle))
+        .map(|column| {
+            TreeItem::new(
+                format!("view::{}::{}", view.name, column.name),
+                format!("{}  {}", column.name, column.type_name),
+            )
+        });
+    TreeItem::new(
+        format!("view::{}", view.name),
+        format!("{}  ({})", view.name, view.columns.len()),
+    )
+    .expanded(true)
+    .children(children)
+}
+
+/// Whether `view` matches the explorer's filter `needle`: its own name, or
+/// any of its columns' names (case-insensitive). An empty needle matches
+/// everything.
+fn view_matches(view: &ViewInfo, needle: &str) -> bool {
+    needle.is_empty()
+        || view.name.to_lowercase().contains(needle)
+        || view
+            .columns
+            .iter()
+            .any(|column| column.name.to_lowercase().contains(needle))
+}
+
+/// Builds the full explorer tree — every matching table, then every matching
+/// view — for one schema fetch, applying the filter `needle` to both.
+fn schema_tree_items(tables: &[TableInfo], views: &[ViewInfo], needle: &str) -> Vec<TreeItem> {
+    let table_items = tables
+        .iter()
+        .filter(|table| table_matches(table, needle))
+        .map(|table| table_tree_item(table, needle));
+    let view_items = views
+        .iter()
+        .filter(|view| view_matches(view, needle))
+        .map(|view| view_tree_item(view, needle));
+    table_items.chain(view_items).collect()
 }
 
 /// The default port to pre-fill when a network type is first selected in the
@@ -192,7 +298,12 @@ fn default_port(db_type: DbType) -> u16 {
 
 /// The panel-level type tabs, in display order — fixed regardless of how
 /// many connections (if any) exist for each type.
-const DB_TYPES: [DbType; 4] = [DbType::Sqlite, DbType::Postgres, DbType::MySql, DbType::MsSql];
+const DB_TYPES: [DbType; 4] = [
+    DbType::Sqlite,
+    DbType::Postgres,
+    DbType::MySql,
+    DbType::MsSql,
+];
 
 actions!(
     database_panel,
@@ -230,6 +341,9 @@ struct SerializedDatabasePanel {
 
 pub struct DatabasePanel {
     focus_handle: FocusHandle,
+    /// Held so the "Workbench" button can open/activate a real workspace tab
+    /// (`workbench::WorkbenchTab`) — see `workbench::open`.
+    workspace: WeakEntity<Workspace>,
     connections: Vec<ConnectionConfig>,
     /// The selected type tab (`[SQLite][PostgreSQL][MySQL][MSSQL]`), which
     /// filters the connection tab strip below it to that type's servers.
@@ -255,6 +369,9 @@ pub struct DatabasePanel {
     statuses: HashMap<ConnectionId, ConnectionStatus>,
     schemas: HashMap<SchemaKey, SchemaState>,
     tree_states: HashMap<SchemaKey, Entity<TreeState>>,
+    /// Separate tree state for each workbench sidebar so its scroll and
+    /// selection do not follow the docked schema explorer.
+    workbench_tree_states: HashMap<SchemaKey, Entity<TreeState>>,
     /// Shared filter for the schema explorer. Only one connection tab is
     /// visible at a time, so a single `InputState` is enough for now.
     schema_filter: Entity<InputState>,
@@ -283,9 +400,18 @@ pub struct DatabasePanel {
     /// discovered-but-not-yet-connected database list) — only one at a time,
     /// same model as `creating_database_for`.
     opening_database_for: Option<ConnectionId>,
+    /// Live SQL workbenches, one per `(connection, database)` that has had
+    /// one opened this session — see `workbench::WorkbenchState`.
+    workbenches: HashMap<SchemaKey, WorkbenchState>,
+    schema_graphs: HashMap<SchemaKey, Entity<graph::SchemaGraphView>>,
+    /// Every `(connection, database)`'s persisted query history, including
+    /// ones with no currently-open `WorkbenchState` — seeds a fresh
+    /// `WorkbenchState.history` the next time that key's workbench opens.
+    workbench_history: HashMap<SchemaKey, Vec<String>>,
     _filter_subscription: Subscription,
     _persist_task: Task<()>,
     _schema_persist_task: Task<()>,
+    _workbench_persist_task: Task<()>,
 }
 
 impl DatabasePanel {
@@ -298,15 +424,18 @@ impl DatabasePanel {
         mut cx: AsyncWindowContext,
     ) -> Result<Entity<Self>> {
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            DatabasePanel::new(workspace, window, cx)
+            let panel = DatabasePanel::new(workspace, window, cx);
+            panel.update(cx, |panel, cx| panel.reconnect_saved_connections(cx));
+            panel
         })
     }
 
     pub fn new(
-        _workspace: &mut Workspace,
+        workspace: &mut Workspace,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
+        let workspace_handle = workspace.weak_handle();
         cx.new(|cx| {
             let SerializedDatabasePanel {
                 connections,
@@ -322,19 +451,23 @@ impl DatabasePanel {
             let cached_schemas = Self::load_persisted_schema_cache(cx);
             let mut schemas = HashMap::default();
             let mut tree_states = HashMap::default();
-            for (key, tables) in cached_schemas {
-                let items: Vec<TreeItem> = tables.iter().map(|table| table_tree_item(table, "")) .collect();
+            for (key, (tables, views)) in cached_schemas {
+                let items = schema_tree_items(&tables, &views, "");
                 let tree_state = cx.new(|cx| TreeState::new(cx).items(items));
                 tree_states.insert(key.clone(), tree_state);
-                schemas.insert(key, SchemaState::Loaded(tables.into()));
+                schemas.insert(
+                    key,
+                    SchemaState::Loaded {
+                        tables: tables.into(),
+                        views: views.into(),
+                    },
+                );
             }
 
-            let new_connection_password =
-                cx.new(|cx| InputState::new(window, cx).masked(true));
+            let new_connection_password = cx.new(|cx| InputState::new(window, cx).masked(true));
             let new_database_name = cx.new(|cx| InputState::new(window, cx));
-            let schema_filter = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Filter tables or columns…")
-            });
+            let schema_filter =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Filter tables or columns…"));
 
             let _filter_subscription =
                 cx.subscribe_in(&schema_filter, window, Self::on_schema_filter_changed);
@@ -360,6 +493,7 @@ impl DatabasePanel {
 
             Self {
                 focus_handle: cx.focus_handle(),
+                workspace: workspace_handle,
                 connections,
                 active_type,
                 active_connection_by_type,
@@ -369,6 +503,7 @@ impl DatabasePanel {
                 statuses: HashMap::default(),
                 schemas,
                 tree_states,
+                workbench_tree_states: HashMap::default(),
                 schema_filter,
                 content_tab: ContentTab::default(),
                 new_connection_title: String::new(),
@@ -384,9 +519,13 @@ impl DatabasePanel {
                 creating_database_for: None,
                 new_database_name,
                 opening_database_for: None,
+                workbenches: HashMap::default(),
+                schema_graphs: HashMap::default(),
+                workbench_history: Self::load_persisted_workbench_history(cx),
                 _filter_subscription,
                 _persist_task: Task::ready(()),
                 _schema_persist_task: Task::ready(()),
+                _workbench_persist_task: Task::ready(()),
             }
         })
     }
@@ -400,7 +539,56 @@ impl DatabasePanel {
             .unwrap_or_default()
     }
 
-    fn load_persisted_schema_cache(cx: &App) -> HashMap<SchemaKey, Vec<TableInfo>> {
+    /// Reconnects saved connections after the panel is restored. Network
+    /// connections and schema fetches temporarily own the registry, so they
+    /// must be started one at a time instead of racing through `connect`.
+    fn reconnect_saved_connections(&mut self, cx: &mut Context<Self>) {
+        let ids = self
+            .connections
+            .iter()
+            .map(|connection| connection.id)
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+
+        let panel = cx.entity();
+        cx.spawn(async move |_, cx| {
+            for id in ids {
+                loop {
+                    let started = panel.update(cx, |panel, cx| {
+                        if panel.registry_busy {
+                            false
+                        } else {
+                            panel.connect(id, cx);
+                            true
+                        }
+                    });
+                    if started {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                }
+
+                loop {
+                    let busy = panel.update(cx, |panel, _| panel.registry_busy);
+                    if !busy {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn load_persisted_schema_cache(
+        cx: &App,
+    ) -> HashMap<SchemaKey, (Vec<TableInfo>, Vec<ViewInfo>)> {
         KeyValueStore::global(cx)
             .read_kvp(DATABASE_SCHEMA_CACHE_KVP_KEY)
             .ok()
@@ -410,7 +598,12 @@ impl DatabasePanel {
                 cache
                     .entries
                     .into_iter()
-                    .map(|entry| ((entry.connection_id, entry.database), entry.tables))
+                    .map(|entry| {
+                        (
+                            (entry.connection_id, entry.database),
+                            (entry.tables, entry.views),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -453,10 +646,11 @@ impl DatabasePanel {
             .schemas
             .iter()
             .filter_map(|((connection_id, database), state)| match state {
-                SchemaState::Loaded(tables) => Some(SerializedSchemaCacheEntry {
+                SchemaState::Loaded { tables, views } => Some(SerializedSchemaCacheEntry {
                     connection_id: *connection_id,
                     database: database.clone(),
                     tables: tables.to_vec(),
+                    views: views.to_vec(),
                 }),
                 SchemaState::Loading | SchemaState::Error(_) => None,
             })
@@ -502,23 +696,31 @@ impl DatabasePanel {
 
         cx.spawn(async move |this, cx| {
             let result = gpui_tokio::Tokio::spawn_result(cx, async move {
-                let tables = registry.fetch_schema(id).await;
-                anyhow::Ok((registry, tables))
+                let schema = registry.fetch_schema(id).await;
+                anyhow::Ok((registry, schema))
             })
             .await;
 
             this.update(cx, |this, cx| {
                 this.registry_busy = false;
                 match result {
-                    Ok((registry, Ok(tables))) => {
+                    Ok((registry, Ok(schema))) => {
                         this.registry = registry;
-                        this.update_tree_items(key.clone(), &tables, cx);
-                        this.schemas.insert(key, SchemaState::Loaded(tables.into()));
+                        this.update_tree_items(key.clone(), &schema.tables, &schema.views, cx);
+                        this.schemas.insert(
+                            key.clone(),
+                            SchemaState::Loaded {
+                                tables: schema.tables.into(),
+                                views: schema.views.into(),
+                            },
+                        );
+                        this.refresh_workbench_candidates(&key);
                         this.persist_schema_cache(cx);
                     }
                     Ok((registry, Err(err))) => {
                         this.registry = registry;
-                        this.schemas.insert(key, SchemaState::Error(err.to_string()));
+                        this.schemas
+                            .insert(key, SchemaState::Error(err.to_string()));
                     }
                     Err(err) => {
                         // The tokio task itself failed to join (panicked or
@@ -526,7 +728,8 @@ impl DatabasePanel {
                         // along with every connection that was live in it.
                         this.registry = ConnectionRegistry::new();
                         this.statuses.clear();
-                        this.schemas.insert(key, SchemaState::Error(err.to_string()));
+                        this.schemas
+                            .insert(key, SchemaState::Error(err.to_string()));
                     }
                 }
                 cx.notify();
@@ -536,15 +739,17 @@ impl DatabasePanel {
         .detach();
     }
 
-    /// Creates or updates `key`'s `TreeState` with `tables`' current shape,
-    /// applying the active schema filter.
-    fn update_tree_items(&mut self, key: SchemaKey, tables: &[TableInfo], cx: &mut Context<Self>) {
+    /// Creates or updates `key`'s `TreeState` with `tables`'/`views`' current
+    /// shape, applying the active schema filter.
+    fn update_tree_items(
+        &mut self,
+        key: SchemaKey,
+        tables: &[TableInfo],
+        views: &[ViewInfo],
+        cx: &mut Context<Self>,
+    ) {
         let needle = self.schema_filter.read(cx).value().to_lowercase();
-        let items: Vec<TreeItem> = tables
-            .iter()
-            .filter(|table| table_matches(table, &needle))
-            .map(|table| table_tree_item(table, &needle))
-            .collect();
+        let items = schema_tree_items(tables, views, &needle);
         match self.tree_states.get(&key) {
             Some(tree_state) => {
                 tree_state.update(cx, |tree_state, cx| tree_state.set_items(items, cx));
@@ -576,25 +781,32 @@ impl DatabasePanel {
             return;
         };
         let key: SchemaKey = (id, database);
-        let Some(SchemaState::Loaded(tables)) = self.schemas.get(&key) else {
+        let Some(SchemaState::Loaded { tables, views }) = self.schemas.get(&key) else {
             return;
         };
         let tables = tables.clone();
+        let views = views.clone();
         let previous = self.selected_schema_item(id, cx);
-        self.update_tree_items(key.clone(), &tables, cx);
+        self.update_tree_items(key.clone(), &tables, &views, cx);
 
-        let Some(SchemaSelection::Table { name }) = previous else {
-            return;
-        };
         let needle = self.schema_filter.read(cx).value().to_lowercase();
-        let Some(table) = tables.iter().find(|table| table.name == name) else {
+        let reselect = match previous {
+            Some(SchemaSelection::Table { name }) => tables
+                .iter()
+                .find(|table| table.name == name)
+                .filter(|table| table_matches(table, &needle))
+                .map(|table| table_tree_item(table, &needle)),
+            Some(SchemaSelection::View { name }) => views
+                .iter()
+                .find(|view| view.name == name)
+                .filter(|view| view_matches(view, &needle))
+                .map(|view| view_tree_item(view, &needle)),
+            _ => None,
+        };
+        let Some(item) = reselect else {
             return;
         };
-        if !table_matches(table, &needle) {
-            return;
-        }
         if let Some(tree_state) = self.tree_states.get(&key) {
-            let item = table_tree_item(table, &needle);
             tree_state.update(cx, |tree_state, cx| {
                 tree_state.set_selected_item(Some(&item), cx);
             });
@@ -616,39 +828,112 @@ impl DatabasePanel {
     }
 
     /// What (if anything) is selected in `id`'s active database's schema
-    /// tree, decoded from the item's id (`table_name` vs `table::column`).
+    /// tree, decoded from the item's id — a `view::`-prefixed id is a view
+    /// (or one of its columns); otherwise `table`, `table::column`, or
+    /// `table::idx::index` (checked in that order of specificity, since a
+    /// column id is itself a `table::column`-shaped prefix of an index id).
     fn selected_schema_item(&self, id: ConnectionId, cx: &App) -> Option<SchemaSelection> {
         let tree_state = self.active_tree_state(id)?;
         let item = tree_state.read(cx).selected_item()?;
         let id_str = item.id.as_str();
-        if let Some((table, column)) = id_str.split_once("::") {
+        if let Some(rest) = id_str.strip_prefix("view::") {
+            if let Some((view, column)) = rest.split_once("::") {
+                Some(SchemaSelection::ViewColumn {
+                    view: view.to_string(),
+                    column: column.to_string(),
+                })
+            } else {
+                Some(SchemaSelection::View {
+                    name: rest.to_string(),
+                })
+            }
+        } else if let Some((table, index)) = id_str.split_once("::idx::") {
+            Some(SchemaSelection::Index {
+                table: table.to_string(),
+                index: index.to_string(),
+            })
+        } else if let Some((table, column)) = id_str.split_once("::") {
             Some(SchemaSelection::Column {
                 table: table.to_string(),
                 column: column.to_string(),
             })
         } else {
-            Some(SchemaSelection::Table { name: id_str.to_string() })
+            Some(SchemaSelection::Table {
+                name: id_str.to_string(),
+            })
         }
     }
 
-    /// The table (and optional selected column) behind `connection`'s current
-    /// tree selection, if any.
+    /// The table behind `connection`'s current tree selection, if any, along
+    /// with which of its columns or indexes (at most one of either) is
+    /// selected — the content pane's Tables tab and its Columns/Indexes
+    /// sections highlight whichever one that is.
     fn selected_table<'a>(
         &self,
         connection: &ConnectionConfig,
         tables: &'a [TableInfo],
         cx: &App,
-    ) -> Option<(Option<String>, &'a TableInfo)> {
+    ) -> Option<TableSelection<'a>> {
         let selection = self.selected_schema_item(connection.id, cx)?;
         match selection {
-            SchemaSelection::Table { name } => tables
-                .iter()
-                .find(|table| table.name == name)
-                .map(|table| (None, table)),
+            SchemaSelection::Table { name } => {
+                tables
+                    .iter()
+                    .find(|table| table.name == name)
+                    .map(|table| TableSelection {
+                        selected_column: None,
+                        selected_index: None,
+                        table,
+                    })
+            }
             SchemaSelection::Column { table, column } => tables
                 .iter()
                 .find(|candidate| candidate.name == table)
-                .map(|table| (Some(column), table)),
+                .map(|table| TableSelection {
+                    selected_column: Some(column),
+                    selected_index: None,
+                    table,
+                }),
+            SchemaSelection::Index { table, index } => tables
+                .iter()
+                .find(|candidate| candidate.name == table)
+                .map(|table| TableSelection {
+                    selected_column: None,
+                    selected_index: Some(index),
+                    table,
+                }),
+            SchemaSelection::View { .. } | SchemaSelection::ViewColumn { .. } => None,
+        }
+    }
+
+    /// The view behind `connection`'s current tree selection, if any, along
+    /// with which of its columns (if any) is selected — mirrors
+    /// `selected_table` for the Views tab/inspector.
+    fn selected_view<'a>(
+        &self,
+        connection: &ConnectionConfig,
+        views: &'a [ViewInfo],
+        cx: &App,
+    ) -> Option<ViewSelection<'a>> {
+        let selection = self.selected_schema_item(connection.id, cx)?;
+        match selection {
+            SchemaSelection::View { name } => {
+                views
+                    .iter()
+                    .find(|view| view.name == name)
+                    .map(|view| ViewSelection {
+                        selected_column: None,
+                        view,
+                    })
+            }
+            SchemaSelection::ViewColumn { view, column } => views
+                .iter()
+                .find(|candidate| candidate.name == view)
+                .map(|view| ViewSelection {
+                    selected_column: Some(column),
+                    view,
+                }),
+            _ => None,
         }
     }
 
@@ -870,21 +1155,24 @@ impl DatabasePanel {
         else {
             return;
         };
-        let database = connection.database.filter(|d| !d.trim().is_empty()).unwrap_or_else(|| {
-            // An unset Postgres `dbname` isn't "no default database" — the
-            // server falls back to a database named after the connecting
-            // user, which almost never exists (see e.g. `FATAL: database
-            // "dev_user" does not exist`). "postgres" (the standard
-            // maintenance DB every install has) is the useful default here.
-            // MySQL/MSSQL don't have this footgun: an empty MySQL dbname is
-            // a normal "no default DB yet" connection, and MSSQL falls back
-            // to the login's configured default DB (usually "master").
-            if db_type == DbType::Postgres {
-                "postgres".to_string()
-            } else {
-                String::new()
-            }
-        });
+        let database = connection
+            .database
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| {
+                // An unset Postgres `dbname` isn't "no default database" — the
+                // server falls back to a database named after the connecting
+                // user, which almost never exists (see e.g. `FATAL: database
+                // "dev_user" does not exist`). "postgres" (the standard
+                // maintenance DB every install has) is the useful default here.
+                // MySQL/MSSQL don't have this footgun: an empty MySQL dbname is
+                // a normal "no default DB yet" connection, and MSSQL falls back
+                // to the login's configured default DB (usually "master").
+                if db_type == DbType::Postgres {
+                    "postgres".to_string()
+                } else {
+                    String::new()
+                }
+            });
         let ssl = connection.ssl;
         let key = credential_url(db_type, &host, port);
 
@@ -910,9 +1198,7 @@ impl DatabasePanel {
                         this.registry_busy = false;
                         this.statuses.insert(
                             id,
-                            ConnectionStatus::Error(
-                                "No saved password for this connection".into(),
-                            ),
+                            ConnectionStatus::Error("No saved password for this connection".into()),
                         );
                         cx.notify();
                     })
@@ -975,7 +1261,9 @@ impl DatabasePanel {
                             .insert(id, ConnectionStatus::Error(err.to_string()));
                     }
                     Err(err) => {
-                        log::error!("database_panel: connect {id:?} task panicked/cancelled: {err}");
+                        log::error!(
+                            "database_panel: connect {id:?} task panicked/cancelled: {err}"
+                        );
                         this.registry = ConnectionRegistry::new();
                         this.statuses.clear();
                         this.statuses
@@ -1101,9 +1389,7 @@ impl DatabasePanel {
                             })
                             .collect();
                         this.next_database_id = next_id;
-                        if let Some(connection) =
-                            this.connections.iter_mut().find(|c| c.id == id)
-                        {
+                        if let Some(connection) = this.connections.iter_mut().find(|c| c.id == id) {
                             connection.databases = databases;
                         }
                         // Only the "was never connected" probe outcome — a
@@ -1157,7 +1443,10 @@ impl DatabasePanel {
             // its database, so a schema entry keyed to `(id, name)` only
             // stays missing here if the very first fetch is still in flight
             // (or failed) — genuinely new work, not a stale-cache refresh.
-            if !matches!(self.schemas.get(&(id, name)), Some(SchemaState::Loaded(_))) {
+            if !matches!(
+                self.schemas.get(&(id, name)),
+                Some(SchemaState::Loaded { .. })
+            ) {
                 self.fetch_schema(id, cx);
             }
             self.persist_connections(cx);
@@ -1194,7 +1483,12 @@ impl DatabasePanel {
 
     /// Opens the "Create database" input for `id`'s picker (only one
     /// connection's at a time, and mutually exclusive with "Open existing").
-    fn start_create_database(&mut self, id: ConnectionId, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_create_database(
+        &mut self,
+        id: ConnectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.opening_database_for = None;
         self.creating_database_for = Some(id);
         self.new_database_name.update(cx, |state, cx| {
@@ -1248,9 +1542,7 @@ impl DatabasePanel {
                     this.update(cx, |this, cx| {
                         this.statuses.insert(
                             id,
-                            ConnectionStatus::Error(
-                                "No saved password for this connection".into(),
-                            ),
+                            ConnectionStatus::Error("No saved password for this connection".into()),
                         );
                         cx.notify();
                     })
@@ -1278,7 +1570,8 @@ impl DatabasePanel {
             match result {
                 Ok(()) => {
                     log::info!("database_panel: create database on {id:?} succeeded");
-                    this.update(cx, |this, cx| this.discover_databases(id, cx)).ok();
+                    this.update(cx, |this, cx| this.discover_databases(id, cx))
+                        .ok();
                 }
                 Err(err) => {
                     log::error!("database_panel: create database on {id:?} failed: {err}");
@@ -1354,6 +1647,7 @@ impl DatabasePanel {
         // drop all of them, not just a single `id`-keyed one.
         self.schemas.retain(|key, _| key.0 != id);
         self.tree_states.retain(|key, _| key.0 != id);
+        self.workbench_tree_states.retain(|key, _| key.0 != id);
         if self.active_connection == Some(id) {
             self.sync_active_connection_for_type();
         }
@@ -1387,9 +1681,9 @@ impl DatabasePanel {
             .get(&self.active_type)
             .copied()
             .filter(|id| {
-                self.connections
-                    .iter()
-                    .any(|connection| connection.id == *id && connection.db_type == self.active_type)
+                self.connections.iter().any(|connection| {
+                    connection.id == *id && connection.db_type == self.active_type
+                })
             })
             .or_else(|| {
                 self.connections
@@ -1403,7 +1697,12 @@ impl DatabasePanel {
     /// (that type's connections, in the order the strip rendered them)
     /// selects that connection; the trailing index (the "+" tab) opens the
     /// Add Connection form instead, locked to `active_type`.
-    fn select_connection_tab(&mut self, filtered_ids: &[ConnectionId], ix: usize, cx: &mut Context<Self>) {
+    fn select_connection_tab(
+        &mut self,
+        filtered_ids: &[ConnectionId],
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) {
         match filtered_ids.get(ix) {
             Some(&id) => {
                 self.active_connection = Some(id);
@@ -1561,60 +1860,62 @@ impl DatabasePanel {
         let mut group = SettingGroup::new().item(SettingItem::new("Title", title_field));
 
         group = match db_type {
-            DbType::Sqlite => group
-                .item(SettingItem::new("File Path", path_field))
-                .item(SettingItem::render(move |_options, _window, _cx| {
-                    let browse_entity = browse_entity.clone();
-                    let connect_entity = sqlite_connect_entity.clone();
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("browse-sqlite-path")
-                                .outline()
-                                .label("Browse…")
-                                .on_click(move |_, window, cx| {
-                                    let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
-                                        files: true,
-                                        directories: false,
-                                        multiple: false,
-                                        prompt: Some("Select SQLite Database".into()),
-                                    });
-                                    let browse_entity = browse_entity.clone();
-                                    window
-                                        .spawn(cx, async move |cx| {
-                                            let Some(mut paths) = prompt
-                                                .await
-                                                .ok()
-                                                .and_then(Result::ok)
-                                                .flatten()
-                                            else {
-                                                return;
-                                            };
-                                            let Some(path) = paths.pop() else {
-                                                return;
-                                            };
-                                            browse_entity.update(cx, |this, cx| {
-                                                this.new_connection_path =
-                                                    path.to_string_lossy().into_owned();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .detach();
-                                }),
-                        )
-                        .child(
-                            Button::new("add-connection")
-                                .label("Connect")
-                                .primary()
-                                .disabled(busy)
-                                .on_click(move |_, window, cx| {
-                                    connect_entity.update(cx, |this, cx| {
-                                        this.add_connection(window, cx);
-                                    });
-                                }),
-                        )
-                        .into_any_element()
-                })),
+            DbType::Sqlite => {
+                group
+                    .item(SettingItem::new("File Path", path_field))
+                    .item(SettingItem::render(move |_options, _window, _cx| {
+                        let browse_entity = browse_entity.clone();
+                        let connect_entity = sqlite_connect_entity.clone();
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("browse-sqlite-path")
+                                    .outline()
+                                    .label("Browse…")
+                                    .on_click(move |_, window, cx| {
+                                        let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                            files: true,
+                                            directories: false,
+                                            multiple: false,
+                                            prompt: Some("Select SQLite Database".into()),
+                                        });
+                                        let browse_entity = browse_entity.clone();
+                                        window
+                                            .spawn(cx, async move |cx| {
+                                                let Some(mut paths) = prompt
+                                                    .await
+                                                    .ok()
+                                                    .and_then(Result::ok)
+                                                    .flatten()
+                                                else {
+                                                    return;
+                                                };
+                                                let Some(path) = paths.pop() else {
+                                                    return;
+                                                };
+                                                browse_entity.update(cx, |this, cx| {
+                                                    this.new_connection_path =
+                                                        path.to_string_lossy().into_owned();
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                    }),
+                            )
+                            .child(
+                                Button::new("add-connection")
+                                    .label("Connect")
+                                    .primary()
+                                    .disabled(busy)
+                                    .on_click(move |_, window, cx| {
+                                        connect_entity.update(cx, |this, cx| {
+                                            this.add_connection(window, cx);
+                                        });
+                                    }),
+                            )
+                            .into_any_element()
+                    }))
+            }
             DbType::Postgres | DbType::MySql | DbType::MsSql => group
                 .item(SettingItem::new("Host", host_field))
                 .item(SettingItem::new("Port", port_field))
@@ -1640,18 +1941,20 @@ impl DatabasePanel {
                 .item(SettingItem::new("SSL", ssl_field))
                 .item(SettingItem::render(move |_options, _window, _cx| {
                     let connect_entity = network_connect_entity.clone();
-                    h_flex().justify_end().child(
-                        Button::new("add-connection")
-                            .label("Connect")
-                            .primary()
-                            .disabled(busy)
-                            .on_click(move |_, window, cx| {
-                                connect_entity.update(cx, |this, cx| {
-                                    this.add_connection(window, cx);
-                                });
-                            }),
-                    )
-                    .into_any_element()
+                    h_flex()
+                        .justify_end()
+                        .child(
+                            Button::new("add-connection")
+                                .label("Connect")
+                                .primary()
+                                .disabled(busy)
+                                .on_click(move |_, window, cx| {
+                                    connect_entity.update(cx, |this, cx| {
+                                        this.add_connection(window, cx);
+                                    });
+                                }),
+                        )
+                        .into_any_element()
                 })),
         };
 
@@ -1680,8 +1983,11 @@ impl DatabasePanel {
                 Settings::new("database-panel-add-connection")
                     .sidebar_width(px(0.))
                     .page(
-                        SettingPage::new(format!("Add {} Connection", header::db_type_label(db_type)))
-                            .group(group),
+                        SettingPage::new(format!(
+                            "Add {} Connection",
+                            header::db_type_label(db_type)
+                        ))
+                        .group(group),
                     ),
             )
     }
@@ -1691,7 +1997,7 @@ impl DatabasePanel {
     /// the three-pane explorer split below — or a centered state/error view
     /// while connecting, loading, failing, or when the schema is empty.
     fn render_connection_body(
-        &self,
+        &mut self,
         connection: &ConnectionConfig,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1715,12 +2021,12 @@ impl DatabasePanel {
                 v_flex()
                     .w_full()
                     .child(self.render_connection_header(connection, cx))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_h(px(420.))
-                            .child(self.render_body_split(connection, id, is_connected, cx)),
-                    ),
+                    .child(div().w_full().min_h(px(420.)).child(self.render_body_split(
+                        connection,
+                        id,
+                        is_connected,
+                        cx,
+                    ))),
             )
     }
 
@@ -1730,27 +2036,37 @@ impl DatabasePanel {
     /// everything else routes to `render_connection_state` /
     /// `render_connection_error`.
     fn render_body_split(
-        &self,
+        &mut self,
         connection: &ConnectionConfig,
         id: ConnectionId,
         is_connected: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if !is_connected {
-            return self.render_connection_state(connection, cx).into_any_element();
+            return self
+                .render_connection_state(connection, cx)
+                .into_any_element();
         }
 
-        let tables = match self.active_schema_state(id) {
+        let (tables, views) = match self.active_schema_state(id) {
             None | Some(SchemaState::Loading) => {
-                return self.render_connection_state(connection, cx).into_any_element()
+                return self
+                    .render_connection_state(connection, cx)
+                    .into_any_element();
             }
             Some(SchemaState::Error(message)) => {
-                return self.render_connection_error(connection, message, cx).into_any_element()
+                return self
+                    .render_connection_error(connection, message, cx)
+                    .into_any_element();
             }
-            Some(SchemaState::Loaded(tables)) if tables.is_empty() => {
-                return self.render_connection_state(connection, cx).into_any_element()
+            Some(SchemaState::Loaded { tables, views })
+                if tables.is_empty() && views.is_empty() =>
+            {
+                return self
+                    .render_connection_state(connection, cx)
+                    .into_any_element();
             }
-            Some(SchemaState::Loaded(tables)) => tables.clone(),
+            Some(SchemaState::Loaded { tables, views }) => (tables.clone(), views.clone()),
         };
 
         h_resizable(("database-body", id.0))
@@ -1759,18 +2075,17 @@ impl DatabasePanel {
                     .size(px(280.))
                     .size_range(px(200.)..px(420.))
                     .flex_none()
-                    .child(self.render_explorer_pane(connection, &tables, cx)),
+                    .child(self.render_explorer_pane(connection, &tables, &views, cx)),
             )
             .child(
-                resizable_panel()
-                    .child(self.render_content_pane(connection, &tables, cx)),
+                resizable_panel().child(self.render_content_pane(connection, &tables, &views, cx)),
             )
             .child(
                 resizable_panel()
                     .size(px(320.))
                     .size_range(px(240.)..px(560.))
                     .flex_none()
-                    .child(self.render_inspector_pane(connection, &tables, cx)),
+                    .child(self.render_inspector_pane(connection, &tables, &views, cx)),
             )
             .into_any_element()
     }
@@ -1783,7 +2098,10 @@ impl DatabasePanel {
     ) -> impl IntoElement {
         let id = connection.id;
         let is_connected = self.registry.is_connected(id);
-        let is_loading = matches!(self.active_schema_state(id), None | Some(SchemaState::Loading));
+        let is_loading = matches!(
+            self.active_schema_state(id),
+            None | Some(SchemaState::Loading)
+        );
 
         let body: gpui::AnyElement = if is_connected && is_loading {
             h_flex()
@@ -1962,12 +2280,19 @@ impl DatabasePanel {
     /// not just a filter over ones you have. Filters `render_connection_tabs`
     /// below it to `active_type`.
     fn render_type_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_index = DB_TYPES.iter().position(|db_type| *db_type == self.active_type).unwrap_or(0);
+        let selected_index = DB_TYPES
+            .iter()
+            .position(|db_type| *db_type == self.active_type)
+            .unwrap_or(0);
 
         TabBar::new("database-type-tabs")
             .with_variant(TabVariant::Underline)
             .px_3()
-            .children(DB_TYPES.iter().map(|db_type| Tab::new().label(header::db_type_label(*db_type))))
+            .children(
+                DB_TYPES
+                    .iter()
+                    .map(|db_type| Tab::new().label(header::db_type_label(*db_type))),
+            )
             .selected_index(selected_index)
             .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                 if let Some(db_type) = DB_TYPES.get(*ix).copied() {
@@ -1981,11 +2306,18 @@ impl DatabasePanel {
     /// locked to that type, mirroring `npm_manager_panel`'s `project_tabs`
     /// (see its doc comment) and the original Forge panel's connection
     /// pills.
-    fn render_connection_tabs(&self, connections: &[ConnectionConfig], cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_connection_tabs(
+        &self,
+        connections: &[ConnectionConfig],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let active_type = self.active_type;
-        let filtered: Vec<&ConnectionConfig> =
-            connections.iter().filter(|connection| connection.db_type == active_type).collect();
-        let filtered_ids: Vec<ConnectionId> = filtered.iter().map(|connection| connection.id).collect();
+        let filtered: Vec<&ConnectionConfig> = connections
+            .iter()
+            .filter(|connection| connection.db_type == active_type)
+            .collect();
+        let filtered_ids: Vec<ConnectionId> =
+            filtered.iter().map(|connection| connection.id).collect();
         let add_tab_ix = filtered.len();
         let selected_index = self
             .active_connection
@@ -2001,7 +2333,11 @@ impl DatabasePanel {
                     .prefix(Label::new(indicator).color(color))
                     .label(connection.title.clone())
             }))
-            .child(Tab::new().prefix(Icon::new(GIconName::Plus)).label("Add Connection"))
+            .child(
+                Tab::new()
+                    .prefix(Icon::new(GIconName::Plus))
+                    .label("Add Connection"),
+            )
             .selected_index(selected_index)
             .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                 this.select_connection_tab(&filtered_ids, *ix, cx);
@@ -2012,12 +2348,17 @@ impl DatabasePanel {
 impl Render for DatabasePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let connections = self.connections.clone();
-        let active_connection = self
-            .active_connection
-            .and_then(|id| connections.iter().find(|connection| connection.id == id).cloned());
+        let active_connection = self.active_connection.and_then(|id| {
+            connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .cloned()
+        });
 
         let body = match active_connection {
-            Some(connection) => self.render_connection_body(&connection, cx).into_any_element(),
+            Some(connection) => self
+                .render_connection_body(&connection, cx)
+                .into_any_element(),
             None => self.render_add_connection_form(cx).into_any_element(),
         };
 

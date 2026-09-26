@@ -196,11 +196,7 @@ impl FlowState {
                         node.dragging = *dragging;
                     }
                 }
-                NodeChange::Dimensions {
-                    id,
-                    width,
-                    height,
-                } => {
+                NodeChange::Dimensions { id, width, height } => {
                     if let Some(node) = self.get_node_mut(id) {
                         node.measured_width = Some(*width);
                         node.measured_height = Some(*height);
@@ -241,19 +237,13 @@ impl FlowState {
         }
     }
 
-    /// Set the viewport, clamping zoom to min/max. Re-fits containers when
-    /// the zoom actually changes, so boxes keep enclosing their children.
+    /// Set the viewport, clamping zoom to min/max.
     pub fn set_viewport(&mut self, viewport: Viewport) {
-        let new_zoom = viewport.zoom.clamp(self.min_zoom, self.max_zoom);
-        let changed = (new_zoom - self.viewport.zoom).abs() > f32::EPSILON;
         self.viewport = Viewport {
             x: viewport.x,
             y: viewport.y,
-            zoom: new_zoom,
+            zoom: viewport.zoom.clamp(self.min_zoom, self.max_zoom),
         };
-        if changed {
-            self.refit_all_containers();
-        }
     }
 
     /// Register a resolved handle position (called during layout).
@@ -312,10 +302,9 @@ impl FlowState {
         false
     }
 
-    /// The deepest descendant of `ancestor_id` whose on-screen bounds — the
-    /// same `flow_to_screen(absolute_position)` + `screen_footprint` box
-    /// `graph.rs::render_node` lays out — contain `point` (canvas-local
-    /// screen pixels).
+    /// The deepest descendant of `ancestor_id` whose laid-out flow-space
+    /// bounds contain `point` (flow-space units, as produced by subtracting
+    /// the scaled world's origin and dividing by its zoom).
     ///
     /// GPUI dispatches a mouse-down to *every* Normal-behavior hitbox that
     /// contains the cursor (only `BlockMouse` occluders stop the hit-test),
@@ -327,7 +316,7 @@ impl FlowState {
     /// the descendant actually under the cursor instead; `None` means the
     /// click landed on the container's own surface (header/empty interior)
     /// and should select the container itself.
-    pub fn descendant_at_screen(&self, ancestor_id: &NodeId, point: (f32, f32)) -> Option<NodeId> {
+    pub fn descendant_at_flow(&self, ancestor_id: &NodeId, point: (f32, f32)) -> Option<NodeId> {
         let mut deepest: Option<(usize, NodeId)> = None;
         for node in &self.nodes {
             if &node.id == ancestor_id || !self.is_descendant(ancestor_id, &node.id) {
@@ -336,9 +325,12 @@ impl FlowState {
             let Some(abs_pos) = self.absolute_position(&node.id) else {
                 continue;
             };
-            let (sx, sy) = self.viewport.flow_to_screen(abs_pos);
-            let (fw, fh) = self.screen_footprint(node);
-            if point.0 >= sx && point.0 <= sx + fw && point.1 >= sy && point.1 <= sy + fh {
+            let (fw, fh) = self.node_footprint(node);
+            if point.0 >= abs_pos.x
+                && point.0 <= abs_pos.x + fw
+                && point.1 >= abs_pos.y
+                && point.1 <= abs_pos.y + fh
+            {
                 let depth = self.depth_of(&node.id);
                 if deepest.as_ref().map_or(true, |(d, _)| depth > *d) {
                     deepest = Some((depth, node.id.clone()));
@@ -348,38 +340,36 @@ impl FlowState {
         deepest.map(|(_, id)| id)
     }
 
-    /// Returns the deepest node whose rendered screen bounds contain `point`.
-    pub fn node_at_screen(&self, point: (f32, f32)) -> Option<NodeId> {
+    /// Returns the deepest node whose laid-out flow-space bounds contain
+    /// `point` (flow-space units).
+    pub fn node_at_flow(&self, point: (f32, f32)) -> Option<NodeId> {
         self.nodes
             .iter()
             .filter_map(|node| {
                 let abs_pos = self.absolute_position(&node.id)?;
-                let (sx, sy) = self.viewport.flow_to_screen(abs_pos);
-                let (width, height) = self.screen_footprint(node);
-                (point.0 >= sx
-                    && point.0 <= sx + width
-                    && point.1 >= sy
-                    && point.1 <= sy + height)
+                let (width, height) = self.node_footprint(node);
+                (point.0 >= abs_pos.x
+                    && point.0 <= abs_pos.x + width
+                    && point.1 >= abs_pos.y
+                    && point.1 <= abs_pos.y + height)
                     .then_some((self.depth_of(&node.id), node.z_index, node.id.clone()))
             })
             .max_by_key(|(depth, z_index, _)| (*depth, *z_index))
             .map(|(_, _, id)| id)
     }
 
-    /// A node's footprint (width, height) for layout purposes — its
+    /// A node's footprint (width, height) in **flow-space units** — its
     /// declared/auto-fit `container_size` if it has children, otherwise its
     /// measured (or estimated) leaf-node wrapper size.
     ///
-    /// These two cases are in *different unit spaces*, which is exactly why
-    /// `screen_footprint` (not this) is almost always what a caller
-    /// computing a screen-space offset actually wants: a leaf's
-    /// `measured_width`/`height` comes from `graph.rs`'s measurement
-    /// canvas timing the node's *actual rendered pixel size* — already
-    /// screen-space, since leaf content is never itself zoom-scaled (only
-    /// repositioned) — while `container_size` is a flow-space quantity
-    /// computed by `fit_container` from children's flow-space local
-    /// positions, and needs `viewport.zoom` applied before it means
-    /// anything in screen pixels.
+    /// Both cases are in the same space. The world is laid out once in flow
+    /// units and zoomed as a whole by `Style::scale` on the world container
+    /// (see `graph.rs::render`), so a leaf's `measured_width`/`height` is
+    /// recorded by the measurement canvas *divided by the accumulated element
+    /// scale*, and `container_size` is computed by `fit_container` from
+    /// children's flow-space local positions. Neither depends on
+    /// `viewport.zoom`, so containers no longer need refitting when the user
+    /// zooms.
     pub fn node_footprint(&self, node: &FlowNode) -> (f32, f32) {
         if self.is_container(&node.id) {
             node.container_size.unwrap_or(DEFAULT_CONTAINER_SIZE)
@@ -388,23 +378,6 @@ impl FlowState {
                 node.measured_width.map(|p| p.as_f32()).unwrap_or(114.0),
                 node.measured_height.map(|p| p.as_f32()).unwrap_or(54.0),
             )
-        }
-    }
-
-    /// `node_footprint`, converted to actual screen pixels at the current
-    /// viewport zoom — the container-vs-leaf unit mismatch documented on
-    /// `node_footprint` resolved here so callers computing a screen-space
-    /// offset (handle centers, edge endpoints, hit-testing, selection
-    /// boxes) never have to think about which case they're in. Leaf sizes
-    /// pass through unscaled (already screen pixels); container sizes are
-    /// multiplied by `viewport.zoom` to match how the container's own box
-    /// is actually rendered (`graph.rs::render_node`).
-    pub fn screen_footprint(&self, node: &FlowNode) -> (f32, f32) {
-        let (w, h) = self.node_footprint(node);
-        if self.is_container(&node.id) {
-            (w * self.viewport.zoom, h * self.viewport.zoom)
-        } else {
-            (w, h)
         }
     }
 
@@ -447,14 +420,12 @@ impl FlowState {
     /// removing, or moving a child, e.g. right after `push_undo` on those
     /// operations. A no-op if the container currently has no children.
     ///
-    /// A leaf child's footprint is its *rendered pixel size* — at home in
-    /// screen space, because leaf content is never zoom-scaled (see the
-    /// `node_footprint` doc) — while `node.position` and `container_size`
-    /// are flow-space quantities that `viewport.zoom` scales on screen. To
-    /// enclose a leaf's actual on-screen pixels, its flow-space extent at
-    /// the current zoom is `pixels / zoom`, so that's what is summed into
-    /// the box. A child container's footprint is already flow-space and
-    /// passes through unchanged.
+    /// Every quantity here is in **flow-space units**: child positions,
+    /// child footprints (`node_footprint`), and the resulting
+    /// `container_size`. Because the world is laid out once in flow units and
+    /// zoomed as a whole, this function is completely independent of
+    /// `viewport.zoom` — a box fitted at any zoom encloses its children at
+    /// every zoom.
     ///
     /// Children's local space starts at the interior offset
     /// [`CONTAINER_PADDING`]/[`CONTAINER_HEADER_HEIGHT`] inside the box
@@ -462,20 +433,13 @@ impl FlowState {
     /// otherwise the header strip would eat into `padding` on the bottom
     /// edge. `padding` is then breathing room on top of all of that.
     ///
-    /// Because of that zoom coupling, a box fitted at zoom `Z` reliably
-    /// encloses its children only while the viewport stays at or above `Z`
-    /// (the box and the children's offsets all scale with zoom, but the
-    /// fixed-pixel leaf content does not). The zoom-changing entry points
-    /// (`set_viewport`, `fit_view`, `zoom_in`/`zoom_out`, the graph's
-    /// wheel/pinch handlers) re-fit containers for exactly this reason;
-    /// `graph.rs`'s measurement canvas also re-fits the enclosing
-    /// containers whenever a node's *measured* size changes, so boxes track
-    /// real content rather than whatever estimate the graph was built with.
+    /// `graph.rs`'s measurement canvas re-fits the enclosing containers
+    /// whenever a node's *measured* size changes, so boxes track real content
+    /// rather than whatever estimate the graph was built with.
     pub fn fit_container(&mut self, container_id: &NodeId, padding: f32) {
         let mut max_x = f32::MIN;
         let mut max_y = f32::MIN;
         let mut any = false;
-        let zoom = self.viewport.zoom;
         // Children's local space starts at this container's own header strip
         // height, so the box must leave that much room above their offsets.
         let header_h = self
@@ -487,13 +451,6 @@ impl FlowState {
                 continue;
             }
             let (w, h) = self.node_footprint(node);
-            // Leaf footprints are screen pixels; a leaf's flow-space
-            // extent at the current zoom is `pixels / zoom`.
-            let (w, h) = if self.is_container(&node.id) {
-                (w, h)
-            } else {
-                (w / zoom, h / zoom)
-            };
             max_x = max_x.max(CONTAINER_PADDING + node.position.x + w);
             max_y = max_y.max(header_h + node.position.y + h);
             any = true;
@@ -530,12 +487,17 @@ impl FlowState {
         }
     }
 
-    /// Re-fit every container node against its current children at the
-    /// current `viewport.zoom`. Called when the zoom changes (leaf content is
-    /// fixed-pixel so each leaf's flow-space extent — and therefore the box
-    /// that encloses it — depends on zoom; see `fit_container`'s doc).
+    /// Re-fit every container node against its current children. Layout is
+    /// zoom-independent, so this only needs calling after a structural change
+    /// (adding, removing, or reparenting nodes) — never when the viewport
+    /// zoom changes.
     pub fn refit_all_containers(&mut self) {
-        let mut ids: Vec<NodeId> = self.nodes.iter().filter(|n| self.is_container(&n.id)).map(|n| n.id.clone()).collect();
+        let mut ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|n| self.is_container(&n.id))
+            .map(|n| n.id.clone())
+            .collect();
         // Innermost containers first, so an outer container's fit sees its
         // nested containers' *updated* sizes (`node_footprint` on a child
         // container reads `container_size`). Shallow depth sorts last.
@@ -582,13 +544,16 @@ impl FlowState {
         }
     }
 
-    /// Find the screen-space center of a handle.
+    /// Find the flow-space center of a handle.
     ///
     /// Resolves the node's *absolute* flow-space position (walking any
-    /// parent chain — see `absolute_position`) before converting through
-    /// the viewport, so a handle on a nested child lands in the right place
-    /// on screen. Uses `screen_footprint` (already zoom-correct for both
-    /// container and leaf nodes — see its own doc comment).
+    /// parent chain — see `absolute_position`) and offsets it by half the
+    /// node's flow-space footprint (`node_footprint`), so a handle on a
+    /// nested child lands in the right place. Callers convert to screen
+    /// space themselves — edge painting multiplies by
+    /// `Window::element_scale()` and adds the world origin, while hit-testing
+    /// converts an incoming screen point back with
+    /// `Viewport::screen_to_flow`.
     pub fn find_handle_center(
         &self,
         node_id: &NodeId,
@@ -597,14 +562,13 @@ impl FlowState {
     ) -> Option<(f32, f32)> {
         let node = self.get_node(node_id)?;
         let abs_pos = self.absolute_position(node_id)?;
-        let (sx, sy) = self.viewport.flow_to_screen(abs_pos);
-        let (w, h) = self.screen_footprint(node);
+        let (w, h) = self.node_footprint(node);
 
         let (cx, cy) = match handle_position {
-            HandlePosition::Top => (sx + w / 2.0, sy),
-            HandlePosition::Bottom => (sx + w / 2.0, sy + h),
-            HandlePosition::Left => (sx, sy + h / 2.0),
-            HandlePosition::Right => (sx + w, sy + h / 2.0),
+            HandlePosition::Top => (abs_pos.x + w / 2.0, abs_pos.y),
+            HandlePosition::Bottom => (abs_pos.x + w / 2.0, abs_pos.y + h),
+            HandlePosition::Left => (abs_pos.x, abs_pos.y + h / 2.0),
+            HandlePosition::Right => (abs_pos.x + w, abs_pos.y + h / 2.0),
         };
         Some((cx, cy))
     }
@@ -649,10 +613,8 @@ impl FlowState {
 
         self.viewport.zoom = zoom;
         self.viewport.x = (container_width - content_width * zoom) / 2.0 - (min_x - padding) * zoom;
-        self.viewport.y = (container_height - content_height * zoom) / 2.0 - (min_y - padding) * zoom;
-        // Containers are fitted for the zoom they're rendered at; the graph
-        // just settled on one, so re-fit every box against that zoom.
-        self.refit_all_containers();
+        self.viewport.y =
+            (container_height - content_height * zoom) / 2.0 - (min_y - padding) * zoom;
     }
 
     /// Zoom in by a step, centered on the container center.
@@ -665,7 +627,6 @@ impl FlowState {
         self.viewport.x = cx - (cx - self.viewport.x) * (new_zoom / old_zoom);
         self.viewport.y = cy - (cy - self.viewport.y) * (new_zoom / old_zoom);
         self.viewport.zoom = new_zoom;
-        self.refit_all_containers();
     }
 
     /// Zoom out by a step, centered on the container center.
@@ -678,11 +639,16 @@ impl FlowState {
         self.viewport.x = cx - (cx - self.viewport.x) * (new_zoom / old_zoom);
         self.viewport.y = cy - (cy - self.viewport.y) * (new_zoom / old_zoom);
         self.viewport.zoom = new_zoom;
-        self.refit_all_containers();
     }
 
     /// Center the viewport on a specific flow coordinate.
-    pub fn set_center(&mut self, flow_x: f32, flow_y: f32, container_width: f32, container_height: f32) {
+    pub fn set_center(
+        &mut self,
+        flow_x: f32,
+        flow_y: f32,
+        container_width: f32,
+        container_height: f32,
+    ) {
         self.viewport.x = container_width / 2.0 - flow_x * self.viewport.zoom;
         self.viewport.y = container_height / 2.0 - flow_y * self.viewport.zoom;
     }
@@ -728,13 +694,17 @@ impl FlowState {
     }
 
     /// Find the nearest valid handle to snap to during connection dragging.
+    ///
+    /// `mouse` is in **flow-space units**, matching `find_handle_center`'s
+    /// return value (and therefore `SnapTarget::point`). `connection_radius`
+    /// is a screen-space interaction threshold, so it is divided by the
+    /// current zoom to keep the same on-screen snap distance at any zoom.
     pub fn find_snap_target(
         &self,
         draft: &ConnectionDraft,
-        mouse_x: f32,
-        mouse_y: f32,
+        mouse: (f32, f32),
     ) -> Option<SnapTarget> {
-        let radius = self.connection_radius;
+        let radius = self.connection_radius / self.viewport.zoom;
         let mut best: Option<(f32, SnapTarget)> = None;
 
         for node in &self.nodes {
@@ -756,9 +726,11 @@ impl FlowState {
                     continue;
                 }
 
-                if let Some((hx, hy)) = self.find_handle_center(&node.id, &handle.id, handle.position) {
-                    let dx = mouse_x - hx;
-                    let dy = mouse_y - hy;
+                if let Some((hx, hy)) =
+                    self.find_handle_center(&node.id, &handle.id, handle.position)
+                {
+                    let dx = mouse.0 - hx;
+                    let dy = mouse.1 - hy;
                     let dist = (dx * dx + dy * dy).sqrt();
 
                     if dist <= radius {
@@ -804,8 +776,16 @@ impl FlowState {
     }
 
     /// Add an edge from a completed connection.
-    pub fn add_edge_from_connection(&mut self, connection: &Connection, edge_id: impl Into<SharedString>) {
-        let mut edge = FlowEdge::new(edge_id, connection.source.clone(), connection.target.clone());
+    pub fn add_edge_from_connection(
+        &mut self,
+        connection: &Connection,
+        edge_id: impl Into<SharedString>,
+    ) {
+        let mut edge = FlowEdge::new(
+            edge_id,
+            connection.source.clone(),
+            connection.target.clone(),
+        );
         if let Some(ref sh) = connection.source_handle {
             edge.source_handle = Some(sh.clone());
         }
@@ -820,100 +800,116 @@ impl FlowState {
 mod tests {
     use super::*;
 
-    /// One leaf child of a container encloses the parent box iff, at the fit
-    /// zoom, the box's rendered edge lands at/right of (and below) where the
-    /// leaf's fixed-pixel card ends. Mirrors `absolute_position` + the box
-    /// rendering math in `graph.rs`, in case that ever drifts from `fit_container`.
-    fn box_encloses_node(state: &FlowState, container: &FlowNode, child: &FlowNode, zoom: f32) -> bool {
+    /// One child is enclosed by its container box iff the box's flow-space
+    /// edge lands at/right of (and below) where the child's flow-space
+    /// footprint ends. Mirrors `absolute_position` + `fit_container`, in case
+    /// those ever drift apart.
+    ///
+    /// No zoom argument: layout is performed once in flow units and scaled by
+    /// the world container, so enclosure is a purely flow-space question and
+    /// holds at every zoom.
+    fn box_encloses_node(state: &FlowState, container: &FlowNode, child: &FlowNode) -> bool {
         let (cw, ch) = container.container_size.unwrap_or(DEFAULT_CONTAINER_SIZE);
-        let (w, h) = state.screen_footprint(child);
+        let (w, h) = state.node_footprint(child);
         let header_h = container.header_height.unwrap_or(CONTAINER_HEADER_HEIGHT);
         let (cx, cy) = (
             CONTAINER_PADDING + child.position.x,
             header_h + child.position.y,
         );
-        cw * zoom >= (cx + w / zoom) * zoom && ch * zoom >= (cy + h / zoom) * zoom
+        cw >= cx + w && ch >= cy + h
     }
 
-    fn leaf_child(id: &str, x: f32, y: f32, w_px: f32, h_px: f32, parent: &str) -> FlowNode {
+    fn leaf_child(id: &str, x: f32, y: f32, w_flow: f32, h_flow: f32, parent: &str) -> FlowNode {
         let mut n = FlowNode::new(id, x, y);
         n.parent_id = Some(parent.into());
-        n.measured_width = Some(Pixels::from(w_px));
-        n.measured_height = Some(Pixels::from(h_px));
+        n.measured_width = Some(Pixels::from(w_flow));
+        n.measured_height = Some(Pixels::from(h_flow));
         n
     }
 
     #[test]
-    fn fit_container_encloses_children_at_zoom() {
-        // Container with two stacked leaves; zoomed out to 0.5 (fit_view's
-        // typical settle point for a tall graph) the leaves' flow-space
-        // extents double, so the box must too.
-        for zoom in [1.0_f32, 0.5, 0.35] {
-            let mut state = FlowState::new(
-                vec![
-                    FlowNode::new("c", 0.0, 0.0).container_size(320.0, 220.0),
-                    leaf_child("a", 20.0, 20.0, 172.0, 46.0, "c"),
-                    leaf_child("b", 20.0, 150.0, 172.0, 46.0, "c"),
-                ],
-                vec![],
-            );
-            state.viewport.zoom = zoom;
-            state.fit_container(&"c".into(), 24.0);
-
-            let (c, a, b) = {
-                let nodes = &state.nodes;
-                (
-                    nodes.iter().find(|n| n.id == "c").unwrap(),
-                    nodes.iter().find(|n| n.id == "a").unwrap(),
-                    nodes.iter().find(|n| n.id == "b").unwrap(),
-                )
-            };
-            assert!(
-                box_encloses_node(&state, c, a, zoom),
-                "zoom {zoom}: 'a' (top leaf) not enclosed — box {}x{}, leaf at {}x{}",
-                c.container_size.unwrap().0,
-                c.container_size.unwrap().1,
-                a.position.x,
-                a.position.y,
-            );
-            assert!(
-                box_encloses_node(&state, c, b, zoom),
-                "zoom {zoom}: 'b' (bottom leaf) not enclosed — box {}x{}, leaf at {}x{}",
-                c.container_size.unwrap().0,
-                c.container_size.unwrap().1,
-                b.position.x,
-                b.position.y,
-            );
-        }
-    }
-
-    #[test]
-    fn box_grows_when_zoom_shrinks() {
-        // Leaf content is fixed-pixel; as the view zooms out, a leaf's
-        // flow-space extent grows, so the box (in flow units) must too.
+    fn fit_container_encloses_children() {
+        // Container with two stacked leaves. Fitting happens entirely in flow
+        // units, so the resulting box must enclose both leaves' flow-space
+        // footprints.
         let mut state = FlowState::new(
             vec![
                 FlowNode::new("c", 0.0, 0.0).container_size(320.0, 220.0),
                 leaf_child("a", 20.0, 20.0, 172.0, 46.0, "c"),
+                leaf_child("b", 20.0, 150.0, 172.0, 46.0, "c"),
             ],
             vec![],
         );
         state.fit_container(&"c".into(), 24.0);
-        let at_1 = state.get_node(&"c".into()).unwrap().container_size.unwrap();
-        state.viewport.zoom = 0.5;
-        state.refit_all_containers();
-        let at_half = state.get_node(&"c".into()).unwrap().container_size.unwrap();
+
+        let (c, a, b) = {
+            let nodes = &state.nodes;
+            (
+                nodes.iter().find(|n| n.id == "c").unwrap(),
+                nodes.iter().find(|n| n.id == "a").unwrap(),
+                nodes.iter().find(|n| n.id == "b").unwrap(),
+            )
+        };
         assert!(
-            at_half.0 > at_1.0 && at_half.1 > at_1.1,
-            "zooming out should grow the box in flow units: {at_1:?} -> {at_half:?}"
+            box_encloses_node(&state, c, a),
+            "'a' (top leaf) not enclosed — box {}x{}, leaf at {}x{}",
+            c.container_size.unwrap().0,
+            c.container_size.unwrap().1,
+            a.position.x,
+            a.position.y,
         );
-        // ...and rendering that box back through the zoom must still enclose
-        // the child's fixed-pixel card.
-        let (c, a) = (
-            state.get_node(&"c".into()).unwrap(),
-            state.get_node(&"a".into()).unwrap(),
+        assert!(
+            box_encloses_node(&state, c, b),
+            "'b' (bottom leaf) not enclosed — box {}x{}, leaf at {}x{}",
+            c.container_size.unwrap().0,
+            c.container_size.unwrap().1,
+            b.position.x,
+            b.position.y,
         );
-        assert!(box_encloses_node(&state, c, a, 0.5));
+    }
+
+    #[test]
+    fn fitted_box_is_independent_of_zoom() {
+        // The world is laid out once in flow units and zoomed by the
+        // framework, so a container's fitted size must be a pure function of
+        // its children — zooming must not resize it. (This is the regression
+        // guard for the old `/ zoom` in `fit_container`.)
+        let build = || {
+            FlowState::new(
+                vec![
+                    FlowNode::new("c", 0.0, 0.0).container_size(320.0, 220.0),
+                    leaf_child("a", 20.0, 20.0, 172.0, 46.0, "c"),
+                ],
+                vec![],
+            )
+        };
+
+        let mut at_1 = build();
+        at_1.viewport.zoom = 1.0;
+        at_1.fit_container(&"c".into(), 24.0);
+        let size_at_1 = at_1.get_node(&"c".into()).unwrap().container_size.unwrap();
+
+        let mut zoomed_out = build();
+        zoomed_out.viewport.zoom = 0.35;
+        zoomed_out.fit_container(&"c".into(), 24.0);
+        let size_zoomed_out = zoomed_out
+            .get_node(&"c".into())
+            .unwrap()
+            .container_size
+            .unwrap();
+
+        assert_eq!(
+            size_at_1, size_zoomed_out,
+            "the fitted box must not depend on the viewport zoom"
+        );
+        assert!(
+            box_encloses_node(
+                &zoomed_out,
+                zoomed_out.get_node(&"c".into()).unwrap(),
+                zoomed_out.get_node(&"a".into()).unwrap()
+            ),
+            "the box must still enclose its child at 0.35x"
+        );
     }
 
     #[test]
@@ -931,7 +927,6 @@ mod tests {
             ],
             vec![],
         );
-        state.viewport.zoom = 0.5;
         state.fit_container(&"branchTrue".into(), 80.0);
         state.fit_container(&"branchFalse".into(), 80.0);
         state.fit_container(&"ifVip".into(), 24.0);
@@ -939,7 +934,7 @@ mod tests {
         let if_vip = state.get_node(&"ifVip".into()).unwrap();
         let branch_true = state.get_node(&"branchTrue".into()).unwrap();
         assert!(
-            box_encloses_node(&state, if_vip, branch_true, 0.5),
+            box_encloses_node(&state, if_vip, branch_true),
             "ifVip box {}x{} does not enclose branchTrue {}x{} at its fitted size",
             if_vip.container_size.unwrap().0,
             if_vip.container_size.unwrap().1,
@@ -957,15 +952,24 @@ mod tests {
             ],
             vec![],
         );
-        state.viewport.zoom = 0.5;
         state.fit_container(&"c".into(), 24.0);
-        let before = state.get_node(&"c".into()).unwrap().container_size.unwrap().0;
+        let before = state
+            .get_node(&"c".into())
+            .unwrap()
+            .container_size
+            .unwrap()
+            .0;
 
-        // Leaf renders bigger than its bootstrap estimate (e.g. a long label).
+        // Leaf measures wider than its bootstrap estimate (e.g. a long label).
         state.get_node_mut(&"a".into()).unwrap().measured_width = Some(Pixels::from(240.0));
         state.refit_ancestors(&"a".into());
 
-        let after = state.get_node(&"c".into()).unwrap().container_size.unwrap().0;
+        let after = state
+            .get_node(&"c".into())
+            .unwrap()
+            .container_size
+            .unwrap()
+            .0;
         assert!(
             after > before,
             "container width should grow when a child measures wider: {before} -> {after}"
@@ -984,7 +988,6 @@ mod tests {
             ],
             vec![],
         );
-        state.viewport.zoom = 0.5;
         state.fit_container(&"c".into(), 24.0);
 
         {
@@ -993,7 +996,7 @@ mod tests {
                 state.get_node(&"a".into()).unwrap(),
             );
             assert!(
-                box_encloses_node(&state, c, a, 0.5),
+                box_encloses_node(&state, c, a),
                 "box {}x{} must enclose child sitting below the 56-unit header",
                 c.container_size.unwrap().0,
                 c.container_size.unwrap().1,

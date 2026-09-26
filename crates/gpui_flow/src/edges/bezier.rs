@@ -67,14 +67,10 @@ pub fn get_bezier_path(
     );
 
     // Cubic bezier t=0.5 approximate center
-    let label_x = source_x * 0.125
-        + source_ctrl_x * 0.375
-        + target_ctrl_x * 0.375
-        + target_x * 0.125;
-    let label_y = source_y * 0.125
-        + source_ctrl_y * 0.375
-        + target_ctrl_y * 0.375
-        + target_y * 0.125;
+    let label_x =
+        source_x * 0.125 + source_ctrl_x * 0.375 + target_ctrl_x * 0.375 + target_x * 0.125;
+    let label_y =
+        source_y * 0.125 + source_ctrl_y * 0.375 + target_ctrl_y * 0.375 + target_y * 0.125;
 
     BezierPath {
         source: (source_x, source_y),

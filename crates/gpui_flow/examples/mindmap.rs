@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_flow::*;
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(100);
@@ -213,11 +213,7 @@ fn add_child_to_selected(state: &Entity<FlowState>, color: u32, cx: &mut App) {
         };
         state.push_undo();
         let child_id: SharedString = next_id().into();
-        let child_count = state
-            .edges
-            .iter()
-            .filter(|e| e.source == parent.id)
-            .count() as f32;
+        let child_count = state.edges.iter().filter(|e| e.source == parent.id).count() as f32;
         let x = parent.position.x + 250.0;
         let y = parent.position.y + child_count * 60.0 - 20.0;
         let child = FlowNode::new(child_id.clone(), x, y)
@@ -321,125 +317,147 @@ fn node_label(node: &FlowNode) -> String {
 }
 
 fn main() {
-    gpui_platform::application().run(
-        move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+    gpui_platform::application().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
 
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let nodes = vec![
-                        FlowNode::new("root", 80.0, 220.0)
-                            .label("Weekend Plan")
-                            .node_type("root")
-                            .handles(vec![HandleDef::source(HandlePosition::Right)]),
-                        // Categories
-                        FlowNode::new("groceries", 350.0, 60.0)
-                            .label("Groceries")
-                            .node_type("branch")
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                            ]),
-                        FlowNode::new("errands", 350.0, 260.0)
-                            .label("Errands")
-                            .node_type("branch")
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                            ]),
-                        FlowNode::new("projects", 350.0, 420.0)
-                            .label("Projects")
-                            .node_type("branch")
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                            ]),
-                        // Groceries items
-                        FlowNode::new("g1", 620.0, 0.0)
-                            .label("Avocados")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("g2", 620.0, 50.0)
-                            .label("Sourdough bread")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("g3", 620.0, 100.0)
-                            .label("Oat milk")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("g4", 620.0, 150.0)
-                            .label("Fresh basil")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        // Errands
-                        FlowNode::new("e1", 620.0, 230.0)
-                            .label("Return library books")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("e2", 620.0, 280.0)
-                            .label("Pick up dry cleaning")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("e3", 620.0, 330.0)
-                            .label("Post office")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        // Projects
-                        FlowNode::new("p1", 620.0, 400.0)
-                            .label("Fix kitchen shelf")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("p2", 620.0, 450.0)
-                            .label("Repot succulents")
-                            .node_type("leaf")
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                    ];
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |_window, cx| {
+                let nodes = vec![
+                    FlowNode::new("root", 80.0, 220.0)
+                        .label("Weekend Plan")
+                        .node_type("root")
+                        .handles(vec![HandleDef::source(HandlePosition::Right)]),
+                    // Categories
+                    FlowNode::new("groceries", 350.0, 60.0)
+                        .label("Groceries")
+                        .node_type("branch")
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                        ]),
+                    FlowNode::new("errands", 350.0, 260.0)
+                        .label("Errands")
+                        .node_type("branch")
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                        ]),
+                    FlowNode::new("projects", 350.0, 420.0)
+                        .label("Projects")
+                        .node_type("branch")
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                        ]),
+                    // Groceries items
+                    FlowNode::new("g1", 620.0, 0.0)
+                        .label("Avocados")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("g2", 620.0, 50.0)
+                        .label("Sourdough bread")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("g3", 620.0, 100.0)
+                        .label("Oat milk")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("g4", 620.0, 150.0)
+                        .label("Fresh basil")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    // Errands
+                    FlowNode::new("e1", 620.0, 230.0)
+                        .label("Return library books")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("e2", 620.0, 280.0)
+                        .label("Pick up dry cleaning")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("e3", 620.0, 330.0)
+                        .label("Post office")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    // Projects
+                    FlowNode::new("p1", 620.0, 400.0)
+                        .label("Fix kitchen shelf")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("p2", 620.0, 450.0)
+                        .label("Repot succulents")
+                        .node_type("leaf")
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                ];
 
-                    let edges = vec![
-                        FlowEdge::new("e-r-g", "root", "groceries").color(ORANGE).stroke_width(3.0),
-                        FlowEdge::new("e-r-e", "root", "errands").color(BLUE).stroke_width(3.0),
-                        FlowEdge::new("e-r-p", "root", "projects").color(GREEN).stroke_width(3.0),
-                        FlowEdge::new("e-g-1", "groceries", "g1").color(ORANGE).stroke_width(2.0),
-                        FlowEdge::new("e-g-2", "groceries", "g2").color(ORANGE).stroke_width(2.0),
-                        FlowEdge::new("e-g-3", "groceries", "g3").color(ORANGE).stroke_width(2.0),
-                        FlowEdge::new("e-g-4", "groceries", "g4").color(ORANGE).stroke_width(2.0),
-                        FlowEdge::new("e-e-1", "errands", "e1").color(BLUE).stroke_width(2.0),
-                        FlowEdge::new("e-e-2", "errands", "e2").color(BLUE).stroke_width(2.0),
-                        FlowEdge::new("e-e-3", "errands", "e3").color(BLUE).stroke_width(2.0),
-                        FlowEdge::new("e-p-1", "projects", "p1").color(GREEN).stroke_width(2.0),
-                        FlowEdge::new("e-p-2", "projects", "p2").color(GREEN).stroke_width(2.0),
-                    ];
+                let edges = vec![
+                    FlowEdge::new("e-r-g", "root", "groceries")
+                        .color(ORANGE)
+                        .stroke_width(3.0),
+                    FlowEdge::new("e-r-e", "root", "errands")
+                        .color(BLUE)
+                        .stroke_width(3.0),
+                    FlowEdge::new("e-r-p", "root", "projects")
+                        .color(GREEN)
+                        .stroke_width(3.0),
+                    FlowEdge::new("e-g-1", "groceries", "g1")
+                        .color(ORANGE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-g-2", "groceries", "g2")
+                        .color(ORANGE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-g-3", "groceries", "g3")
+                        .color(ORANGE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-g-4", "groceries", "g4")
+                        .color(ORANGE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-e-1", "errands", "e1")
+                        .color(BLUE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-e-2", "errands", "e2")
+                        .color(BLUE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-e-3", "errands", "e3")
+                        .color(BLUE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-p-1", "projects", "p1")
+                        .color(GREEN)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e-p-2", "projects", "p2")
+                        .color(GREEN)
+                        .stroke_width(2.0),
+                ];
 
-                    let state = cx.new(|_| FlowState::new(nodes, edges));
+                let state = cx.new(|_| FlowState::new(nodes, edges));
 
-                    let flow = cx.new(|cx| {
-                        FlowGraph::new(state.clone(), cx)
-                            .no_node_chrome()
-                            .bg_color(BG)
-                            .grid_color(GRID)
-                            .node_renderer("root", render_root)
-                            .node_renderer("branch", render_branch)
-                            .node_renderer("leaf", render_leaf)
-                    });
+                let flow = cx.new(|cx| {
+                    FlowGraph::new(state.clone(), cx)
+                        .no_node_chrome()
+                        .bg_color(BG)
+                        .grid_color(GRID)
+                        .node_renderer("root", render_root)
+                        .node_renderer("branch", render_branch)
+                        .node_renderer("leaf", render_leaf)
+                });
 
-                    let minimap =
-                        cx.new(|_| Minimap::new(state.clone()).container_bounds(1200.0, 800.0));
+                let minimap =
+                    cx.new(|_| Minimap::new(state.clone()).container_bounds(1200.0, 800.0));
 
-                    cx.new(|cx| MindMapApp {
-                        flow,
-                        state,
-                        minimap,
-                        focus_handle: cx.focus_handle(),
-                        editing: None,
-                        edit_buffer: String::new(),
-                    })
-                },
-            )
-            .expect("Failed to open window");
-        },
-    );
+                cx.new(|cx| MindMapApp {
+                    flow,
+                    state,
+                    minimap,
+                    focus_handle: cx.focus_handle(),
+                    editing: None,
+                    edit_buffer: String::new(),
+                })
+            },
+        )
+        .expect("Failed to open window");
+    });
 }

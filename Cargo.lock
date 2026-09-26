@@ -5048,10 +5048,14 @@ dependencies = [
  "anyhow",
  "database_backend",
  "db",
+ "editor",
  "gpui",
  "gpui-component",
+ "gpui_flow",
  "gpui_tokio",
+ "language",
  "log",
+ "project",
  "serde",
  "serde_json",
  "ui",
@@ -9061,6 +9065,22 @@ dependencies = [
  "heed-traits",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "helm_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-component",
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ui",
+ "workspace",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -24934,6 +24954,7 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "hdrhistogram",
+ "helm_panel",
  "http_client",
  "image",
  "image_viewer",
@@ -25248,6 +25269,13 @@ dependencies = [
 [[package]]
 name = "zed_proto"
 version = "0.3.4"
+dependencies = [
+ "zed_extension_api 0.7.0",
+]
+
+[[package]]
+name = "zed_sqls"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.7.0",
 ]

@@ -55,11 +55,7 @@ fn node_text(node: &FlowNode) -> String {
 }
 
 /// Render node with a colored left accent bar.
-fn render_node_with_accent(
-    node: &FlowNode,
-    accent: u32,
-    type_label: &str,
-) -> AnyElement {
+fn render_node_with_accent(node: &FlowNode, accent: u32, type_label: &str) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -117,124 +113,128 @@ fn render_sink(node: &FlowNode, _w: &mut Window, _cx: &mut App) -> AnyElement {
 }
 
 fn main() {
-    gpui_platform::application().run(
-        move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1100.0), px(750.0)), cx);
+    gpui_platform::application().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(1100.0), px(750.0)), cx);
 
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let nodes = vec![
-                        // Left column — triggers
-                        FlowNode::new("webhook", 60.0, 80.0)
-                            .label("Webhook")
-                            .node_type("trigger")
-                            .size(130.0, 52.0)
-                            .handles(vec![HandleDef::source(HandlePosition::Right)]),
-                        FlowNode::new("schedule", 60.0, 200.0)
-                            .label("Cron Schedule")
-                            .node_type("trigger")
-                            .size(145.0, 52.0)
-                            .handles(vec![HandleDef::source(HandlePosition::Right)]),
-                        // Middle — processing
-                        FlowNode::new("auth", 340.0, 80.0)
-                            .label("Authenticate")
-                            .node_type("process")
-                            .size(140.0, 52.0)
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                                HandleDef::source(HandlePosition::Bottom),
-                            ]),
-                        FlowNode::new("transform", 340.0, 200.0)
-                            .label("Transform")
-                            .node_type("process")
-                            .size(125.0, 52.0)
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                            ]),
-                        FlowNode::new("validate", 340.0, 340.0)
-                            .label("Validate")
-                            .node_type("process")
-                            .size(120.0, 52.0)
-                            .handles(vec![
-                                HandleDef::target(HandlePosition::Left),
-                                HandleDef::source(HandlePosition::Right),
-                            ]),
-                        // Right column — data
-                        FlowNode::new("db", 640.0, 80.0)
-                            .label("Database")
-                            .node_type("output")
-                            .size(120.0, 52.0)
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("cache", 640.0, 200.0)
-                            .label("Redis Cache")
-                            .node_type("output")
-                            .size(130.0, 52.0)
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        FlowNode::new("queue", 640.0, 340.0)
-                            .label("Message Queue")
-                            .node_type("sink")
-                            .size(148.0, 52.0)
-                            .handles(vec![HandleDef::target(HandlePosition::Left)]),
-                        // Bottom — input
-                        FlowNode::new("config", 60.0, 340.0)
-                            .label("Environment")
-                            .node_type("input")
-                            .size(133.0, 52.0)
-                            .handles(vec![HandleDef::source(HandlePosition::Right)]),
-                    ];
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |_window, cx| {
+                let nodes = vec![
+                    // Left column — triggers
+                    FlowNode::new("webhook", 60.0, 80.0)
+                        .label("Webhook")
+                        .node_type("trigger")
+                        .size(130.0, 52.0)
+                        .handles(vec![HandleDef::source(HandlePosition::Right)]),
+                    FlowNode::new("schedule", 60.0, 200.0)
+                        .label("Cron Schedule")
+                        .node_type("trigger")
+                        .size(145.0, 52.0)
+                        .handles(vec![HandleDef::source(HandlePosition::Right)]),
+                    // Middle — processing
+                    FlowNode::new("auth", 340.0, 80.0)
+                        .label("Authenticate")
+                        .node_type("process")
+                        .size(140.0, 52.0)
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                            HandleDef::source(HandlePosition::Bottom),
+                        ]),
+                    FlowNode::new("transform", 340.0, 200.0)
+                        .label("Transform")
+                        .node_type("process")
+                        .size(125.0, 52.0)
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                        ]),
+                    FlowNode::new("validate", 340.0, 340.0)
+                        .label("Validate")
+                        .node_type("process")
+                        .size(120.0, 52.0)
+                        .handles(vec![
+                            HandleDef::target(HandlePosition::Left),
+                            HandleDef::source(HandlePosition::Right),
+                        ]),
+                    // Right column — data
+                    FlowNode::new("db", 640.0, 80.0)
+                        .label("Database")
+                        .node_type("output")
+                        .size(120.0, 52.0)
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("cache", 640.0, 200.0)
+                        .label("Redis Cache")
+                        .node_type("output")
+                        .size(130.0, 52.0)
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    FlowNode::new("queue", 640.0, 340.0)
+                        .label("Message Queue")
+                        .node_type("sink")
+                        .size(148.0, 52.0)
+                        .handles(vec![HandleDef::target(HandlePosition::Left)]),
+                    // Bottom — input
+                    FlowNode::new("config", 60.0, 340.0)
+                        .label("Environment")
+                        .node_type("input")
+                        .size(133.0, 52.0)
+                        .handles(vec![HandleDef::source(HandlePosition::Right)]),
+                ];
 
-                    let edges = vec![
-                        FlowEdge::new("e1", "webhook", "auth")
-                            .color(ACCENT_AMBER).stroke_width(2.0),
-                        FlowEdge::new("e2", "schedule", "transform")
-                            .color(ACCENT_AMBER).stroke_width(2.0),
-                        FlowEdge::new("e3", "auth", "db")
-                            .color(ACCENT_BLUE).stroke_width(2.0),
-                        FlowEdge::new("e4", "auth", "transform")
-                            .color(ACCENT_BLUE).stroke_width(1.5),
-                        FlowEdge::new("e5", "transform", "cache")
-                            .color(ACCENT_BLUE).stroke_width(2.0),
-                        FlowEdge::new("e6", "config", "validate")
-                            .color(ACCENT_EMERALD).stroke_width(2.0),
-                        FlowEdge::new("e7", "validate", "queue")
-                            .color(ACCENT_VIOLET).stroke_width(2.0),
-                    ];
+                let edges = vec![
+                    FlowEdge::new("e1", "webhook", "auth")
+                        .color(ACCENT_AMBER)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e2", "schedule", "transform")
+                        .color(ACCENT_AMBER)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e3", "auth", "db")
+                        .color(ACCENT_BLUE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e4", "auth", "transform")
+                        .color(ACCENT_BLUE)
+                        .stroke_width(1.5),
+                    FlowEdge::new("e5", "transform", "cache")
+                        .color(ACCENT_BLUE)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e6", "config", "validate")
+                        .color(ACCENT_EMERALD)
+                        .stroke_width(2.0),
+                    FlowEdge::new("e7", "validate", "queue")
+                        .color(ACCENT_VIOLET)
+                        .stroke_width(2.0),
+                ];
 
-                    let state = cx.new(|_| FlowState::new(nodes, edges));
+                let state = cx.new(|_| FlowState::new(nodes, edges));
 
-                    let flow = cx.new(|cx| {
-                        FlowGraph::new(state.clone(), cx)
-                            .bg_color(BG)
-                            .grid_color(GRID)
-                            .bg_pattern(BackgroundPattern::Cross)
-                            .node_bg_color(CARD)
-                            .node_border_color(CARD_BORDER)
-                            .node_renderer("input", render_input)
-                            .node_renderer("process", render_process)
-                            .node_renderer("output", render_output)
-                            .node_renderer("trigger", render_trigger)
-                            .node_renderer("sink", render_sink)
-                    });
+                let flow = cx.new(|cx| {
+                    FlowGraph::new(state.clone(), cx)
+                        .bg_color(BG)
+                        .grid_color(GRID)
+                        .bg_pattern(BackgroundPattern::Cross)
+                        .node_bg_color(CARD)
+                        .node_border_color(CARD_BORDER)
+                        .node_renderer("input", render_input)
+                        .node_renderer("process", render_process)
+                        .node_renderer("output", render_output)
+                        .node_renderer("trigger", render_trigger)
+                        .node_renderer("sink", render_sink)
+                });
 
-                    let minimap =
-                        cx.new(|_| Minimap::new(state.clone()).container_bounds(1100.0, 750.0));
-                    let controls =
-                        cx.new(|_| Controls::new(state).container_size(1100.0, 750.0));
+                let minimap =
+                    cx.new(|_| Minimap::new(state.clone()).container_bounds(1100.0, 750.0));
+                let controls = cx.new(|_| Controls::new(state).container_size(1100.0, 750.0));
 
-                    cx.new(|_| FlowExample {
-                        flow,
-                        minimap,
-                        controls,
-                    })
-                },
-            )
-            .expect("Failed to open window");
-        },
-    );
+                cx.new(|_| FlowExample {
+                    flow,
+                    minimap,
+                    controls,
+                })
+            },
+        )
+        .expect("Failed to open window");
+    });
 }

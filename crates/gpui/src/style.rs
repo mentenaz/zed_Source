@@ -184,6 +184,38 @@ pub struct Style {
     /// Should the element be painted on screen?
     pub visibility: Visibility,
 
+    /// A multiplier applied to this element and all of its descendants.
+    ///
+    /// Every descendant's box-model lengths (size, inset, margin, padding,
+    /// border widths, gap, flex basis), its text size, corner radii, box
+    /// shadows, and images are laid out and rendered `scale` times larger.
+    ///
+    /// This is a *layout* scale, like the CSS `zoom` property, not a paint
+    /// transform. Consequences of that distinction:
+    ///
+    /// * The element's own box grows by `scale`. Give the element the size you
+    ///   want in unscaled units and it will occupy `scale` times that space.
+    /// * Layout is performed in the scaled space, so hitboxes, mouse
+    ///   coordinates, text shaping, and scroll offsets are all automatically
+    ///   correct. There is no second coordinate space to convert between.
+    /// * Factors accumulate down the tree, so `.scale(2.0)` nested inside a
+    ///   `.scale(3.0)` ancestor renders at 6x.
+    /// * Relative units are unaffected, because they resolve against boxes that
+    ///   are already scaled: `%`, `fr`, `auto`, and `aspect_ratio` pass through
+    ///   untouched.
+    ///
+    /// A factor of `1.0` (the default) is a no-op. This is independent of
+    /// [`Window::scale_factor`], which converts logical pixels to device pixels
+    /// for the display; the two are multiplied together when painting.
+    ///
+    /// Note that `scale` multiplies the lengths the element *declares*. An
+    /// element sized by `auto` is instead sized by its (already scaled) content,
+    /// so it grows only as far as that content does. If you need a specific
+    /// scaled size, declare the size in unscaled units: `.scale(2.0).w(px(100.))`
+    /// occupies 200px, whereas `.scale(2.0)` alone around an `auto`-width child
+    /// occupies whatever the child resolves to.
+    pub scale: f32,
+
     // Overflow properties
     /// How children overflowing their container should affect layout
     #[refineable]
@@ -639,6 +671,7 @@ impl Style {
         &self,
         bounds: Bounds<Pixels>,
         rem_size: Pixels,
+        element_scale: f32,
     ) -> Option<ContentMask<Pixels>> {
         match self.overflow {
             Point {
@@ -653,10 +686,13 @@ impl Style {
                     .border_color
                     .is_some_and(|color| !color.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    // `bounds` are already in scaled space, so the border widths
+                    // used to inset the clip region have to be scaled to match.
+                    min.x += Pixels(self.border_widths.left.to_pixels(rem_size).0 * element_scale);
+                    max.x -= Pixels(self.border_widths.right.to_pixels(rem_size).0 * element_scale);
+                    min.y += Pixels(self.border_widths.top.to_pixels(rem_size).0 * element_scale);
+                    max.y -=
+                        Pixels(self.border_widths.bottom.to_pixels(rem_size).0 * element_scale);
                 }
 
                 let bounds = match (
@@ -703,12 +739,36 @@ impl Style {
         }
 
         let rem_size = window.rem_size();
-        let corner_radii = self
-            .corner_radii
-            .to_pixels(rem_size)
-            .clamp_radii_for_quad_size(bounds.size);
+        let element_scale = window.element_scale();
 
-        window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
+        let mut corner_radii = self.corner_radii.to_pixels(rem_size);
+        if element_scale != 1.0 {
+            corner_radii *= element_scale;
+        }
+        let corner_radii = corner_radii.clamp_radii_for_quad_size(bounds.size);
+
+        // Corner radii, border widths, and shadows are resolved at paint time
+        // rather than by layout, so they have to be scaled by hand. Cloning an
+        // empty shadow list does not allocate, so this is free in the common
+        // case of an element with no shadows.
+        let box_shadows: Vec<BoxShadow> = if element_scale == 1.0 {
+            self.box_shadow.clone()
+        } else {
+            self.box_shadow
+                .iter()
+                .map(|shadow| BoxShadow {
+                    color: shadow.color,
+                    offset: shadow
+                        .offset
+                        .map(|component| Pixels(component.0 * element_scale)),
+                    blur_radius: Pixels(shadow.blur_radius.0 * element_scale),
+                    spread_radius: Pixels(shadow.spread_radius.0 * element_scale),
+                    inset: shadow.inset,
+                })
+                .collect()
+        };
+
+        window.paint_drop_shadows(bounds, corner_radii, &box_shadows);
 
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
@@ -737,12 +797,15 @@ impl Style {
             ));
         }
 
-        window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
+        window.paint_inset_shadows(bounds, corner_radii, &box_shadows);
 
         continuation(window, cx);
 
         if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
+            let mut border_widths = self.border_widths.to_pixels(rem_size);
+            if element_scale != 1.0 {
+                border_widths *= element_scale;
+            }
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
             window.paint_quad(quad(
@@ -773,6 +836,7 @@ impl Default for Style {
         Style {
             display: Display::Block,
             visibility: Visibility::Visible,
+            scale: 1.0,
             overflow: Point {
                 x: Overflow::Visible,
                 y: Overflow::Visible,

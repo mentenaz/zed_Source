@@ -377,10 +377,7 @@ impl Default for Viewport {
 impl Viewport {
     /// Convert a point from flow coordinates to screen coordinates.
     pub fn flow_to_screen(&self, point: FlowPoint) -> (f32, f32) {
-        (
-            point.x * self.zoom + self.x,
-            point.y * self.zoom + self.y,
-        )
+        (point.x * self.zoom + self.x, point.y * self.zoom + self.y)
     }
 
     /// Convert a point from screen coordinates to flow coordinates.
@@ -479,11 +476,6 @@ pub enum NodeChange {
 /// Change events for edges.
 #[derive(Debug, Clone)]
 pub enum EdgeChange {
-    Select {
-        id: EdgeId,
-        selected: bool,
-    },
-    Remove {
-        id: EdgeId,
-    },
+    Select { id: EdgeId, selected: bool },
+    Remove { id: EdgeId },
 }

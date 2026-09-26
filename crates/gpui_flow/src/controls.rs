@@ -8,6 +8,9 @@ use crate::store::FlowState;
 pub struct Controls {
     state: Entity<FlowState>,
     container_size: (f32, f32),
+    background: Hsla,
+    border: Hsla,
+    foreground: Hsla,
 }
 
 impl Controls {
@@ -15,6 +18,9 @@ impl Controls {
         Self {
             state,
             container_size: (900.0, 600.0),
+            background: gpui::rgba(0x18181b_ee).into(),
+            border: gpui::rgb(0x27272a).into(),
+            foreground: gpui::rgb(0xa1a1aa).into(),
         }
     }
 
@@ -22,6 +28,12 @@ impl Controls {
     pub fn container_size(mut self, width: f32, height: f32) -> Self {
         self.container_size = (width, height);
         self
+    }
+
+    pub fn theme_colors(&mut self, background: Hsla, border: Hsla, foreground: Hsla) {
+        self.background = background;
+        self.border = border;
+        self.foreground = foreground;
     }
 }
 
@@ -32,17 +44,20 @@ impl Render for Controls {
         let state_fit = self.state.clone();
         let (cw, ch) = self.container_size;
         let entity_id = cx.entity_id();
+        let background = self.background;
+        let border = self.border;
+        let foreground = self.foreground;
 
         div()
             .flex()
             .flex_col()
             .gap_1()
             .p_1()
-            .bg(gpui::rgba(0x18181b_ee))
+            .bg(background)
             .rounded_md()
             .border_1()
-            .border_color(gpui::rgb(0x27272a))
-            .child(control_button("+", {
+            .border_color(border)
+            .child(control_button("+", foreground, {
                 move |_, _, cx| {
                     state_zoom_in.update(cx, |state, _| {
                         state.zoom_in(cw, ch);
@@ -50,7 +65,7 @@ impl Render for Controls {
                     cx.notify(entity_id);
                 }
             }))
-            .child(control_button("\u{2212}", {
+            .child(control_button("\u{2212}", foreground, {
                 // Unicode minus sign
                 move |_, _, cx| {
                     state_zoom_out.update(cx, |state, _| {
@@ -59,13 +74,8 @@ impl Render for Controls {
                     cx.notify(entity_id);
                 }
             }))
-            .child(
-                div()
-                    .h(px(1.0))
-                    .bg(gpui::rgb(0x27272a))
-                    .mx_1(),
-            )
-            .child(control_button("\u{2922}", {
+            .child(div().h(px(1.0)).bg(border).mx_1())
+            .child(control_button("\u{2922}", foreground, {
                 // Fit view icon (↢)
                 move |_, _, cx| {
                     state_fit.update(cx, |state, _| {
@@ -79,6 +89,7 @@ impl Render for Controls {
 
 fn control_button(
     label: &'static str,
+    foreground: Hsla,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -91,7 +102,7 @@ fn control_button(
         .rounded_sm()
         .cursor(CursorStyle::PointingHand)
         .text_sm()
-        .text_color(gpui::rgb(0xa1a1aa))
+        .text_color(foreground)
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label)
 }

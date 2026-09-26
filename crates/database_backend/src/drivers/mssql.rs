@@ -15,7 +15,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
-use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::metadata::{ColumnInfo, ForeignKey, IndexInfo, Schema, TableInfo, ViewInfo};
 use crate::query::QueryResult;
 
 /// A connected MSSQL client, over a plain TCP stream wrapped for tiberius's
@@ -164,9 +164,9 @@ fn mssql_cell(row: &tiberius::Row, i: usize) -> Option<String> {
     None
 }
 
-/// Discovers every user table's columns and foreign keys in the connected
-/// database.
-pub async fn fetch_schema(client: &mut MsSqlClient) -> Result<Vec<TableInfo>, DatabaseError> {
+/// Discovers every user table's columns/foreign keys/indexes, and every
+/// view's columns and defining SQL, in the connected database.
+pub async fn fetch_schema(client: &mut MsSqlClient) -> Result<Schema, DatabaseError> {
     let table_names: Vec<String> = client
         .simple_query(
             "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES \
@@ -185,13 +185,36 @@ pub async fn fetch_schema(client: &mut MsSqlClient) -> Result<Vec<TableInfo>, Da
     for name in table_names {
         let columns = table_columns(client, &name).await?;
         let foreign_keys = table_foreign_keys(client, &name).await?;
+        let indexes = table_indexes(client, &name).await?;
         tables.push(TableInfo {
             name,
             columns,
             foreign_keys,
+            indexes,
         });
     }
-    Ok(tables)
+
+    let view_rows = client
+        .simple_query(
+            "SELECT v.name, m.definition FROM sys.views v \
+             JOIN sys.sql_modules m ON m.object_id = v.object_id \
+             ORDER BY v.name",
+        )
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to list views: {e}")))?
+        .into_first_result()
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to list views: {e}")))?;
+
+    let mut views = Vec::with_capacity(view_rows.len());
+    for row in view_rows {
+        let name = row.get::<&str, _>(0).unwrap_or_default().to_string();
+        let definition = row.get::<&str, _>(1).unwrap_or_default().to_string();
+        let columns = table_columns(client, &name).await?;
+        views.push(ViewInfo { name, columns, definition });
+    }
+
+    Ok(Schema { tables, views })
 }
 
 async fn table_columns(
@@ -277,4 +300,44 @@ async fn table_foreign_keys(
             to_column: row.get::<&str, _>(2).unwrap_or_default().to_string(),
         })
         .collect())
+}
+
+/// Every index on `table` (including the implicit one backing a `PRIMARY
+/// KEY`/`UNIQUE` constraint — `sys.indexes` always lists those too, so this
+/// reports what's actually there rather than filtering them out).
+/// `i.name IS NOT NULL` excludes the heap "index" a table with no clustered
+/// index otherwise shows up as; `is_included_column = 0` excludes `INCLUDE`
+/// columns (present in the index but not part of its key). Rows come back
+/// ordered by index name then key position, so grouping is just "same name
+/// as the row before → same index, append the column".
+async fn table_indexes(client: &mut MsSqlClient, table: &str) -> Result<Vec<IndexInfo>, DatabaseError> {
+    let query = format!(
+        "SELECT i.name, i.is_unique, c.name \
+         FROM sys.indexes i \
+         JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+         JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+         WHERE i.object_id = OBJECT_ID('{table}') AND i.name IS NOT NULL \
+             AND ic.is_included_column = 0 \
+         ORDER BY i.name, ic.key_ordinal"
+    );
+
+    let rows = client
+        .simple_query(query)
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to read indexes for {table}: {e}")))?
+        .into_first_result()
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to read indexes for {table}: {e}")))?;
+
+    let mut indexes: Vec<IndexInfo> = Vec::new();
+    for row in rows {
+        let name = row.get::<&str, _>(0).unwrap_or_default().to_string();
+        let unique = row.get::<bool, _>(1).unwrap_or_default();
+        let column = row.get::<&str, _>(2).unwrap_or_default().to_string();
+        match indexes.last_mut() {
+            Some(index) if index.name == name => index.columns.push(column),
+            _ => indexes.push(IndexInfo { name, unique, columns: vec![column] }),
+        }
+    }
+    Ok(indexes)
 }

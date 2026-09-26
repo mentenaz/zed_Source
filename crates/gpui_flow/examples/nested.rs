@@ -136,12 +136,16 @@ fn main() {
                 ];
 
                 let edges = vec![
-                    FlowEdge::new("e1", "fetch", "loop").color(ACCENT_BLUE).stroke_width(2.0),
+                    FlowEdge::new("e1", "fetch", "loop")
+                        .color(ACCENT_BLUE)
+                        .stroke_width(2.0),
                     // Edge between two children of the same container.
                     FlowEdge::new("e2", "normalize", "charge")
                         .color(ACCENT_VIOLET)
                         .stroke_width(2.0),
-                    FlowEdge::new("e3", "loop", "summary").color(ACCENT_BLUE).stroke_width(2.0),
+                    FlowEdge::new("e3", "loop", "summary")
+                        .color(ACCENT_BLUE)
+                        .stroke_width(2.0),
                 ];
 
                 let state = cx.new(|_| FlowState::new(nodes, edges));
@@ -157,10 +161,15 @@ fn main() {
                         .node_renderer("foreach", render_foreach)
                 });
 
-                let minimap = cx.new(|_| Minimap::new(state.clone()).container_bounds(1100.0, 750.0));
+                let minimap =
+                    cx.new(|_| Minimap::new(state.clone()).container_bounds(1100.0, 750.0));
                 let controls = cx.new(|_| Controls::new(state).container_size(1100.0, 750.0));
 
-                cx.new(|_| NestedExample { flow, minimap, controls })
+                cx.new(|_| NestedExample {
+                    flow,
+                    minimap,
+                    controls,
+                })
             },
         )
         .expect("Failed to open window");

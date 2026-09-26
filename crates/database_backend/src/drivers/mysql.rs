@@ -9,7 +9,7 @@ use mysql_async::{OptsBuilder, Pool, SslOpts, params};
 
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
-use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::metadata::{ColumnInfo, ForeignKey, IndexInfo, Schema, TableInfo, ViewInfo};
 use crate::query::QueryResult;
 
 /// Opens a MySQL/MariaDB connection pool and proves it works with a trivial
@@ -177,9 +177,9 @@ fn mysql_cell(value: mysql_async::Value) -> Option<String> {
     }
 }
 
-/// Discovers every user table's columns and foreign keys in the connected
-/// database.
-pub async fn fetch_schema(pool: &Pool) -> Result<Vec<TableInfo>, DatabaseError> {
+/// Discovers every user table's columns/foreign keys/indexes, and every
+/// view's columns and defining SQL, in the connected database.
+pub async fn fetch_schema(pool: &Pool) -> Result<Schema, DatabaseError> {
     let mut conn = pool
         .get_conn()
         .await
@@ -198,13 +198,30 @@ pub async fn fetch_schema(pool: &Pool) -> Result<Vec<TableInfo>, DatabaseError> 
     for name in table_names {
         let columns = table_columns(&mut conn, &name).await?;
         let foreign_keys = table_foreign_keys(&mut conn, &name).await?;
+        let indexes = table_indexes(&mut conn, &name).await?;
         tables.push(TableInfo {
             name,
             columns,
             foreign_keys,
+            indexes,
         });
     }
-    Ok(tables)
+
+    let view_rows: Vec<(String, Option<String>)> = conn
+        .query(
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS \
+             WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME",
+        )
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to list views: {e}")))?;
+
+    let mut views = Vec::with_capacity(view_rows.len());
+    for (name, definition) in view_rows {
+        let columns = table_columns(&mut conn, &name).await?;
+        views.push(ViewInfo { name, columns, definition: definition.unwrap_or_default() });
+    }
+
+    Ok(Schema { tables, views })
 }
 
 async fn table_columns(
@@ -260,4 +277,40 @@ async fn table_foreign_keys(
             to_column,
         })
         .collect())
+}
+
+/// Every index on `table` (including the implicit one backing a `PRIMARY
+/// KEY`/`UNIQUE` constraint — MySQL always lists those in `STATISTICS` too,
+/// so this reports what's actually there rather than filtering them out).
+/// Rows come back ordered by index name then key position, so grouping is
+/// just "same name as the row before → same index, append the column".
+async fn table_indexes(
+    conn: &mut mysql_async::Conn,
+    table: &str,
+) -> Result<Vec<IndexInfo>, DatabaseError> {
+    let rows: Vec<(String, i64, String)> = conn
+        .exec(
+            "SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME \
+             FROM INFORMATION_SCHEMA.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table \
+             ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+            params! { "table" => table },
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Connection(format!("failed to read indexes for {table}: {e}"))
+        })?;
+
+    let mut indexes: Vec<IndexInfo> = Vec::new();
+    for (index_name, non_unique, column_name) in rows {
+        match indexes.last_mut() {
+            Some(index) if index.name == index_name => index.columns.push(column_name),
+            _ => indexes.push(IndexInfo {
+                name: index_name,
+                unique: non_unique == 0,
+                columns: vec![column_name],
+            }),
+        }
+    }
+    Ok(indexes)
 }

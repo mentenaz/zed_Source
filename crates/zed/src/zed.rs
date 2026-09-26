@@ -26,9 +26,11 @@ use client::zed_urls;
 use cockpit_panel::CockpitPanel;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
+use dotnet_panel::DotNetPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
+use flows_panel::FlowsPanel;
 use fs::Fs;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
@@ -47,6 +49,7 @@ use gpui::{
     UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
     actions, image_cache, img, point, px, retain_all,
 };
+use helm_panel::HelmPanel;
 use image_viewer::ImageInfo;
 use language::Capability;
 use language_onboarding::BasedPyrightBanner;
@@ -55,10 +58,10 @@ use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
 use migrator::migrate_keymap;
+use node_panel::NodePanel;
 use onboarding::multibuffer_hint::MultibufferHint;
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
-use flows_panel::FlowsPanel;
 use paths::{
     local_debug_file_relative_path, local_settings_file_relative_path,
     local_tasks_file_relative_path,
@@ -69,8 +72,6 @@ use project::{
     project_settings::{SettingsObserver, SettingsObserverEvent},
 };
 use project_panel::ProjectPanel;
-use node_panel::NodePanel;
-use dotnet_panel::DotNetPanel;
 use python_panel::PythonPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
@@ -792,6 +793,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let cockpit_panel = CockpitPanel::load(workspace_handle.clone(), cx.clone());
         let database_panel =
             database_panel::DatabasePanel::load(workspace_handle.clone(), cx.clone());
+        let helm_panel = HelmPanel::load(workspace_handle.clone(), cx.clone());
         let script_runner_panel =
             ScriptRunnerPanel::load(workspace_handle.clone(), cx.clone());
         let processes_panel = ProcessesPanel::load(workspace_handle.clone(), cx.clone());
@@ -883,6 +885,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(cockpit_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(helm_panel, workspace_handle.clone(), cx.clone()),
             script_runner_dependent_panels,
             add_panel_when_ready(processes_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(dotnet_panel, workspace_handle.clone(), cx.clone()),
@@ -6264,6 +6267,7 @@ mod tests {
             // `cx.theme()` reads a global this sets up, and panics if it's missing.
             gpui_component::init(cx);
             cockpit_panel::init(cx);
+            helm_panel::init(cx);
             terminal_view::init(cx);
             let credentials_provider = zed_credentials_provider::global(cx);
             copilot_chat::init(

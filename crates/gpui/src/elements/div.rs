@@ -1939,6 +1939,10 @@ impl Element for Div {
                 window,
                 cx,
                 |style, window, cx| {
+                    // The accumulated `Style::scale` factor is pushed by
+                    // `Interactivity::request_layout`, so children are laid out
+                    // in this element's scaled space and this element's own taffy
+                    // style is computed against the same factor.
                     window.with_text_style(style.text_style().cloned(), |window| {
                         child_layout_ids = self
                             .children
@@ -2286,7 +2290,15 @@ impl Interactivity {
                 }
 
                 let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
-                let layout_id = f(style, window, cx);
+
+                // Every element that participates in layout goes through this
+                // function (`Div`, `Img`, `Text`, ...), which makes it the single
+                // place the accumulated `Style::scale` factor needs to be pushed.
+                // Children requested by `f` then observe the scaled space, and
+                // `Window::request_layout` scales this element's own box model by
+                // the same factor.
+                let element_scale = window.element_scale() * style.scale;
+                let layout_id = window.with_element_scale(element_scale, |window| f(style, window, cx));
                 (layout_id, element_state)
             },
         )
@@ -2351,6 +2363,7 @@ impl Interactivity {
                 let mut element_state =
                     element_state.map(|element_state| element_state.unwrap_or_default());
                 let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
+                let element_scale = window.element_scale() * style.scale;
 
                 if let Some(element_state) = element_state.as_mut() {
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
@@ -2377,22 +2390,24 @@ impl Interactivity {
                     }
                 }
 
-                window.with_text_style(style.text_style().cloned(), |window| {
-                    window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
-                        |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
-                            } else {
-                                None
-                            };
+                window.with_element_scale(element_scale, |window| {
+                    window.with_text_style(style.text_style().cloned(), |window| {
+                        window.with_content_mask(
+                            style.overflow_mask(bounds, window.rem_size(), element_scale),
+                            |window| {
+                                let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                                    Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                } else {
+                                    None
+                                };
 
-                            let scroll_offset =
-                                self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
-                            (result, element_state)
-                        },
-                    )
+                                let scroll_offset =
+                                    self.clamp_scroll_position(bounds, &style, window, cx);
+                                let result = f(&style, scroll_offset, hitbox, window, cx);
+                                (result, element_state)
+                            },
+                        )
+                    })
                 })
             },
         )
@@ -2516,6 +2531,7 @@ impl Interactivity {
                     element_state.map(|element_state| element_state.unwrap_or_default());
 
                 let style = self.compute_style_internal(hitbox, element_state.as_mut(), window, cx);
+                let element_scale = window.element_scale() * style.scale;
 
                 #[cfg(any(feature = "test-support", test))]
                 if let Some(debug_selector) = &self.debug_selector {
@@ -2535,13 +2551,14 @@ impl Interactivity {
                     tab_group = self.tab_index;
                 }
 
-                window.with_element_opacity(style.opacity, |window| {
-                    style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
-                        window.with_text_style(style.text_style().cloned(), |window| {
-                            window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
-                                |window| {
-                                    window.with_tab_group(tab_group, |window| {
+                window.with_element_scale(element_scale, |window| {
+                    window.with_element_opacity(style.opacity, |window| {
+                        style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
+                            window.with_text_style(style.text_style().cloned(), |window| {
+                                window.with_content_mask(
+                                    style.overflow_mask(bounds, window.rem_size(), element_scale),
+                                    |window| {
+                                        window.with_tab_group(tab_group, |window| {
                                         // Register the container's own focus handle *inside* its
                                         // tab group, so that focusing the container and then
                                         // calling `focus_next` descends into this group's first
@@ -2624,6 +2641,7 @@ impl Interactivity {
                                 },
                             );
                         });
+                    });
                     });
                 });
 

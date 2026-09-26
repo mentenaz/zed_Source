@@ -27,8 +27,14 @@ pub fn get_smooth_step_path(
     let mut points = vec![(source_x, source_y), (sx, sy)];
 
     // Determine the routing based on handle directions
-    let source_horizontal = matches!(source_position, HandlePosition::Left | HandlePosition::Right);
-    let target_horizontal = matches!(target_position, HandlePosition::Left | HandlePosition::Right);
+    let source_horizontal = matches!(
+        source_position,
+        HandlePosition::Left | HandlePosition::Right
+    );
+    let target_horizontal = matches!(
+        target_position,
+        HandlePosition::Left | HandlePosition::Right
+    );
 
     if source_horizontal && target_horizontal {
         // Both horizontal: route via mid-x

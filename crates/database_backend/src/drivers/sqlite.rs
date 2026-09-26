@@ -12,7 +12,7 @@
 use rusqlite::{Connection, OpenFlags};
 
 use crate::errors::DatabaseError;
-use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::metadata::{ColumnInfo, ForeignKey, IndexInfo, Schema, TableInfo, ViewInfo};
 use crate::query::QueryResult;
 
 /// Wraps an identifier for interpolation into a PRAGMA statement.
@@ -52,25 +52,36 @@ pub fn connect(path: &str) -> Result<Connection, DatabaseError> {
     Ok(conn)
 }
 
-/// Discovers every user table's columns and foreign keys.
+/// Discovers every user table's columns/foreign keys/indexes, and every
+/// view's columns and defining SQL.
 ///
 /// Internal `sqlite_` tables (e.g. `sqlite_sequence`) are excluded — they're
 /// SQLite bookkeeping, not part of the user's schema.
-pub fn fetch_schema(conn: &Connection) -> Result<Vec<TableInfo>, DatabaseError> {
-    let table_names = list_table_names(conn)?;
-
-    table_names
+pub fn fetch_schema(conn: &Connection) -> Result<Schema, DatabaseError> {
+    let tables = list_table_names(conn)?
         .into_iter()
         .map(|name| {
             let columns = table_columns(conn, &name)?;
             let foreign_keys = table_foreign_keys(conn, &name)?;
+            let indexes = table_indexes(conn, &name)?;
             Ok(TableInfo {
                 name,
                 columns,
                 foreign_keys,
+                indexes,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    let views = list_views(conn)?
+        .into_iter()
+        .map(|(name, definition)| {
+            let columns = table_columns(conn, &name)?;
+            Ok(ViewInfo { name, columns, definition: definition.unwrap_or_default() })
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    Ok(Schema { tables, views })
 }
 
 fn list_table_names(conn: &Connection) -> Result<Vec<String>, DatabaseError> {
@@ -85,6 +96,19 @@ fn list_table_names(conn: &Connection) -> Result<Vec<String>, DatabaseError> {
     stmt.query_map([], |row| row.get::<_, String>(0))
         .and_then(Iterator::collect)
         .map_err(|err| DatabaseError::Connection(format!("failed to list tables: {err}")))
+}
+
+/// Every view's name paired with its defining SQL (`sqlite_master.sql`, the
+/// literal `CREATE VIEW ...` statement — `None` only for an internal view
+/// SQLite itself created without one, which doesn't happen for user views).
+fn list_views(conn: &Connection) -> Result<Vec<(String, Option<String>)>, DatabaseError> {
+    let mut stmt = conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'view' ORDER BY name")
+        .map_err(|err| DatabaseError::Connection(format!("failed to list views: {err}")))?;
+
+    stmt.query_map([], |row| Ok((row.get::<_, String>("name")?, row.get::<_, Option<String>>("sql")?)))
+        .and_then(Iterator::collect)
+        .map_err(|err| DatabaseError::Connection(format!("failed to list views: {err}")))
 }
 
 fn table_columns(conn: &Connection, table: &str) -> Result<Vec<ColumnInfo>, DatabaseError> {
@@ -121,6 +145,44 @@ fn table_foreign_keys(conn: &Connection, table: &str) -> Result<Vec<ForeignKey>,
     .and_then(Iterator::collect)
     .map_err(|err| {
         DatabaseError::Connection(format!("failed to read foreign keys for {table}: {err}"))
+    })
+}
+
+/// `PRAGMA index_list` names every index on `table` (including the implicit
+/// one backing a `PRIMARY KEY`/`UNIQUE` constraint) plus whether it's unique;
+/// `PRAGMA index_info` then gives each index's columns in key order.
+fn table_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexInfo>, DatabaseError> {
+    let sql = format!("PRAGMA index_list({})", quote_identifier(table));
+    let mut stmt = stmt_for(conn, &sql, table, "index list")?;
+    let indexes: Vec<(String, bool)> = stmt
+        .query_map([], |row| {
+            let unique: i64 = row.get("unique")?;
+            Ok((row.get::<_, String>("name")?, unique != 0))
+        })
+        .and_then(Iterator::collect)
+        .map_err(|err| DatabaseError::Connection(format!("failed to read indexes for {table}: {err}")))?;
+
+    indexes
+        .into_iter()
+        .map(|(name, unique)| {
+            let columns = index_columns(conn, &name)?;
+            Ok(IndexInfo { name, columns, unique })
+        })
+        .collect()
+}
+
+fn index_columns(conn: &Connection, index_name: &str) -> Result<Vec<String>, DatabaseError> {
+    let sql = format!("PRAGMA index_info({})", quote_identifier(index_name));
+    let mut stmt = stmt_for(conn, &sql, index_name, "index info")?;
+    // An expression index's column entry has a NULL name.
+    stmt.query_map([], |row| {
+        Ok(row
+            .get::<_, Option<String>>("name")?
+            .unwrap_or_else(|| "<expression>".to_string()))
+    })
+    .and_then(Iterator::collect)
+    .map_err(|err| {
+        DatabaseError::Connection(format!("failed to read index columns for {index_name}: {err}"))
     })
 }
 
@@ -205,7 +267,9 @@ mod tests {
                  author_id INTEGER,
                  published_at TEXT,
                  FOREIGN KEY (author_id) REFERENCES authors(id)
-             );",
+             );
+             CREATE UNIQUE INDEX idx_posts_title ON posts(title);
+             CREATE INDEX idx_posts_author_published ON posts(author_id, published_at);",
         )
         .unwrap();
         conn
@@ -217,7 +281,7 @@ mod tests {
 
         let tables = fetch_schema(&conn).unwrap();
 
-        let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<&str> = tables.tables.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["authors", "posts"]);
     }
 
@@ -225,8 +289,8 @@ mod tests {
     fn reads_column_shape_including_primary_key_and_nullability() {
         let conn = schema_conn();
 
-        let tables = fetch_schema(&conn).unwrap();
-        let authors = tables.iter().find(|t| t.name == "authors").unwrap();
+        let schema = fetch_schema(&conn).unwrap();
+        let authors = schema.tables.iter().find(|t| t.name == "authors").unwrap();
 
         let id = authors.columns.iter().find(|c| c.name == "id").unwrap();
         assert!(id.primary_key);
@@ -235,7 +299,7 @@ mod tests {
         assert!(!name.primary_key);
         assert!(!name.nullable);
 
-        let posts = tables.iter().find(|t| t.name == "posts").unwrap();
+        let posts = schema.tables.iter().find(|t| t.name == "posts").unwrap();
         let author_id = posts
             .columns
             .iter()
@@ -248,8 +312,8 @@ mod tests {
     fn reads_foreign_keys() {
         let conn = schema_conn();
 
-        let tables = fetch_schema(&conn).unwrap();
-        let posts = tables.iter().find(|t| t.name == "posts").unwrap();
+        let schema = fetch_schema(&conn).unwrap();
+        let posts = schema.tables.iter().find(|t| t.name == "posts").unwrap();
 
         assert_eq!(posts.foreign_keys.len(), 1);
         let fk = &posts.foreign_keys[0];
@@ -259,11 +323,54 @@ mod tests {
     }
 
     #[test]
+    fn reads_indexes_including_composite_column_order() {
+        let conn = schema_conn();
+
+        let schema = fetch_schema(&conn).unwrap();
+        let posts = schema.tables.iter().find(|t| t.name == "posts").unwrap();
+
+        let title_index = posts
+            .indexes
+            .iter()
+            .find(|index| index.name == "idx_posts_title")
+            .unwrap();
+        assert!(title_index.unique);
+        assert_eq!(title_index.columns, vec!["title"]);
+
+        let composite_index = posts
+            .indexes
+            .iter()
+            .find(|index| index.name == "idx_posts_author_published")
+            .unwrap();
+        assert!(!composite_index.unique);
+        assert_eq!(composite_index.columns, vec!["author_id", "published_at"]);
+    }
+
+    #[test]
     fn empty_database_has_no_tables() {
         let conn = Connection::open_in_memory().unwrap();
 
-        let tables = fetch_schema(&conn).unwrap();
+        let schema = fetch_schema(&conn).unwrap();
 
-        assert!(tables.is_empty());
+        assert!(schema.tables.is_empty());
+        assert!(schema.views.is_empty());
+    }
+
+    #[test]
+    fn reads_view_columns_and_definition() {
+        let conn = schema_conn();
+        conn.execute_batch(
+            "CREATE VIEW recent_posts AS SELECT id, title FROM posts WHERE published_at IS NOT NULL;",
+        )
+        .unwrap();
+
+        let schema = fetch_schema(&conn).unwrap();
+
+        assert_eq!(schema.views.len(), 1);
+        let view = &schema.views[0];
+        assert_eq!(view.name, "recent_posts");
+        assert!(view.definition.contains("SELECT id, title FROM posts"));
+        let names: Vec<&str> = view.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "title"]);
     }
 }

@@ -52,7 +52,13 @@ impl StressApp {
         }
 
         let count = EDGES_PER_TICK.min(MAX_EDGES - self.edges_added);
-        let colors = [ACCENT_BLUE, ACCENT_EMERALD, ACCENT_VIOLET, ACCENT_AMBER, ACCENT_ROSE];
+        let colors = [
+            ACCENT_BLUE,
+            ACCENT_EMERALD,
+            ACCENT_VIOLET,
+            ACCENT_AMBER,
+            ACCENT_ROSE,
+        ];
 
         let mut randoms = Vec::with_capacity(count * 3);
         for _ in 0..(count * 3) {
@@ -135,12 +141,8 @@ impl Render for StressApp {
                     .text_color(gpui::rgb(TEXT_MUTED))
                     .child(format!(
                         "{} nodes  {}  edges  {}  +{}/{}",
-                        node_count,
-                        "\u{00b7}",
-                        edge_count,
-                        self.edges_added,
-                        MAX_EDGES,
-                    ))
+                        node_count, "\u{00b7}", edge_count, self.edges_added, MAX_EDGES,
+                    )),
             )
             // Status pill top-left
             .child(
@@ -217,79 +219,77 @@ fn render_stress_node(node: &FlowNode, _window: &mut Window, _cx: &mut App) -> A
 }
 
 fn main() {
-    gpui_platform::application().run(
-        move |cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
+    gpui_platform::application().run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(1400.0), px(900.0)), cx);
 
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let mut nodes = Vec::with_capacity(NODE_COUNT);
-                    for i in 0..NODE_COUNT {
-                        let col = i % COLS;
-                        let row = i / COLS;
-                        let x = col as f32 * SPACING_X;
-                        let y = row as f32 * SPACING_Y;
-                        let id: SharedString = format!("n{}", i).into();
-                        nodes.push(
-                            FlowNode::new(id, x, y)
-                                .label(format!("#{}", i))
-                                .node_type("stress")
-                                .size(45.0, 24.0)
-                                .handles(vec![
-                                    HandleDef::target(HandlePosition::Left),
-                                    HandleDef::source(HandlePosition::Right),
-                                ]),
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |_window, cx| {
+                let mut nodes = Vec::with_capacity(NODE_COUNT);
+                for i in 0..NODE_COUNT {
+                    let col = i % COLS;
+                    let row = i / COLS;
+                    let x = col as f32 * SPACING_X;
+                    let y = row as f32 * SPACING_Y;
+                    let id: SharedString = format!("n{}", i).into();
+                    nodes.push(
+                        FlowNode::new(id, x, y)
+                            .label(format!("#{}", i))
+                            .node_type("stress")
+                            .size(45.0, 24.0)
+                            .handles(vec![
+                                HandleDef::target(HandlePosition::Left),
+                                HandleDef::source(HandlePosition::Right),
+                            ]),
+                    );
+                }
+
+                // Subtle grid-neighbor edges
+                let mut edges = Vec::new();
+                for i in 0..NODE_COUNT {
+                    let col = i % COLS;
+                    if col + 1 < COLS && i + 1 < NODE_COUNT {
+                        let eid: SharedString = format!("ge{}", i).into();
+                        edges.push(
+                            FlowEdge::new(eid, format!("n{}", i), format!("n{}", i + 1))
+                                .color(CARD_BORDER)
+                                .stroke_width(1.0),
                         );
                     }
+                }
 
-                    // Subtle grid-neighbor edges
-                    let mut edges = Vec::new();
-                    for i in 0..NODE_COUNT {
-                        let col = i % COLS;
-                        if col + 1 < COLS && i + 1 < NODE_COUNT {
-                            let eid: SharedString = format!("ge{}", i).into();
-                            edges.push(
-                                FlowEdge::new(eid, format!("n{}", i), format!("n{}", i + 1))
-                                    .color(CARD_BORDER)
-                                    .stroke_width(1.0),
-                            );
-                        }
-                    }
+                let state = cx.new(|_| FlowState::new(nodes, edges));
 
-                    let state = cx.new(|_| FlowState::new(nodes, edges));
+                let flow = cx.new(|cx| {
+                    FlowGraph::new(state.clone(), cx)
+                        .bg_color(BG)
+                        .grid_color(GRID)
+                        .bg_pattern(BackgroundPattern::Dots)
+                        .node_bg_color(CARD)
+                        .node_border_color(CARD_BORDER)
+                        .node_renderer("stress", render_stress_node)
+                });
 
-                    let flow = cx.new(|cx| {
-                        FlowGraph::new(state.clone(), cx)
-                            .bg_color(BG)
-                            .grid_color(GRID)
-                            .bg_pattern(BackgroundPattern::Dots)
-                            .node_bg_color(CARD)
-                            .node_border_color(CARD_BORDER)
-                            .node_renderer("stress", render_stress_node)
-                    });
+                let minimap =
+                    cx.new(|_| Minimap::new(state.clone()).container_bounds(1400.0, 900.0));
+                let controls =
+                    cx.new(|_| Controls::new(state.clone()).container_size(1400.0, 900.0));
 
-                    let minimap =
-                        cx.new(|_| Minimap::new(state.clone()).container_bounds(1400.0, 900.0));
-                    let controls =
-                        cx.new(|_| Controls::new(state.clone()).container_size(1400.0, 900.0));
-
-                    cx.new(|cx| StressApp {
-                        flow,
-                        state,
-                        minimap,
-                        controls,
-                        focus_handle: cx.focus_handle(),
-                        playing: false,
-                        edges_added: 0,
-                        rng_state: 0xdeadbeef12345678,
-                    })
-                },
-            )
-            .expect("Failed to open window");
-        },
-    );
+                cx.new(|cx| StressApp {
+                    flow,
+                    state,
+                    minimap,
+                    controls,
+                    focus_handle: cx.focus_handle(),
+                    playing: false,
+                    edges_added: 0,
+                    rng_state: 0xdeadbeef12345678,
+                })
+            },
+        )
+        .expect("Failed to open window");
+    });
 }

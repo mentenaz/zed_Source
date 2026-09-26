@@ -95,6 +95,7 @@ members = [
     "crates/git_hosting_providers",
     "crates/git_ui",
     "crates/git_ui_core",
+    "crates/helm_panel",
     "crates/go_to_line",
     "crates/google_ai",
     "crates/gpui",
@@ -280,6 +281,7 @@ members = [
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",
+    "extensions/sqls",
     "extensions/test-extension",
 
     #
@@ -352,6 +354,7 @@ dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
 database_backend = { path = "crates/database_backend" }
 database_panel = { path = "crates/database_panel" }
+helm_panel = { path = "crates/helm_panel" }
 datalogic-rs = { version = "5", features = ["serde_json"] }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }

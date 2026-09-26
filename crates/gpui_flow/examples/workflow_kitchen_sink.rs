@@ -76,8 +76,19 @@ fn legend() -> impl IntoElement {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::rgb(color)))
-            .child(div().text_xs().text_color(gpui::rgb(TEXT_MUTED)).child(label))
+            .child(
+                div()
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .rounded_full()
+                    .bg(gpui::rgb(color)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui::rgb(TEXT_MUTED))
+                    .child(label),
+            )
     };
     div()
         .absolute()
@@ -357,8 +368,14 @@ fn main() {
                         .handles(vec![HandleDef::source(HandlePosition::Bottom)]),
                     // Three actions in sequence, same 130px vertical step
                     // used inside Foreach/Until.
-                    leaf("applyDiscount", 20.0, 20.0, "Apply VIP Discount", "transform")
-                        .parent("branchTrue"),
+                    leaf(
+                        "applyDiscount",
+                        20.0,
+                        20.0,
+                        "Apply VIP Discount",
+                        "transform",
+                    )
+                    .parent("branchTrue"),
                     leaf("notifyVip", 20.0, 150.0, "Notify VIP", "notify").parent("branchTrue"),
                     leaf("logVip", 20.0, 280.0, "Log VIP Applied", "log").parent("branchTrue"),
                     FlowNode::new("branchFalse", 320.0, 20.0)
@@ -366,8 +383,14 @@ fn main() {
                         .node_type("branch")
                         .parent("ifVip")
                         .handles(vec![HandleDef::source(HandlePosition::Bottom)]),
-                    leaf("standardPricing", 20.0, 20.0, "Standard Pricing", "transform")
-                        .parent("branchFalse"),
+                    leaf(
+                        "standardPricing",
+                        20.0,
+                        20.0,
+                        "Standard Pricing",
+                        "transform",
+                    )
+                    .parent("branchFalse"),
                     leaf("applyTax", 20.0, 150.0, "Apply Tax", "transform").parent("branchFalse"),
                     leaf("logStandard", 20.0, 280.0, "Log Standard Applied", "log")
                         .parent("branchFalse"),
@@ -489,18 +512,25 @@ fn main() {
                         // container — the gap flagged in conversation — this
                         // is where a consumer would reject it:
                         .validate_connection(|conn, state| {
-                            let src_parent =
-                                state.get_node(&conn.source).and_then(|n| n.parent_id.clone());
-                            let tgt_parent =
-                                state.get_node(&conn.target).and_then(|n| n.parent_id.clone());
+                            let src_parent = state
+                                .get_node(&conn.source)
+                                .and_then(|n| n.parent_id.clone());
+                            let tgt_parent = state
+                                .get_node(&conn.target)
+                                .and_then(|n| n.parent_id.clone());
                             src_parent == tgt_parent
                         })
                 });
 
-                let minimap = cx.new(|_| Minimap::new(state.clone()).container_bounds(1500.0, 900.0));
+                let minimap =
+                    cx.new(|_| Minimap::new(state.clone()).container_bounds(1500.0, 900.0));
                 let controls = cx.new(|_| Controls::new(state).container_size(1500.0, 900.0));
 
-                cx.new(|_| KitchenSink { flow, minimap, controls })
+                cx.new(|_| KitchenSink {
+                    flow,
+                    minimap,
+                    controls,
+                })
             },
         )
         .expect("Failed to open window");

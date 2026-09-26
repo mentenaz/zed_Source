@@ -2,14 +2,37 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 
 use crate::edges;
 use crate::store::FlowState;
 use crate::types::*;
 
 type NodeRendererFn = Box<dyn Fn(&FlowNode, &mut Window, &mut App) -> AnyElement>;
+
+/// Convert a window-absolute mouse position into **flow-space units**.
+///
+/// The world is laid out once in flow units inside a `.scale(zoom)` container
+/// whose window-space origin is `world_origin` (captured from the world
+/// `canvas()`'s bounds each paint). So the inverse of the layout transform
+/// `window = world_origin + flow * zoom` is
+/// `flow = (window_position - world_origin) / zoom`. The origin already
+/// includes the viewport pan, so applying `Viewport::screen_to_flow` here
+/// would subtract that pan a second time.
+///
+/// Mouse events always deliver window-absolute positions regardless of the
+/// enclosing element's scale, so every absolute-position comparison (node
+/// picking, edge hit-testing, snapping, box-select) needs this.
+fn window_to_flow(
+    viewport: &Viewport,
+    world_origin: Point<Pixels>,
+    pos: Point<Pixels>,
+) -> (f32, f32) {
+    let local_x = pos.x.as_f32() - world_origin.x.as_f32();
+    let local_y = pos.y.as_f32() - world_origin.y.as_f32();
+    (local_x / viewport.zoom, local_y / viewport.zoom)
+}
 
 /// The top-level flow graph component.
 ///
@@ -59,19 +82,18 @@ pub struct FlowGraph {
     /// closure built fresh on every render. Deliberately generic (node id +
     /// window-absolute click point) — this crate has no `forge_ui`/UI-kit
     /// dependency and no opinion on what menu, if any, the consumer shows.
-    on_node_context_menu:
-        Option<std::rc::Rc<dyn Fn(NodeId, Point<Pixels>, &mut Window, &mut App)>>,
+    on_node_context_menu: Option<std::rc::Rc<dyn Fn(NodeId, Point<Pixels>, &mut Window, &mut App)>>,
     /// Fired on right-click for any edge (hit-tested the same way the
     /// existing left-click edge-select path already does — see
     /// `edges::hit_test_edges`), since an edge has no element of its own to
     /// attach a per-edge handler to the way a node does (edges are painted,
     /// not laid out as divs).
-    on_edge_context_menu:
-        Option<std::rc::Rc<dyn Fn(EdgeId, Point<Pixels>, &mut Window, &mut App)>>,
+    on_edge_context_menu: Option<std::rc::Rc<dyn Fn(EdgeId, Point<Pixels>, &mut Window, &mut App)>>,
     /// Fired on right-click anywhere in the canvas. The callback receives
     /// both the window point and the corresponding canvas flow coordinate.
-    on_canvas_context_menu:
-        Option<std::rc::Rc<dyn Fn(Point<Pixels>, FlowPoint, Option<NodeId>, &mut Window, &mut App)>>,
+    on_canvas_context_menu: Option<
+        std::rc::Rc<dyn Fn(Point<Pixels>, FlowPoint, Option<NodeId>, &mut Window, &mut App)>,
+    >,
     /// This element's own on-screen origin within the window, captured each
     /// paint from the background/edges `canvas()`'s bounds. Mouse events
     /// deliver window-absolute positions, but `edges::hit_test_edges` (and
@@ -181,10 +203,7 @@ impl FlowGraph {
     }
 
     /// Set the on_connect callback.
-    pub fn on_connect(
-        mut self,
-        callback: impl Fn(&Connection, &mut FlowState) + 'static,
-    ) -> Self {
+    pub fn on_connect(mut self, callback: impl Fn(&Connection, &mut FlowState) + 'static) -> Self {
         self.on_connect = Some(Box::new(callback));
         self
     }
@@ -293,20 +312,16 @@ impl FlowGraph {
             return div().into_any_element();
         }
 
-        let (screen_x, screen_y) = viewport.flow_to_screen(abs_position);
+        // Node geometry is expressed in **flow-space units** and laid out
+        // inside the world's `.scale(zoom)` container, so the framework
+        // multiplies positions, sizes, text, and chrome by the zoom for us.
+        // A child's offset from its container is already folded into
+        // `abs_position` by `FlowState::absolute_position`, so every node is
+        // a top-level absolutely-positioned child of the world using its
+        // absolute flow coordinate — and it scales in lockstep with the box
+        // that encloses it, at any zoom.
+        let (screen_x, screen_y) = (abs_position.x, abs_position.y);
         let (footprint_w, footprint_h) = footprint;
-        // `footprint` is in flow-space units — a child's *screen* offset
-        // from this container is computed by folding this container's flow
-        // position into the child's `absolute_position` and running the
-        // whole thing through one `flow_to_screen` call, so that offset
-        // scales with `viewport.zoom` automatically. This box's own
-        // rendered size must scale the same way, or the two only agree at
-        // whatever zoom `container_size`/`fit_container` happened to be
-        // computed at — above that zoom the children's offset outgrows a
-        // box that isn't growing with it, and they render outside their
-        // own container's border.
-        let (screen_footprint_w, screen_footprint_h) =
-            (footprint_w * viewport.zoom, footprint_h * viewport.zoom);
 
         // Choose per-node content. A leaf gets its body from `node_renderer`.
         // A container's children live *below* a dedicated header strip whose
@@ -361,12 +376,13 @@ impl FlowGraph {
         let element_id: ElementId = ElementId::Name(node.id.clone());
 
         // Dedicated header strip for containers: an absolutely-positioned
-        // bar along the top, sized to `header_height * zoom` so the space it
-        // occupies always matches the `header_h` offset applied by
-        // `FlowState::absolute_position` / `fit_container`. Content is the
-        // `container_header` renderer output; chrome (tint + bottom divider)
-        // only when `show_chrome` is on. Inset from the container's rounded
-        // top corners so the bar's square corners stay inside them.
+        // bar along the top, sized to `header_height` in flow units (which
+        // the world's scale multiplies, keeping it matched to the `header_h`
+        // offset applied by `FlowState::absolute_position` / `fit_container`).
+        // Content is the `container_header` renderer output; chrome (tint +
+        // bottom divider) only when `show_chrome` is on. Inset from the
+        // container's rounded top corners so the bar's square corners stay
+        // inside them.
         let container_header_strip: Option<AnyElement> = if is_container {
             container_header_content.map(|header_content| {
                 div()
@@ -374,7 +390,7 @@ impl FlowGraph {
                     .top(px(1.0))
                     .left(px(8.0))
                     .right(px(8.0))
-                    .h(px(header_height * viewport.zoom))
+                    .h(px(header_height))
                     .flex()
                     .items_center()
                     .px_2()
@@ -418,9 +434,18 @@ impl FlowGraph {
         let prev_h = node.measured_height;
         let measure_canvas = canvas(
             |_bounds, _window, _cx| {},
-            move |bounds, _: (), _window, cx| {
-                let w = bounds.size.width;
-                let h = bounds.size.height;
+            move |bounds, _: (), window, cx| {
+                // This canvas lives inside the world's `.scale(zoom)`
+                // container, so its layout bounds arrive already multiplied
+                // by the zoom. Divide by the accumulated element scale to
+                // record the node's size in *flow* units, which is what
+                // `node_footprint`/`fit_container` work in — that keeps a
+                // node's measured size independent of the current zoom, so
+                // zooming neither refits containers nor retriggers this
+                // callback.
+                let s = window.element_scale();
+                let w = px(bounds.size.width.as_f32() / s);
+                let h = px(bounds.size.height.as_f32() / s);
                 if prev_w != Some(w) || prev_h != Some(h) {
                     measure_state.update(cx, |state, _| {
                         if let Some(node) = state.get_node_mut(&measure_node_id) {
@@ -447,8 +472,7 @@ impl FlowGraph {
         // container contributes its header strip (its children render as
         // separate top-level nodes by the caller, above this box), followed
         // by the always-present measurement canvas and handle dots.
-        let mut wrapper_children: Vec<AnyElement> =
-            Vec::with_capacity(handle_elements.len() + 2);
+        let mut wrapper_children: Vec<AnyElement> = Vec::with_capacity(handle_elements.len() + 2);
         if let Some(strip) = container_header_strip {
             wrapper_children.push(strip);
         } else if let Some(body) = leaf_content {
@@ -475,10 +499,7 @@ impl FlowGraph {
             // layered as an absolutely-positioned child (see below), and
             // children sit below `header_height` in flow space — so no
             // padding-top is needed to reserve header space here.
-            .when(is_container, |el| {
-                el.w(px(screen_footprint_w))
-                    .h(px(screen_footprint_h))
-            })
+            .when(is_container, |el| el.w(px(footprint_w)).h(px(footprint_h)))
             // Node box styling on the wrapper so handles align to visual edges
             .when(show_chrome, |el: Stateful<Div>| {
                 el.bg(gpui::rgb(node_bg))
@@ -503,14 +524,11 @@ impl FlowGraph {
                 let node_id = node_id.clone();
                 let state = state.clone();
                 let canvas_origin = canvas_origin.clone();
+                let viewport = *viewport;
                 move |event, _window, cx| {
                     let multi = event.modifiers.platform;
                     let mouse_pos = event.position;
-                    let origin = canvas_origin.get();
-                    let mouse = (
-                        mouse_pos.x.as_f32() - origin.x.as_f32(),
-                        mouse_pos.y.as_f32() - origin.y.as_f32(),
-                    );
+                    let mouse = window_to_flow(&viewport, canvas_origin.get(), mouse_pos);
 
                     state.update(cx, |state, _| {
                         // Don't start node drag if we're connecting
@@ -527,7 +545,7 @@ impl FlowGraph {
                         // container can't overwrite the child's selection.
                         let mut effective_id = node_id.clone();
                         if state.is_container(&node_id) {
-                            if let Some(descendant) = state.descendant_at_screen(&node_id, mouse) {
+                            if let Some(descendant) = state.descendant_at_flow(&node_id, mouse) {
                                 effective_id = descendant;
                             }
                         }
@@ -575,20 +593,26 @@ impl FlowGraph {
                 }
             })
             .when_some(
-                node.context_menu.then(|| self.on_node_context_menu.clone()).flatten(),
+                node.context_menu
+                    .then(|| self.on_node_context_menu.clone())
+                    .flatten(),
                 |el, callback| {
                     let node_id = node_id.clone();
                     let state = state.clone();
+                    let canvas_origin = canvas_origin.clone();
+                    let viewport = *viewport;
                     el.on_mouse_down(MouseButton::Right, move |event, window, cx| {
                         let target = state.update(cx, |state, _| {
                             if state.is_container(&node_id) {
                                 state
-                                    .descendant_at_screen(&node_id, (
-                                        event.position.x.as_f32()
-                                            - canvas_origin.get().x.as_f32(),
-                                        event.position.y.as_f32()
-                                            - canvas_origin.get().y.as_f32(),
-                                    ))
+                                    .descendant_at_flow(
+                                        &node_id,
+                                        window_to_flow(
+                                            &viewport,
+                                            canvas_origin.get(),
+                                            event.position,
+                                        ),
+                                    )
                                     .unwrap_or_else(|| node_id.clone())
                             } else {
                                 node_id.clone()
@@ -720,11 +744,9 @@ impl FlowGraph {
 
                                     if state.is_valid_connection(&connection) {
                                         state.push_undo();
-                                        let edge_id: SharedString = format!(
-                                            "e{}-{}",
-                                            connection.source, connection.target
-                                        )
-                                        .into();
+                                        let edge_id: SharedString =
+                                            format!("e{}-{}", connection.source, connection.target)
+                                                .into();
                                         state.add_edge_from_connection(&connection, edge_id);
                                     }
                                 }
@@ -766,7 +788,12 @@ impl FlowGraph {
     /// consulted here, silently routing every unmapped node — e.g. a
     /// leaf whose type isn't in `node_renderers` — to the hardcoded
     /// `render_default_node` palette.)
-    fn render_fallback_node(&self, node: &FlowNode, window: &mut Window, cx: &mut App) -> AnyElement {
+    fn render_fallback_node(
+        &self,
+        node: &FlowNode,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         match &self.default_renderer {
             Some(renderer) => renderer(node, window, cx),
             None => self.render_default_node(node, window, cx),
@@ -792,38 +819,52 @@ impl FlowGraph {
             .into_any_element()
     }
 
-    /// Paint the background dot grid.
+    /// Paint the background pattern across the graph viewport.
+    ///
+    /// The grid is anchored to the **world** origin rather than the viewport,
+    /// so its phase follows the content as you pan.
+    ///
+    /// This canvas is outside the scaled world, so apply both the window
+    /// element scale and graph zoom to pattern spacing and stroke sizes.
+    /// `window.paint_quad` does not apply `Style::scale` itself. Dot size
+    /// keeps the original `min(1.0)` clamp so zooming in doesn't turn the
+    /// background into heavy blobs.
     fn paint_grid(
         bounds: &Bounds<Pixels>,
-        viewport: &Viewport,
         grid_color: u32,
         pattern: BackgroundPattern,
+        viewport: Viewport,
         window: &mut Window,
     ) {
         let color = gpui::rgb(grid_color);
-        let spacing = 20.0 * viewport.zoom;
+        let element_scale = window.element_scale();
+        let scale = element_scale * viewport.zoom;
+        let spacing = 20.0 * scale;
 
         if spacing < 5.0 {
             return;
         }
 
-        let start_x = viewport.x % spacing;
-        let start_y = viewport.y % spacing;
         let bw = bounds.size.width.as_f32();
         let bh = bounds.size.height.as_f32();
-        let ox = bounds.origin.x;
-        let oy = bounds.origin.y;
+        let ox = bounds.origin.x.as_f32();
+        let oy = bounds.origin.y.as_f32();
+        let start_x = (viewport.x * element_scale).rem_euclid(spacing);
+        let start_y = (viewport.y * element_scale).rem_euclid(spacing);
 
         match pattern {
             BackgroundPattern::Dots => {
-                let dot_size = px(1.5 * viewport.zoom.min(1.0));
+                let dot_size = px(1.5 * scale.min(1.0));
                 let mut x = start_x;
                 while x < bw {
                     let mut y = start_y;
                     while y < bh {
                         let dot_bounds = Bounds::new(
-                            Point::new(ox + px(x) - dot_size / 2.0, oy + px(y) - dot_size / 2.0),
-                            Size { width: dot_size, height: dot_size },
+                            Point::new(px(ox + x) - dot_size / 2.0, px(oy + y) - dot_size / 2.0),
+                            Size {
+                                width: dot_size,
+                                height: dot_size,
+                            },
                         );
                         window.paint_quad(gpui::fill(dot_bounds, color));
                         y += spacing;
@@ -832,25 +873,31 @@ impl FlowGraph {
                 }
             }
             BackgroundPattern::Lines => {
-                let line_w = px(0.5);
+                let line_w = px(0.5 * scale);
                 let mut x = start_x;
                 while x < bw {
                     let line = Bounds::new(
-                        Point::new(ox + px(x), oy),
-                        Size { width: line_w, height: bounds.size.height },
+                        Point::new(px(ox + x), px(oy)),
+                        Size {
+                            width: line_w,
+                            height: px(bh),
+                        },
                     );
                     window.paint_quad(gpui::fill(line, color));
                     x += spacing;
                 }
             }
             BackgroundPattern::Cross => {
-                let line_w = px(0.5);
+                let line_w = px(0.5 * scale);
                 // Vertical lines
                 let mut x = start_x;
                 while x < bw {
                     let line = Bounds::new(
-                        Point::new(ox + px(x), oy),
-                        Size { width: line_w, height: bounds.size.height },
+                        Point::new(px(ox + x), px(oy)),
+                        Size {
+                            width: line_w,
+                            height: px(bh),
+                        },
                     );
                     window.paint_quad(gpui::fill(line, color));
                     x += spacing;
@@ -859,8 +906,11 @@ impl FlowGraph {
                 let mut y = start_y;
                 while y < bh {
                     let line = Bounds::new(
-                        Point::new(ox, oy + px(y)),
-                        Size { width: bounds.size.width, height: line_w },
+                        Point::new(px(ox), px(oy + y)),
+                        Size {
+                            width: px(bw),
+                            height: line_w,
+                        },
                     );
                     window.paint_quad(gpui::fill(line, color));
                     y += spacing;
@@ -870,15 +920,33 @@ impl FlowGraph {
     }
 
     /// Paint a selection box rectangle.
-    fn paint_selection_box(sel: &SelectionBox, accent: u32, window: &mut Window) {
+    ///
+    /// `sel.start`/`sel.current` are **flow-space** points (the same space
+    /// node bounds live in), so the whole rect is transformed to
+    /// window-absolute with `origin + flow * element_scale` — border
+    /// thickness included, so the marquee keeps its hairline weight as you
+    /// zoom.
+    fn paint_selection_box(
+        sel: &SelectionBox,
+        origin: (f32, f32),
+        scale: f32,
+        accent: u32,
+        window: &mut Window,
+    ) {
         let x = sel.start.0.min(sel.current.0);
         let y = sel.start.1.min(sel.current.1);
         let w = (sel.start.0 - sel.current.0).abs();
         let h = (sel.start.1 - sel.current.1).abs();
 
-        if w < 1.0 || h < 1.0 {
+        if w < 0.5 || h < 0.5 {
             return;
         }
+
+        // flow -> window-absolute
+        let at = |fx: f32, fy: f32| (origin.0 + fx * scale, origin.1 + fy * scale);
+        let (x, y) = at(x, y);
+        let (w, h) = (w * scale, h * scale);
+        let border = 1.0 * scale;
 
         let bounds = Bounds::new(
             Point::new(px(x), px(y)),
@@ -894,34 +962,64 @@ impl FlowGraph {
         // Accent border
         let border_color: Background = gpui::rgb(accent).into();
         // Top
-        let top = Bounds::new(Point::new(px(x), px(y)), Size { width: px(w), height: px(1.0) });
+        let top = Bounds::new(
+            Point::new(px(x), px(y)),
+            Size {
+                width: px(w),
+                height: px(border),
+            },
+        );
         window.paint_quad(fill(top, border_color.clone()));
         // Bottom
-        let bottom = Bounds::new(Point::new(px(x), px(y + h - 1.0)), Size { width: px(w), height: px(1.0) });
+        let bottom = Bounds::new(
+            Point::new(px(x), px(y + h - border)),
+            Size {
+                width: px(w),
+                height: px(border),
+            },
+        );
         window.paint_quad(fill(bottom, border_color.clone()));
         // Left
-        let left = Bounds::new(Point::new(px(x), px(y)), Size { width: px(1.0), height: px(h) });
+        let left = Bounds::new(
+            Point::new(px(x), px(y)),
+            Size {
+                width: px(border),
+                height: px(h),
+            },
+        );
         window.paint_quad(fill(left, border_color.clone()));
         // Right
-        let right = Bounds::new(Point::new(px(x + w - 1.0), px(y)), Size { width: px(1.0), height: px(h) });
+        let right = Bounds::new(
+            Point::new(px(x + w - border), px(y)),
+            Size {
+                width: px(border),
+                height: px(h),
+            },
+        );
         window.paint_quad(fill(right, border_color));
     }
 
     /// Paint a draft connection line from handle to mouse cursor.
     ///
-    /// `draft.from_point` is captured (via `find_handle_center`) in
-    /// flow-canvas-local space, the same space `handle_center_from_node`
-    /// uses for edges (see the doc comment on `edges::paint_edges`) — so it
-    /// needs `origin` added here at paint time. `draft.to_point` tracks the
-    /// live mouse cursor and is already window-absolute; it must NOT get
-    /// `origin` added a second time.
-    fn paint_connection_draft(draft: &ConnectionDraft, origin: (f32, f32), accent: u32, window: &mut Window) {
+    /// Both `draft.from_point` (captured via `find_handle_center`) and
+    /// `draft.to_point` (the live cursor) are **flow-space**, so the whole
+    /// curve — stroke width included — is transformed to window-absolute with
+    /// `origin + flow * element_scale`.
+    fn paint_connection_draft(
+        draft: &ConnectionDraft,
+        origin: (f32, f32),
+        scale: f32,
+        accent: u32,
+        window: &mut Window,
+    ) {
         let color: Background = gpui::rgba((accent << 8) | 0x80).into();
-        let (sx, sy) = (draft.from_point.0 + origin.0, draft.from_point.1 + origin.1);
+        let at =
+            |fx: f32, fy: f32| Point::new(px(origin.0 + fx * scale), px(origin.1 + fy * scale));
+        let (sx, sy) = draft.from_point;
         let (tx, ty) = draft.to_point;
 
-        let mut builder = PathBuilder::stroke(px(2.0));
-        builder.move_to(Point::new(px(sx), px(sy)));
+        let mut builder = PathBuilder::stroke(px(2.0 * scale));
+        builder.move_to(at(sx, sy));
 
         // Simple bezier toward cursor
         let dx = (tx - sx).abs() * 0.5;
@@ -932,11 +1030,7 @@ impl FlowGraph {
             HandlePosition::Top => (sx, sy - dx, tx, ty + dx),
         };
 
-        builder.cubic_bezier_to(
-            Point::new(px(tx), px(ty)),
-            Point::new(px(cx1), px(cy1)),
-            Point::new(px(cx2), px(cy2)),
-        );
+        builder.cubic_bezier_to(at(tx, ty), at(cx1, cy1), at(cx2, cy2));
 
         if let Ok(path) = builder.build() {
             window.paint_path(path, color);
@@ -946,30 +1040,42 @@ impl FlowGraph {
     /// Paints a small "+" badge at the dangling end of a connection draft
     /// that isn't currently snapped to a handle — the visual affordance for
     /// "release here to create a new connected node" (see
-    /// `on_connection_drop`). `pos` is window-absolute, same space
-    /// `draft.to_point` is already in (see `paint_connection_draft`'s doc
-    /// comment on that).
-    fn paint_drop_to_create_hint(pos: (f32, f32), accent: u32, window: &mut Window) {
-        let size = 22.0;
+    /// `on_connection_drop`). `pos` is **flow-space**, same space
+    /// `draft.to_point` is in, and is transformed like the rest of the
+    /// canvas layer.
+    fn paint_drop_to_create_hint(
+        pos: (f32, f32),
+        origin: (f32, f32),
+        scale: f32,
+        accent: u32,
+        window: &mut Window,
+    ) {
+        let size = 22.0 * scale;
         let half = size / 2.0;
+        let cx = origin.0 + pos.0 * scale;
+        let cy = origin.1 + pos.1 * scale;
         let bg: Background = gpui::rgba((accent << 8) | 0xe6).into();
         let bounds = Bounds::new(
-            Point::new(px(pos.0 - half), px(pos.1 - half)),
-            Size { width: px(size), height: px(size) },
+            Point::new(px(cx - half), px(cy - half)),
+            Size {
+                width: px(size),
+                height: px(size),
+            },
         );
         window.paint_quad(fill(bounds, bg).corner_radii(px(half)));
 
         let line_color: Background = gpui::white().into();
-        let pad = 6.0;
-        let mut h = PathBuilder::stroke(px(2.0));
-        h.move_to(Point::new(px(pos.0 - half + pad), px(pos.1)));
-        h.line_to(Point::new(px(pos.0 + half - pad), px(pos.1)));
+        let pad = 6.0 * scale;
+        let stroke = 2.0 * scale;
+        let mut h = PathBuilder::stroke(px(stroke));
+        h.move_to(Point::new(px(cx - half + pad), px(cy)));
+        h.line_to(Point::new(px(cx + half - pad), px(cy)));
         if let Ok(path) = h.build() {
             window.paint_path(path, line_color.clone());
         }
-        let mut v = PathBuilder::stroke(px(2.0));
-        v.move_to(Point::new(px(pos.0), px(pos.1 - half + pad)));
-        v.line_to(Point::new(px(pos.0), px(pos.1 + half - pad)));
+        let mut v = PathBuilder::stroke(px(stroke));
+        v.move_to(Point::new(px(cx), px(cy - half + pad)));
+        v.line_to(Point::new(px(cx), px(cy + half - pad)));
         if let Ok(path) = v.build() {
             window.paint_path(path, line_color);
         }
@@ -996,7 +1102,16 @@ impl Render for FlowGraph {
         let show_drop_to_create_hint = self.on_connection_drop.is_some();
 
         // Read state, extract what we need, then release the borrow
-        let (viewport, is_panning, is_connecting, snap_node_id, connecting_draft, selection_box, visible_nodes, edge_label_elements) = {
+        let (
+            viewport,
+            is_panning,
+            is_connecting,
+            snap_node_id,
+            connecting_draft,
+            selection_box,
+            visible_nodes,
+            edge_label_elements,
+        ) = {
             let state = self.state.read(cx);
             let viewport = state.viewport;
             let is_panning = state.pan_drag.is_some();
@@ -1013,16 +1128,28 @@ impl Render for FlowGraph {
             // *resolved* absolute position/footprint (parent-chain-aware —
             // see `FlowState::absolute_position`/`node_footprint`), not the
             // raw (possibly parent-relative) `node.position` directly.
+            //
+            // Culling happens in **flow space**: the world container is
+            // placed at `(viewport.x, viewport.y)` and covers `win_w/zoom ×
+            // win_h/zoom` flow units, so the window rect `[0, win_w]` maps
+            // back to the flow rect below. The margin is a screen-space
+            // cushion, so it's divided by the zoom too.
+            let cull_margin = cull_margin / viewport.zoom;
+            let vis_x0 = -viewport.x / viewport.zoom - cull_margin;
+            let vis_y0 = -viewport.y / viewport.zoom - cull_margin;
+            let vis_x1 = (win_w - viewport.x) / viewport.zoom + cull_margin;
+            let vis_y1 = (win_h - viewport.y) / viewport.zoom + cull_margin;
             let mut visible_indices: Vec<usize> = Vec::new();
             for (i, node) in state.nodes.iter().enumerate() {
                 if node.hidden {
                     continue;
                 }
                 let abs_pos = state.absolute_position(&node.id).unwrap_or(node.position);
-                let (nw, nh) = state.screen_footprint(node);
-                let (sx, sy) = viewport.flow_to_screen(abs_pos);
-                if sx + nw < -cull_margin || sx > win_w + cull_margin
-                    || sy + nh < -cull_margin || sy > win_h + cull_margin
+                let (nw, nh) = state.node_footprint(node);
+                if abs_pos.x + nw < vis_x0
+                    || abs_pos.x > vis_x1
+                    || abs_pos.y + nh < vis_y0
+                    || abs_pos.y > vis_y1
                 {
                     continue;
                 }
@@ -1032,9 +1159,8 @@ impl Render for FlowGraph {
             // later sibling than) behind every one of its own descendants,
             // regardless of individual `z_index`; z_index only breaks ties
             // within the same depth, same as before nesting existed.
-            visible_indices.sort_by_key(|&i| {
-                (state.depth_of(&state.nodes[i].id), state.nodes[i].z_index)
-            });
+            visible_indices
+                .sort_by_key(|&i| (state.depth_of(&state.nodes[i].id), state.nodes[i].z_index));
 
             let visible_nodes: Vec<(FlowNode, FlowPoint, (f32, f32), bool)> = visible_indices
                 .iter()
@@ -1072,7 +1198,16 @@ impl Render for FlowGraph {
                 }
             }
 
-            (viewport, is_panning, is_connecting, snap_node_id, connecting_draft, selection_box, visible_nodes, edge_label_elements)
+            (
+                viewport,
+                is_panning,
+                is_connecting,
+                snap_node_id,
+                connecting_draft,
+                selection_box,
+                visible_nodes,
+                edge_label_elements,
+            )
         }; // state borrow ends here
 
         // Render only visible nodes
@@ -1093,7 +1228,7 @@ impl Render for FlowGraph {
         }
 
         let state_for_canvas = self.state.clone();
-        let viewport_for_canvas = viewport;
+        let viewport_for_world = viewport;
         let bg_color = self.bg_color;
         let grid_color = self.grid_color;
         let bg_pattern = self.bg_pattern;
@@ -1110,6 +1245,7 @@ impl Render for FlowGraph {
 
         div()
             .id("flow-graph")
+            .debug_selector(|| "flow-graph".to_string())
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
@@ -1122,40 +1258,103 @@ impl Render for FlowGraph {
             } else {
                 CursorStyle::Arrow
             })
-            // Background grid + edge painting layer
-            .child({
-                let canvas_origin_for_layout = self.canvas_origin.clone();
-                canvas(
-                    move |bounds, _window, _cx| {
-                        canvas_origin_for_layout.set(bounds.origin);
-                    },
-                    move |bounds, _: (), window, cx| {
-                        Self::paint_grid(&bounds, &viewport_for_canvas, grid_color, bg_pattern, window);
-                        let origin = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
-                        let state = state_for_canvas.read(cx);
-                        edges::paint_edges(state, origin, window);
+            // The world: laid out once in flow-space units inside a single
+            // `.scale(zoom)` container. Node positions and sizes, text, node
+            // chrome, handles, edge labels, and edge geometry are expressed
+            // in flow units and zoomed by the framework. The background
+            // pattern is painted separately across the fixed graph viewport
+            // so panning the world cannot uncover part of the panel.
+            //
+            // The world is sized `viewport_size / zoom`; after scaling it
+            // matches the viewport size and is clipped to the graph panel.
+            // `left`/`top` carry the pan.
+            .child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .debug_selector(|| "flow-background".to_string())
+                    .child({
+                        let viewport_for_background = viewport_for_world;
+                        canvas(
+                            |_bounds, _window, _cx| {},
+                            move |bounds, _: (), window, _cx| {
+                                Self::paint_grid(
+                                    &bounds,
+                                    grid_color,
+                                    bg_pattern,
+                                    viewport_for_background,
+                                    window,
+                                );
+                            },
+                        )
+                        .size_full()
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(viewport_for_world.x))
+                    .top(px(viewport_for_world.y))
+                    .scale(viewport_for_world.zoom)
+                    // Test-support only (a no-op in release builds): lets the
+                    // zoom/resize tests read back the world's own box, which is
+                    // how they assert its scaled geometry.
+                    .debug_selector(|| "flow-world".to_string())
+                    .w(px(win_w / viewport_for_world.zoom))
+                    .h(px(win_h / viewport_for_world.zoom))
+                    // Edge painting layer
+                    .child({
+                        let canvas_origin_for_layout = self.canvas_origin.clone();
+                        canvas(
+                            move |bounds, _window, _cx| {
+                                canvas_origin_for_layout.set(bounds.origin);
+                            },
+                            move |bounds, _: (), window, cx| {
+                                let origin = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
+                                let scale = window.element_scale();
+                                let state = state_for_canvas.read(cx);
+                                edges::paint_edges(state, origin, window);
 
-                        // Paint draft connection line
-                        if let Some(ref draft) = connecting_draft {
-                            Self::paint_connection_draft(draft, origin, accent_color, window);
-                            if show_drop_to_create_hint && draft.snap_target.is_none() {
-                                Self::paint_drop_to_create_hint(draft.to_point, accent_color, window);
-                            }
-                        }
+                                // Paint draft connection line
+                                if let Some(ref draft) = connecting_draft {
+                                    Self::paint_connection_draft(
+                                        draft,
+                                        origin,
+                                        scale,
+                                        accent_color,
+                                        window,
+                                    );
+                                    if show_drop_to_create_hint && draft.snap_target.is_none() {
+                                        Self::paint_drop_to_create_hint(
+                                            draft.to_point,
+                                            origin,
+                                            scale,
+                                            accent_color,
+                                            window,
+                                        );
+                                    }
+                                }
 
-                        // Paint selection box
-                        if let Some(ref sel) = selection_box {
-                            Self::paint_selection_box(sel, accent_color, window);
-                        }
-                    },
-                )
-                .absolute()
-                .size_full()
-            })
-            // Node layer
-            .children(node_elements)
-            // Edge labels
-            .children(edge_label_elements)
+                                // Paint selection box
+                                if let Some(ref sel) = selection_box {
+                                    Self::paint_selection_box(
+                                        sel,
+                                        origin,
+                                        scale,
+                                        accent_color,
+                                        window,
+                                    );
+                                }
+                            },
+                        )
+                        .absolute()
+                        .size_full()
+                    })
+                    // Node layer
+                    .children(node_elements)
+                    // Edge labels
+                    .children(edge_label_elements),
+            )
             // Mouse down on empty space → start panning, deselect, or edge selection
             .on_mouse_down(MouseButton::Left, {
                 let entity_id = entity_id;
@@ -1168,20 +1367,16 @@ impl Render for FlowGraph {
                             return;
                         }
 
-                        // Try edge hit testing. `hit_test_edges` compares
-                        // against "flow-canvas-local" coordinates (no
-                        // window offset — see `canvas_origin`'s doc
-                        // comment), so the click point needs that same
-                        // offset subtracted first; `mx`/`my` below stay
-                        // window-absolute for the box-selection/pan-drag
-                        // code further down, which is delta-based and
-                        // doesn't need this adjustment.
+                        // Try edge hit testing. `hit_test_edges` works in
+                        // **flow-space**, so convert the click through
+                        // `window_to_flow`. `mx`/`my` below stay
+                        // window-absolute for the pan-drag code further down,
+                        // which is delta-based and doesn't need this.
                         let origin = canvas_origin_for_left_click.get();
-                        let edge_mx = mouse_pos.x.as_f32() - origin.x.as_f32();
-                        let edge_my = mouse_pos.y.as_f32() - origin.y.as_f32();
+                        let flow_mouse = window_to_flow(&state.viewport, origin, mouse_pos);
                         let mx = mouse_pos.x.as_f32();
                         let my = mouse_pos.y.as_f32();
-                        if let Some(edge_id) = edges::hit_test_edges(state, edge_mx, edge_my, 5.0) {
+                        if let Some(edge_id) = edges::hit_test_edges(state, flow_mouse, 5.0) {
                             if !event.modifiers.platform {
                                 for n in &mut state.nodes {
                                     n.selected = false;
@@ -1206,9 +1401,12 @@ impl Render for FlowGraph {
                                     e.selected = false;
                                 }
                             }
+                            // The marquee is tracked in flow-space, matching
+                            // the node bounds it's tested against and the
+                            // space `paint_selection_box` expects.
                             state.selection_box = Some(SelectionBox {
-                                start: (mx, my),
-                                current: (mx, my),
+                                start: flow_mouse,
+                                current: flow_mouse,
                             });
                             return;
                         }
@@ -1234,15 +1432,17 @@ impl Render for FlowGraph {
             })
             .when_some(on_canvas_context_menu, |el, callback| {
                 let canvas_origin = self.canvas_origin.clone();
-                let viewport = viewport_for_canvas;
+                let viewport = viewport_for_world;
                 el.on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                    let origin = canvas_origin.get();
-                    let x = event.position.x.as_f32() - origin.x.as_f32();
-                    let y = event.position.y.as_f32() - origin.y.as_f32();
-                    let node_id = state_for_canvas_context
-                        .read(cx)
-                        .node_at_screen((x, y));
-                    callback(event.position, viewport.screen_to_flow(x, y), node_id, window, cx);
+                    let flow = window_to_flow(&viewport, canvas_origin.get(), event.position);
+                    let node_id = state_for_canvas_context.read(cx).node_at_flow(flow);
+                    callback(
+                        event.position,
+                        FlowPoint::new(flow.0, flow.1),
+                        node_id,
+                        window,
+                        cx,
+                    );
                 })
             })
             // Right-click on an edge → `on_edge_context_menu`, same
@@ -1254,14 +1454,12 @@ impl Render for FlowGraph {
                 let state_for_edge_ctx = self.state.clone();
                 let canvas_origin_for_edge_ctx = self.canvas_origin.clone();
                 el.on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                    // See `canvas_origin`'s doc comment — the click point
-                    // needs the canvas's own window offset subtracted
-                    // before comparing against `hit_test_edges`'s
-                    // flow-canvas-local coordinates.
-                    let origin = canvas_origin_for_edge_ctx.get();
-                    let mx = event.position.x.as_f32() - origin.x.as_f32();
-                    let my = event.position.y.as_f32() - origin.y.as_f32();
-                    let hit = edges::hit_test_edges(state_for_edge_ctx.read(cx), mx, my, 5.0);
+                    let flow = window_to_flow(
+                        &state_for_edge_ctx.read(cx).viewport,
+                        canvas_origin_for_edge_ctx.get(),
+                        event.position,
+                    );
+                    let hit = edges::hit_test_edges(state_for_edge_ctx.read(cx), flow, 5.0);
                     if let Some(edge_id) = hit {
                         callback(edge_id, event.position, window, cx);
                     }
@@ -1270,6 +1468,7 @@ impl Render for FlowGraph {
             // Global mouse move → handle dragging, panning, or connecting
             .on_mouse_move({
                 let entity_id = entity_id;
+                let canvas_origin_for_mouse_move = self.canvas_origin.clone();
                 move |event, _window, cx| {
                     let mouse_pos = event.position;
                     let mx = mouse_pos.x.as_f32();
@@ -1278,30 +1477,39 @@ impl Render for FlowGraph {
                     let mut changed = false;
 
                     state_for_mouse_move.update(cx, |state, _| {
+                        // Flow-space cursor, for everything that compares
+                        // against node/handle geometry. `mx`/`my` remain
+                        // window-absolute for the delta-based pan and node
+                        // drag paths below.
+                        let flow_mouse = window_to_flow(
+                            &state.viewport,
+                            canvas_origin_for_mouse_move.get(),
+                            mouse_pos,
+                        );
                         // Box selection
                         if let Some(ref mut sel) = state.selection_box {
-                            sel.current = (mx, my);
-                            // Select nodes whose screen bounds intersect the box
+                            sel.current = flow_mouse;
+                            // Select nodes whose flow bounds intersect the box
                             let (sx, sy, ex, ey) = (
                                 sel.start.0.min(sel.current.0),
                                 sel.start.1.min(sel.current.1),
                                 sel.start.0.max(sel.current.0),
                                 sel.start.1.max(sel.current.1),
                             );
-                            let viewport = state.viewport;
                             // Resolved (absolute-position, footprint) per
                             // node computed first — `absolute_position`/
                             // `node_footprint` need an immutable `&state`,
                             // which can't overlap the `&mut state.nodes`
                             // loop below that writes `selected`.
-                            let screen_boxes: Vec<(NodeId, (f32, f32), (f32, f32))> = state
+                            let flow_boxes: Vec<(NodeId, (f32, f32), (f32, f32))> = state
                                 .nodes
                                 .iter()
                                 .filter(|n| !n.hidden)
                                 .map(|n| {
-                                    let abs_pos = state.absolute_position(&n.id).unwrap_or(n.position);
-                                    let footprint = state.screen_footprint(n);
-                                    (n.id.clone(), viewport.flow_to_screen(abs_pos), footprint)
+                                    let abs_pos =
+                                        state.absolute_position(&n.id).unwrap_or(n.position);
+                                    let footprint = state.node_footprint(n);
+                                    (n.id.clone(), (abs_pos.x, abs_pos.y), footprint)
                                 })
                                 .collect();
                             for node in &mut state.nodes {
@@ -1309,12 +1517,13 @@ impl Render for FlowGraph {
                                     continue;
                                 }
                                 let Some((_, (nx, ny), (nw, nh))) =
-                                    screen_boxes.iter().find(|(id, _, _)| *id == node.id)
+                                    flow_boxes.iter().find(|(id, _, _)| *id == node.id)
                                 else {
                                     continue;
                                 };
                                 // AABB intersection
-                                let intersects = *nx < ex && nx + nw > sx && *ny < ey && ny + nh > sy;
+                                let intersects =
+                                    *nx < ex && nx + nw > sx && *ny < ey && ny + nh > sy;
                                 node.selected = intersects;
                             }
                             changed = true;
@@ -1323,11 +1532,11 @@ impl Render for FlowGraph {
                         else if state.connecting.is_some() {
                             // Clone draft to avoid borrow conflict with find_snap_target
                             let mut draft = state.connecting.clone().unwrap();
-                            let snap = state.find_snap_target(&draft, mx, my);
+                            let snap = state.find_snap_target(&draft, flow_mouse);
                             if let Some(ref target) = snap {
                                 draft.to_point = target.point;
                             } else {
-                                draft.to_point = (mx, my);
+                                draft.to_point = flow_mouse;
                             }
                             draft.snap_target = snap;
                             state.connecting = Some(draft);
@@ -1421,8 +1630,9 @@ impl Render for FlowGraph {
                                 // handle to create a new connected node"
                                 // gesture (no snap target means the drop
                                 // wasn't on another handle).
-                                let flow_point =
-                                    state.viewport.screen_to_flow(draft.to_point.0, draft.to_point.1);
+                                let flow_point = state
+                                    .viewport
+                                    .screen_to_flow(draft.to_point.0, draft.to_point.1);
                                 callback(&draft, flow_point, state);
                             }
                             changed = true;
@@ -1458,7 +1668,10 @@ impl Render for FlowGraph {
                     let graph_focused = focus.is_focused(window);
 
                     // Undo: Cmd+Z (always allowed)
-                    if key == "z" && event.keystroke.modifiers.platform && !event.keystroke.modifiers.shift {
+                    if key == "z"
+                        && event.keystroke.modifiers.platform
+                        && !event.keystroke.modifiers.shift
+                    {
                         state_for_key.update(cx, |state, _| {
                             state.undo();
                         });
@@ -1466,7 +1679,10 @@ impl Render for FlowGraph {
                         return;
                     }
                     // Redo: Cmd+Shift+Z
-                    if key == "z" && event.keystroke.modifiers.platform && event.keystroke.modifiers.shift {
+                    if key == "z"
+                        && event.keystroke.modifiers.platform
+                        && event.keystroke.modifiers.shift
+                    {
                         state_for_key.update(cx, |state, _| {
                             state.redo();
                         });
@@ -1527,10 +1743,8 @@ impl Render for FlowGraph {
                                 (old_zoom + zoom_delta).clamp(state.min_zoom, state.max_zoom);
                             let mx = mouse_pos.x.as_f32();
                             let my = mouse_pos.y.as_f32();
-                            state.viewport.x =
-                                mx - (mx - state.viewport.x) * (new_zoom / old_zoom);
-                            state.viewport.y =
-                                my - (my - state.viewport.y) * (new_zoom / old_zoom);
+                            state.viewport.x = mx - (mx - state.viewport.x) * (new_zoom / old_zoom);
+                            state.viewport.y = my - (my - state.viewport.y) * (new_zoom / old_zoom);
                             state.viewport.zoom = new_zoom;
                             state.refit_all_containers();
                         });
@@ -1556,10 +1770,8 @@ impl Render for FlowGraph {
                             (old_zoom * (1.0 + zoom_delta)).clamp(state.min_zoom, state.max_zoom);
                         let mx = mouse_pos.x.as_f32();
                         let my = mouse_pos.y.as_f32();
-                        state.viewport.x =
-                            mx - (mx - state.viewport.x) * (new_zoom / old_zoom);
-                        state.viewport.y =
-                            my - (my - state.viewport.y) * (new_zoom / old_zoom);
+                        state.viewport.x = mx - (mx - state.viewport.x) * (new_zoom / old_zoom);
+                        state.viewport.y = my - (my - state.viewport.y) * (new_zoom / old_zoom);
                         state.viewport.zoom = new_zoom;
                         state.refit_all_containers();
                     });

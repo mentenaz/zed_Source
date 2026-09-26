@@ -104,15 +104,13 @@ impl DatabasePanel {
                                     .with_size(Size::Small)
                                     .child(db_type_label(connection.db_type)),
                             )
-                            .child(
-                                Label::new(status_label)
-                                    .size(LabelSize::XSmall)
-                                    .color(if status_label == "Error" {
-                                        Color::Error
-                                    } else {
-                                        Color::Muted
-                                    }),
-                            )
+                            .child(Label::new(status_label).size(LabelSize::XSmall).color(
+                                if status_label == "Error" {
+                                    Color::Error
+                                } else {
+                                    Color::Muted
+                                },
+                            ))
                             .when(busy, |this| {
                                 this.child(
                                     Tag::warning()
@@ -126,6 +124,33 @@ impl DatabasePanel {
                         h_flex()
                             .gap_1()
                             .items_center()
+                            .when(is_connected, |this| {
+                                this.child(
+                                    Button::new(("open-workbench", id.0))
+                                        .outline()
+                                        .disabled(busy)
+                                        .icon(GIconName::SquareTerminal)
+                                        .label("Workbench")
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.open_workbench_tab(id, window, cx);
+                                            },
+                                        )),
+                                )
+                            })
+                            .when(is_connected, |this| {
+                                this.child(
+                                    Button::new(("open-schema-graph", id.0))
+                                        .outline()
+                                        .disabled(busy)
+                                        .label("Schema Graph")
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.open_schema_graph_tab(id, window, cx);
+                                            },
+                                        )),
+                                )
+                            })
                             .when(is_connected, |this| {
                                 this.child(
                                     Button::new(("refresh-schema", id.0))
@@ -144,21 +169,17 @@ impl DatabasePanel {
                                     .outline()
                                     .disabled(busy)
                                     .label("Disconnect")
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            this.disconnect(id, cx);
-                                        },
-                                    ))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.disconnect(id, cx);
+                                    }))
                             } else {
                                 Button::new(("connect", id.0))
                                     .primary()
                                     .disabled(busy)
                                     .label("Connect")
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            this.connect(id, cx);
-                                        },
-                                    ))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.connect(id, cx);
+                                    }))
                             })
                             .child(
                                 Button::new(("delete", id.0))
@@ -166,11 +187,9 @@ impl DatabasePanel {
                                     .danger()
                                     .disabled(busy)
                                     .icon(Icon::new(GIconName::Delete))
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            this.delete_connection(id, cx);
-                                        },
-                                    )),
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.delete_connection(id, cx);
+                                    })),
                             ),
                     ),
             )
@@ -218,7 +237,9 @@ impl DatabasePanel {
         let input_border = cx.theme().border;
         let live = self.registry.live_databases(id);
         let active = self.registry.active_database(id);
-        let active_ix = active.as_ref().and_then(|active| live.iter().position(|name| name == active));
+        let active_ix = active
+            .as_ref()
+            .and_then(|active| live.iter().position(|name| name == active));
 
         let mut tab_bar = TabBar::new(("database-tabs", id.0))
             .with_variant(TabVariant::Underline)
@@ -385,20 +406,24 @@ impl DatabasePanel {
                     .w(px(220.))
                     .gap_1()
                     .child(
-                        div().id(("open-database-picker", id.0)).max_h(px(200.)).overflow_y_scroll().child(
-                            v_flex().gap_1().children(discoverable.into_iter().enumerate().map(
-                                |(ix, name)| {
+                        div()
+                            .id(("open-database-picker", id.0))
+                            .max_h(px(200.))
+                            .overflow_y_scroll()
+                            .child(v_flex().gap_1().children(
+                                discoverable.into_iter().enumerate().map(|(ix, name)| {
                                     Button::new(("open-discovered-database", ix))
                                         .ghost()
                                         .disabled(busy)
                                         .label(name.clone())
-                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                            this.select_database(id, name.clone(), cx);
-                                            this.close_database_pickers(cx);
-                                        }))
-                                },
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.select_database(id, name.clone(), cx);
+                                                this.close_database_pickers(cx);
+                                            },
+                                        ))
+                                }),
                             )),
-                        ),
                     )
                     .child(
                         Button::new(("cancel-open-database", id.0))

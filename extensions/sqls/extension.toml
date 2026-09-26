@@ -1,0 +1,14 @@
+id = "sqls"
+name = "SQLS"
+description = "SQL language support powered by sqls."
+version = "0.1.1"
+schema_version = 1
+authors = ["Mentenaz"]
+
+[language_servers.sqls]
+name = "sqls"
+languages = ["SQL"]
+
+[grammars.sql]
+repository = "https://github.com/derekstride/tree-sitter-sql"
+commit = "851e9cb257ba7c66cc8c14214a31c44d2f1e954e"

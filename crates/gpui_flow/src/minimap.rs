@@ -26,6 +26,8 @@ pub struct Minimap {
     /// and panning the viewport far off-screen (nodes appeared to
     /// "disappear" because they were still there, just no longer visible).
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    background: Hsla,
+    border: Hsla,
 }
 
 impl Minimap {
@@ -34,6 +36,8 @@ impl Minimap {
             state,
             container_bounds: None,
             bounds: Rc::new(Cell::new(Bounds::default())),
+            background: gpui::rgba(0x1a1a1acc).into(),
+            border: gpui::rgba(0xffffff33).into(),
         }
     }
 
@@ -41,6 +45,11 @@ impl Minimap {
     pub fn container_bounds(mut self, width: f32, height: f32) -> Self {
         self.container_bounds = Some((width, height));
         self
+    }
+
+    pub fn theme_colors(&mut self, background: Hsla, border: Hsla) {
+        self.background = background;
+        self.border = border;
     }
 }
 
@@ -53,15 +62,18 @@ impl Render for Minimap {
         let bounds_for_layout = self.bounds.clone();
         let bounds_for_down = self.bounds.clone();
         let bounds_for_move = self.bounds.clone();
+        let background = self.background;
+        let border = self.border;
 
         div()
             .id("flow-minimap")
+            .debug_selector(|| "flow-minimap".to_string())
             .w(px(MINIMAP_WIDTH))
             .h(px(MINIMAP_HEIGHT))
-            .bg(gpui::rgba(0x1a1a1acc))
+            .bg(background)
             .rounded_md()
             .border_1()
-            .border_color(gpui::rgba(0xffffff33))
+            .border_color(border)
             .overflow_hidden()
             .child(
                 canvas(
@@ -103,6 +115,13 @@ impl Render for Minimap {
 }
 
 /// Pan the viewport so the center of the visible area aligns with the clicked minimap point.
+///
+/// `mx`/`my` are **minimap-local** pixels (the caller subtracts this canvas's
+/// own window origin). The minimap's mapping is a pure affine
+/// `flow -> minimap` transform built from `compute_graph_bounds`, so undoing
+/// it is exact — the minimap deliberately has no `viewport.zoom` term of its
+/// own; the viewport indicator is drawn by mapping the *visible flow rect*
+/// through the same transform.
 fn pan_to_minimap_point(
     state: &Entity<FlowState>,
     mx: f32,
@@ -125,10 +144,7 @@ fn pan_to_minimap_point(
         let offset_x = (inner_w - graph_bounds.2 * scale) / 2.0 + MINIMAP_PADDING;
         let offset_y = (inner_h - graph_bounds.3 * scale) / 2.0 + MINIMAP_PADDING;
 
-        // Convert minimap click to flow coordinates
-        // mx is relative to minimap bounds origin, but we receive absolute screen pos
-        // We need to account for the minimap div position, but since canvas bounds
-        // aren't available here, we approximate by using relative coordinates
+        // Invert the flow -> minimap map to get the clicked flow point.
         let flow_x = (mx - offset_x) / scale + graph_bounds.0;
         let flow_y = (my - offset_y) / scale + graph_bounds.1;
 
@@ -139,6 +155,15 @@ fn pan_to_minimap_point(
 }
 
 /// Paint the minimap contents.
+///
+/// Everything here works in **flow-space units** and maps to minimap pixels
+/// through the single affine transform derived from `compute_graph_bounds`.
+/// `FlowState::node_footprint` returns flow units for both leaves and
+/// containers, so node rects, edge lines, the graph-bounds span, and the
+/// viewport indicator all share one space — previously leaf footprints were
+/// screen pixels while container footprints were flow units, which made
+/// `scale` meaningless as a ratio and left the viewport indicator visibly out
+/// of register with the nodes it was meant to frame.
 fn paint_minimap(
     bounds: &Bounds<Pixels>,
     state: &FlowState,
@@ -181,7 +206,10 @@ fn paint_minimap(
 
         let node_bounds = Bounds::new(
             Point::new(px(nx), px(ny)),
-            Size { width: px(nw), height: px(nh) },
+            Size {
+                width: px(nw),
+                height: px(nh),
+            },
         );
 
         let color = if node.selected {
@@ -235,19 +263,46 @@ fn paint_minimap(
 
     let vp_bounds = Bounds::new(
         Point::new(px(vx), px(vy)),
-        Size { width: px(vw), height: px(vh) },
+        Size {
+            width: px(vw),
+            height: px(vh),
+        },
     );
     window.paint_quad(fill(vp_bounds, gpui::rgba(0x3b82f620)));
 
     // Viewport border
     let border_color: Background = gpui::rgba(0x3b82f6aa).into();
-    let top = Bounds::new(Point::new(px(vx), px(vy)), Size { width: px(vw), height: px(1.0) });
+    let top = Bounds::new(
+        Point::new(px(vx), px(vy)),
+        Size {
+            width: px(vw),
+            height: px(1.0),
+        },
+    );
     window.paint_quad(fill(top, border_color.clone()));
-    let bottom = Bounds::new(Point::new(px(vx), px(vy + vh)), Size { width: px(vw), height: px(1.0) });
+    let bottom = Bounds::new(
+        Point::new(px(vx), px(vy + vh)),
+        Size {
+            width: px(vw),
+            height: px(1.0),
+        },
+    );
     window.paint_quad(fill(bottom, border_color.clone()));
-    let left = Bounds::new(Point::new(px(vx), px(vy)), Size { width: px(1.0), height: px(vh) });
+    let left = Bounds::new(
+        Point::new(px(vx), px(vy)),
+        Size {
+            width: px(1.0),
+            height: px(vh),
+        },
+    );
     window.paint_quad(fill(left, border_color.clone()));
-    let right = Bounds::new(Point::new(px(vx + vw), px(vy)), Size { width: px(1.0), height: px(vh) });
+    let right = Bounds::new(
+        Point::new(px(vx + vw), px(vy)),
+        Size {
+            width: px(1.0),
+            height: px(vh),
+        },
+    );
     window.paint_quad(fill(right, border_color));
 }
 

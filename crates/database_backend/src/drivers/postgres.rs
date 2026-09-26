@@ -10,7 +10,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::connection::NetworkConnectParams;
 use crate::errors::DatabaseError;
-use crate::metadata::{ColumnInfo, ForeignKey, TableInfo};
+use crate::metadata::{ColumnInfo, ForeignKey, IndexInfo, Schema, TableInfo, ViewInfo};
 use crate::query::QueryResult;
 
 /// Opens a PostgreSQL connection and proves it works with a trivial query.
@@ -162,9 +162,10 @@ fn load_root_certs() -> rustls::RootCertStore {
     store
 }
 
-/// Discovers every user table's columns and foreign keys in the connected
-/// database's `public` schema.
-pub async fn fetch_schema(client: &Client) -> Result<Vec<TableInfo>, DatabaseError> {
+/// Discovers every user table's columns/foreign keys/indexes, and every
+/// view's columns and defining SQL, in the connected database's `public`
+/// schema.
+pub async fn fetch_schema(client: &Client) -> Result<Schema, DatabaseError> {
     let table_rows = client
         .query(
             "SELECT table_name FROM information_schema.tables \
@@ -180,13 +181,33 @@ pub async fn fetch_schema(client: &Client) -> Result<Vec<TableInfo>, DatabaseErr
         let name: String = row.get(0);
         let columns = table_columns(client, &name).await?;
         let foreign_keys = table_foreign_keys(client, &name).await?;
+        let indexes = table_indexes(client, &name).await?;
         tables.push(TableInfo {
             name,
             columns,
             foreign_keys,
+            indexes,
         });
     }
-    Ok(tables)
+
+    let view_rows = client
+        .query(
+            "SELECT table_name, view_definition FROM information_schema.views \
+             WHERE table_schema = 'public' ORDER BY table_name",
+            &[],
+        )
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to list views: {e}")))?;
+
+    let mut views = Vec::with_capacity(view_rows.len());
+    for row in view_rows {
+        let name: String = row.get(0);
+        let definition: Option<String> = row.get(1);
+        let columns = table_columns(client, &name).await?;
+        views.push(ViewInfo { name, columns, definition: definition.unwrap_or_default() });
+    }
+
+    Ok(Schema { tables, views })
 }
 
 async fn table_columns(client: &Client, table: &str) -> Result<Vec<ColumnInfo>, DatabaseError> {
@@ -243,6 +264,40 @@ async fn table_foreign_keys(client: &Client, table: &str) -> Result<Vec<ForeignK
             from_column: row.get(0),
             to_table: row.get(1),
             to_column: row.get(2),
+        })
+        .collect())
+}
+
+/// Every index on `table` (including the implicit one backing a `PRIMARY
+/// KEY`/`UNIQUE` constraint — Postgres always represents those as real
+/// indexes, so this reports what's actually there rather than filtering
+/// them out). `unnest(...) WITH ORDINALITY` walks `pg_index.indkey` (the
+/// index's column numbers, in key order) so `array_agg` can aggregate
+/// column names back in that same order instead of alphabetically.
+async fn table_indexes(client: &Client, table: &str) -> Result<Vec<IndexInfo>, DatabaseError> {
+    let rows = client
+        .query(
+            "SELECT i.relname, ix.indisunique, array_agg(a.attname ORDER BY ord.n) \
+             FROM pg_class t \
+             JOIN pg_namespace ns ON ns.oid = t.relnamespace AND ns.nspname = 'public' \
+             JOIN pg_index ix ON t.oid = ix.indrelid \
+             JOIN pg_class i ON i.oid = ix.indexrelid \
+             JOIN unnest(ix.indkey) WITH ORDINALITY AS ord(attnum, n) ON true \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ord.attnum \
+             WHERE t.relname = $1 AND t.relkind = 'r' \
+             GROUP BY i.relname, ix.indisunique \
+             ORDER BY i.relname",
+            &[&table],
+        )
+        .await
+        .map_err(|e| DatabaseError::Connection(format!("failed to read indexes for {table}: {e}")))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| IndexInfo {
+            name: row.get(0),
+            unique: row.get(1),
+            columns: row.get(2),
         })
         .collect())
 }

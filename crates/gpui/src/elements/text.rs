@@ -632,12 +632,19 @@ impl TextLayout {
         _: &mut App,
     ) -> LayoutId {
         let text_style = window.text_style();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = window.pixel_snap(
+        // Resolve the font size in unscaled units first, then apply the
+        // accumulated `Style::scale` once. Doing it in this order keeps
+        // ratio-relative line heights correct (they derive from the font size)
+        // while still scaling absolute (`Pixels`) line heights.
+        let element_scale = window.element_scale();
+        let base_font_size = text_style.font_size.to_pixels(window.rem_size());
+        let font_size = Pixels(base_font_size.0 * element_scale);
+        let line_height = window.pixel_snap(Pixels(
             text_style
                 .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
+                .to_pixels(base_font_size.into(), window.rem_size())
+                .0 * element_scale,
+        ));
 
         let runs = if let Some(runs) = runs {
             runs

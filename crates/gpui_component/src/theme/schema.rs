@@ -1233,7 +1233,7 @@ mod tests {
     fn test_aurora_theme_parses_gradient_backgrounds() {
         let theme_set =
             serde_json::from_str::<ThemeSet>(include_str!(
-                "../../../../../../../themes/aurora.json"
+                "../../themes/aurora.json"
             ))
                 .unwrap();
         assert_eq!(theme_set.themes.len(), 1);

@@ -320,7 +320,7 @@ impl ConnectionRegistry {
     pub async fn fetch_schema(
         &self,
         id: ConnectionId,
-    ) -> Result<Vec<crate::metadata::TableInfo>, DatabaseError> {
+    ) -> Result<crate::metadata::Schema, DatabaseError> {
         let database = self
             .active_database(id)
             .ok_or(DatabaseError::NotFound(id))?;
@@ -332,7 +332,7 @@ impl ConnectionRegistry {
         &self,
         id: ConnectionId,
         database: &str,
-    ) -> Result<Vec<crate::metadata::TableInfo>, DatabaseError> {
+    ) -> Result<crate::metadata::Schema, DatabaseError> {
         match self.sessions.get(&(id, database.to_string())) {
             None => Err(DatabaseError::NotFound(id)),
             Some(DbConn::Sqlite(conn)) => {

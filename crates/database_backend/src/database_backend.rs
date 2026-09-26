@@ -23,6 +23,6 @@ pub use connection::{
 };
 pub use drivers::DbType;
 pub use errors::DatabaseError;
-pub use metadata::{ColumnInfo, ForeignKey, TableInfo};
+pub use metadata::{ColumnInfo, ForeignKey, IndexInfo, Schema, TableInfo, ViewInfo};
 pub use models::{ConnectionConfig, SavedDatabase};
 pub use query::QueryResult;
