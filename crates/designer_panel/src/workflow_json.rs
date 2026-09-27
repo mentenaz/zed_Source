@@ -26,12 +26,38 @@ use std::collections::HashMap;
 
 use gpui_flow::{FlowEdge, FlowNode, FlowState, HandleDef, HandlePosition};
 use serde_json::Value;
-use workflow_engine::{Action, ActionMap, Branch, Limit, RunOutcome, WorkflowDefinition, WorkflowLayout};
+use workflow_engine::{
+    Action, ActionMap, Branch, FieldKind, InputField, JsonLogicExpr, Limit, RunOutcome,
+    ScriptRuntime, ScriptSource, WorkflowDefinition, WorkflowLayout,
+};
+
+use indexmap::IndexMap;
 
 pub const BRANCH_THEN: &str = "__branch_then";
 pub const BRANCH_ELSE: &str = "__branch_else";
 pub const BRANCH_TRY: &str = "__branch_try";
 pub const BRANCH_CATCH: &str = "__branch_catch";
+
+/// The code a freshly created inline script starts with. One line on
+/// purpose: the inspector's property row is a single-line input, so a
+/// multi-line default would render as one long line of escaped `\n`s.
+/// Real editing happens in the companion file ("Open Script").
+pub const DEFAULT_SCRIPT_CODE: &str = "print(\"hello from the designer\")";
+
+/// Returns default node properties when adding a new action of `type_id`.
+pub fn default_properties_for_type(type_id: &str) -> Vec<(gpui::SharedString, gpui::SharedString)> {
+    match type_id {
+        "script" => {
+            let default_source = ScriptSource::Inline {
+                runtime: ScriptRuntime::Python,
+                code: DEFAULT_SCRIPT_CODE.to_string(),
+            };
+            let source_json = serde_json::to_string(&default_source).unwrap_or_default();
+            vec![("source".into(), source_json.into())]
+        }
+        _ => Vec::new(),
+    }
+}
 
 pub const LEAF_SIZE: (f32, f32) = (172.0, 46.0);
 const Y_STEP: f32 = 130.0;
@@ -129,12 +155,31 @@ fn walk_actions(
             "Foreach" | "Until" => {
                 if let Some(body) = &action.actions {
                     let mut y = CHILD_Y0;
-                    walk_actions(body, Some(id), CHILD_X, &mut y, nodes, edges, edge_color, failed_edge_color);
+                    walk_actions(
+                        body,
+                        Some(id),
+                        CHILD_X,
+                        &mut y,
+                        nodes,
+                        edges,
+                        edge_color,
+                        failed_edge_color,
+                    );
                 }
             }
             "If" => {
                 if let Some(body) = &action.actions {
-                    push_branch(id, BRANCH_THEN, "True", CHILD_X, body, nodes, edges, edge_color, failed_edge_color);
+                    push_branch(
+                        id,
+                        BRANCH_THEN,
+                        "True",
+                        CHILD_X,
+                        body,
+                        nodes,
+                        edges,
+                        edge_color,
+                        failed_edge_color,
+                    );
                 }
                 if let Some(Branch { actions: body }) = &action.else_branch {
                     push_branch(
@@ -152,7 +197,17 @@ fn walk_actions(
             }
             "Try" => {
                 if let Some(body) = &action.actions {
-                    push_branch(id, BRANCH_TRY, "Try", CHILD_X, body, nodes, edges, edge_color, failed_edge_color);
+                    push_branch(
+                        id,
+                        BRANCH_TRY,
+                        "Try",
+                        CHILD_X,
+                        body,
+                        nodes,
+                        edges,
+                        edge_color,
+                        failed_edge_color,
+                    );
                 }
                 if let Some(Branch { actions: body }) = &action.catch {
                     push_branch(
@@ -192,7 +247,16 @@ fn push_branch(
         .handles(vec![HandleDef::source(HandlePosition::Bottom)]);
     nodes.push(node);
     let mut y = CHILD_Y0;
-    walk_actions(body, Some(&branch_id), CHILD_X, &mut y, nodes, edges, edge_color, failed_edge_color);
+    walk_actions(
+        body,
+        Some(&branch_id),
+        CHILD_X,
+        &mut y,
+        nodes,
+        edges,
+        edge_color,
+        failed_edge_color,
+    );
 }
 
 /// Flatten `Action.inputs` plus the four struct-level fields that have no
@@ -225,24 +289,144 @@ fn flatten_action_meta(action: &Action) -> Vec<(gpui::SharedString, gpui::Shared
     props
 }
 
-fn value_to_string(v: &Value) -> String {
+/// Renders an input `Value` back into the property text the inspector shows.
+/// The inverse of [`string_to_value`], and `pub(crate)` because
+/// `script_companion` reuses it to keep a companion-hydrated `source` row
+/// spelled exactly like a freshly loaded one.
+pub(crate) fn value_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
 }
 
-fn string_to_value(s: &str) -> Value {
+/// `pub(crate)` because `http_companion` reuses it when a companion-hydrated
+/// `body` is written back into the flow's `inputs`, so it lands as the same
+/// `Value` a freshly loaded body would (`{"a": 1}` as JSON, not as the string
+/// `"{\"a\": 1}"`).
+pub(crate) fn string_to_value(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
 }
 
+/// Same as [`string_to_value`], but decides *how* to parse from the registry's
+/// declared [`FieldKind`] instead of always trying full JSON.
+///
+/// The property layer is stringly-typed ([`flatten_action_meta`] reduces every
+/// value to text), so without this a `FieldKind::String` field holding the
+/// literal text `true` would round-trip into the JSON boolean `true` — the
+/// file's *type* silently changes on every open/save cycle. That matters most
+/// for `notify.message` / `log.message`, which the registry documents as
+/// "String, but a JSONLogic expression is also evaluated": retyping the string
+/// `true` as a boolean makes the runtime resolve a value the author meant as
+/// literal text.
+///
+/// For `String` the rule is **scalar text is literal text, but a structured
+/// value is deliberate**: `true`, `42`, `null` and unparseable text all stay
+/// strings, while an object/array is kept structured. That second half matters
+/// because those same String fields accept a JSONLogic expression — the
+/// registry's own `help` text says so — and `resolve_string_field` only
+/// evaluates a non-string value. Collapsing `{"var": "x.y"}` to a string would
+/// silently stop resolving it.
+///
+/// `Json` and `Expression` are unguarded — those fields are JSON by
+/// definition (an HTTP body, a script `source` enum). A value that doesn't
+/// parse degrades to `Value::String` so a half-typed edit keeps the author's
+/// keystrokes.
+pub(crate) fn string_to_value_as(kind: FieldKind, s: &str) -> Value {
+    match kind {
+        FieldKind::String => match serde_json::from_str::<Value>(s) {
+            Ok(value) if value.is_object() || value.is_array() => value,
+            _ => Value::String(s.to_string()),
+        },
+        FieldKind::Number => serde_json::from_str(s)
+            .ok()
+            .filter(Value::is_number)
+            .unwrap_or_else(|| Value::String(s.to_string())),
+        FieldKind::Bool => serde_json::from_str(s)
+            .ok()
+            .filter(Value::is_boolean)
+            .unwrap_or_else(|| Value::String(s.to_string())),
+        FieldKind::Json | FieldKind::Expression => string_to_value(s),
+    }
+}
+
+/// The registry-declared field for `type_id`'s `name`, or `None` for an
+/// undeclared extra. Drives both the coercion in [`string_to_value_as`] and
+/// the known-vs-extra distinction in [`unflatten_action_meta`].
+pub(crate) fn declared_field(type_id: &str, name: &str) -> Option<InputField> {
+    let def = workflow_engine::registry::find(type_id)?;
+    def.inputs.iter().copied().find(|field| field.name == name)
+}
+
+/// The field an inspector row was flattened *from*, for container meta rows
+/// that don't correspond to a registry input name one-to-one.
+///
+/// The container-only fields (`foreach`, `until`, `expression`, `limit`) are
+/// typed in the registry under their real input names, while the canvas stores
+/// them under reserved `__`-prefixed keys so they can't collide with a real
+/// `inputs` key (see [`flatten_action_meta`]). This maps back so a `limit`
+/// row still finds its declared `FieldKind`.
+pub(crate) fn declared_field_for_meta(type_id: &str, key: &str) -> Option<InputField> {
+    const META_TO_INPUT: &[(&str, &str)] = &[
+        ("__expression", "expression"),
+        ("__foreach", "foreach"),
+        ("__until", "until"),
+        ("__limit_count", "limit"),
+    ];
+    match key {
+        "__limit_timeout" => {
+            // `limit` is a single `Json` object in the registry but two rows on
+            // the canvas, so only the count half is Number-typed here; the
+            // timeout is free text (see `Limit::timeout`).
+            let _ = type_id;
+            None
+        }
+        other => {
+            let input = META_TO_INPUT
+                .iter()
+                .find(|(meta, _)| *meta == other)
+                .map(|(_, input)| *input)?;
+            declared_field(type_id, input)
+        }
+    }
+}
+
 // ── Save: FlowState -> WorkflowDefinition ──────────────────────────────
+
+/// Flow-level content the canvas has no node for and therefore cannot
+/// regenerate on save.
+///
+/// [`load`] folds a `WorkflowDefinition` down to *nodes*, so anything that
+/// isn't an action — today just the flow-level `outputs` map — has nowhere to
+/// live in `FlowState`. Dropping it would silently delete a hand-authored
+/// `outputs` on the first save, so [`load`] stashes it here and [`save`]
+/// writes it back untouched. It is deliberately *not* editable in the panel:
+/// an `outputs` entry is a JSONLogic expression, which needs the expression
+/// editor in 4f before it can be edited honestly.
+#[derive(Debug, Clone, Default)]
+pub struct FlowPreserved {
+    /// `WorkflowDefinition::outputs`, verbatim.
+    pub outputs: IndexMap<String, JsonLogicExpr>,
+}
+
+/// Reads the flow-level fields [`save`] can't reconstruct back out of a
+/// `FlowState`. Call once per load, hand the result to [`save`].
+pub fn preserved_from(def: &WorkflowDefinition) -> FlowPreserved {
+    FlowPreserved {
+        outputs: def.outputs.clone(),
+    }
+}
 
 /// Builds both the executable `WorkflowDefinition` (no `pos` fields — see
 /// the module doc) and a `WorkflowLayout` capturing every node's current
 /// canvas position, path-keyed so the same id at different nesting scopes
 /// can't collide. No file I/O — the caller persists both.
-pub fn save(state: &FlowState, id: impl Into<String>, name: impl Into<String>) -> (WorkflowDefinition, WorkflowLayout) {
+pub fn save(
+    state: &FlowState,
+    id: impl Into<String>,
+    name: impl Into<String>,
+    preserved: &FlowPreserved,
+) -> (WorkflowDefinition, WorkflowLayout) {
     let mut positions = HashMap::new();
     let actions = build_actions_map(state, None, "", &mut positions);
     (
@@ -250,7 +434,7 @@ pub fn save(state: &FlowState, id: impl Into<String>, name: impl Into<String>) -
             id: id.into(),
             name: name.into(),
             actions,
-            outputs: Default::default(),
+            outputs: preserved.outputs.clone(),
         },
         WorkflowLayout { positions },
     )
@@ -276,8 +460,12 @@ fn build_actions_map(
         let id = node.id.to_string();
         let mut action = Action::new(type_id);
         action.label = Some(node.label.to_string());
-        positions.insert(format!("{path_prefix}{id}"), (node.position.x, node.position.y));
-        let (inputs, foreach, until, limit, expression) = unflatten_action_meta(&node.properties);
+        positions.insert(
+            format!("{path_prefix}{id}"),
+            (node.position.x, node.position.y),
+        );
+        let (inputs, foreach, until, limit, expression) =
+            unflatten_action_meta(type_id, &node.properties);
         action.inputs = inputs;
         action.foreach = foreach;
         action.until = until;
@@ -288,13 +476,23 @@ fn build_actions_map(
         match type_id {
             "Foreach" | "Until" => {
                 let child_prefix = format!("{path_prefix}{id}/");
-                action.actions = Some(build_actions_map(state, Some(&id), &child_prefix, positions));
+                action.actions = Some(build_actions_map(
+                    state,
+                    Some(&id),
+                    &child_prefix,
+                    positions,
+                ));
             }
             "If" => {
                 let then_id = format!("{id}{BRANCH_THEN}");
                 let else_id = format!("{id}{BRANCH_ELSE}");
                 let then_prefix = format!("{path_prefix}{id}/then/");
-                action.actions = Some(build_actions_map(state, Some(&then_id), &then_prefix, positions));
+                action.actions = Some(build_actions_map(
+                    state,
+                    Some(&then_id),
+                    &then_prefix,
+                    positions,
+                ));
                 if state.get_node(&else_id.clone().into()).is_some() {
                     let else_prefix = format!("{path_prefix}{id}/else/");
                     action.else_branch = Some(Branch {
@@ -306,11 +504,21 @@ fn build_actions_map(
                 let try_id = format!("{id}{BRANCH_TRY}");
                 let catch_id = format!("{id}{BRANCH_CATCH}");
                 let try_prefix = format!("{path_prefix}{id}/try/");
-                action.actions = Some(build_actions_map(state, Some(&try_id), &try_prefix, positions));
+                action.actions = Some(build_actions_map(
+                    state,
+                    Some(&try_id),
+                    &try_prefix,
+                    positions,
+                ));
                 if state.get_node(&catch_id.clone().into()).is_some() {
                     let catch_prefix = format!("{path_prefix}{id}/catch/");
                     action.catch = Some(Branch {
-                        actions: build_actions_map(state, Some(&catch_id), &catch_prefix, positions),
+                        actions: build_actions_map(
+                            state,
+                            Some(&catch_id),
+                            &catch_prefix,
+                            positions,
+                        ),
                     });
                 }
             }
@@ -322,8 +530,15 @@ fn build_actions_map(
     map
 }
 
-fn is_branch_wrapper(type_id: &str) -> bool {
-    matches!(type_id, BRANCH_THEN | BRANCH_ELSE | BRANCH_TRY | BRANCH_CATCH)
+/// True for the four reserved `node_type`s [`load`] synthesizes for `If`/`Try`
+/// bodies. Those have no `Action` of their own, so the panel treats them as
+/// canvas-only scaffolding: no properties to edit, and not deletable on their
+/// own (deleting one would destroy the real actions it groups).
+pub fn is_branch_wrapper(type_id: &str) -> bool {
+    matches!(
+        type_id,
+        BRANCH_THEN | BRANCH_ELSE | BRANCH_TRY | BRANCH_CATCH
+    )
 }
 
 /// Reconstruct `runAfter` for `node_id` from its *incoming* edges.
@@ -334,7 +549,10 @@ fn is_branch_wrapper(type_id: &str) -> bool {
 /// produces, but a hand-edited `flow.json` using some other outcome
 /// combination (e.g. `["Skipped"]` alone) won't round-trip through the
 /// canvas unchanged.
-fn build_run_after(state: &FlowState, node_id: &gpui_flow::NodeId) -> indexmap::IndexMap<String, Vec<RunOutcome>> {
+fn build_run_after(
+    state: &FlowState,
+    node_id: &gpui_flow::NodeId,
+) -> indexmap::IndexMap<String, Vec<RunOutcome>> {
     let mut run_after = indexmap::IndexMap::new();
     for edge in &state.edges {
         if edge.target != *node_id {
@@ -351,6 +569,7 @@ fn build_run_after(state: &FlowState, node_id: &gpui_flow::NodeId) -> indexmap::
 }
 
 fn unflatten_action_meta(
+    type_id: &str,
     properties: &[(gpui::SharedString, gpui::SharedString)],
 ) -> (
     serde_json::Map<String, Value>,
@@ -368,13 +587,13 @@ fn unflatten_action_meta(
 
     for (k, v) in properties {
         match k.as_ref() {
-            "__foreach" => foreach = Some(string_to_value(v)),
-            "__until" => until = Some(string_to_value(v)),
+            "__foreach" => foreach = Some(meta_to_value(type_id, k.as_ref(), v)),
+            "__until" => until = Some(meta_to_value(type_id, k.as_ref(), v)),
             "__limit_count" => limit_count = v.parse().ok(),
             "__limit_timeout" => limit_timeout = Some(v.to_string()),
-            "__expression" => expression = Some(string_to_value(v)),
+            "__expression" => expression = Some(meta_to_value(type_id, k.as_ref(), v)),
             key => {
-                inputs.insert(key.to_string(), string_to_value(v));
+                inputs.insert(key.to_string(), input_to_value(type_id, key, v));
             }
         }
     }
@@ -384,6 +603,33 @@ fn unflatten_action_meta(
         timeout: limit_timeout,
     });
     (inputs, foreach, until, limit, expression)
+}
+
+/// Coerces a real `inputs` row, using the registry's `FieldKind` when
+/// `key` is a declared field of `type_id`.
+///
+/// An **undeclared** key is an extra the panel has no schema for (e.g. a
+/// `strategy` key left on an old transform flow). Those get the
+/// best-effort [`string_to_value`] treatment — try JSON, fall back to text —
+/// which is lossy for a value like the string `true`, but unavoidable without
+/// a declared type and no worse than the pre-existing behavior. Declared
+/// fields get the exact round-trip [`string_to_value_as`] guarantees.
+fn input_to_value(type_id: &str, key: &str, text: &str) -> Value {
+    match declared_field(type_id, key) {
+        Some(field) => string_to_value_as(field.kind, text),
+        None => string_to_value(text),
+    }
+}
+
+/// Same as [`input_to_value`] for a reserved `__`-prefixed container row.
+/// `__limit_timeout` deliberately has no declared field (see
+/// [`declared_field_for_meta`]) so it falls back to plain text, matching the
+/// `Option<String>` it is deserialized into.
+fn meta_to_value(type_id: &str, key: &str, text: &str) -> Value {
+    match declared_field_for_meta(type_id, key) {
+        Some(field) => string_to_value_as(field.kind, text),
+        None => string_to_value(text),
+    }
 }
 
 // ── The `.flow.layout.json` sidecar bridge ─────────────────────────────
@@ -410,7 +656,11 @@ fn apply_layout_to_map(actions: &mut ActionMap, path_prefix: &str, layout: &Work
                     apply_layout_to_map(body, &format!("{path_prefix}{id}/then/"), layout);
                 }
                 if let Some(branch) = &mut action.else_branch {
-                    apply_layout_to_map(&mut branch.actions, &format!("{path_prefix}{id}/else/"), layout);
+                    apply_layout_to_map(
+                        &mut branch.actions,
+                        &format!("{path_prefix}{id}/else/"),
+                        layout,
+                    );
                 }
             }
             "Try" => {
@@ -418,7 +668,11 @@ fn apply_layout_to_map(actions: &mut ActionMap, path_prefix: &str, layout: &Work
                     apply_layout_to_map(body, &format!("{path_prefix}{id}/try/"), layout);
                 }
                 if let Some(branch) = &mut action.catch {
-                    apply_layout_to_map(&mut branch.actions, &format!("{path_prefix}{id}/catch/"), layout);
+                    apply_layout_to_map(
+                        &mut branch.actions,
+                        &format!("{path_prefix}{id}/catch/"),
+                        layout,
+                    );
                 }
             }
             _ => {}
@@ -442,14 +696,23 @@ pub fn auto_layout(def: &mut WorkflowDefinition) -> WorkflowLayout {
 
 const LEVEL_X_STEP: f32 = 220.0;
 
-fn auto_layout_map(actions: &mut ActionMap, path_prefix: &str, positions: &mut HashMap<String, (f32, f32)>) {
+fn auto_layout_map(
+    actions: &mut ActionMap,
+    path_prefix: &str,
+    positions: &mut HashMap<String, (f32, f32)>,
+) {
     match workflow_engine::compute_levels(actions) {
         Ok(levels) => {
             for (level_ix, ids) in levels.iter().enumerate() {
                 for (row_ix, id) in ids.iter().enumerate() {
-                    let Some(action) = actions.get_mut(id) else { continue };
+                    let Some(action) = actions.get_mut(id) else {
+                        continue;
+                    };
                     if action.pos.is_none() {
-                        let pos = (CHILD_X + level_ix as f32 * LEVEL_X_STEP, CHILD_Y0 + row_ix as f32 * Y_STEP);
+                        let pos = (
+                            CHILD_X + level_ix as f32 * LEVEL_X_STEP,
+                            CHILD_Y0 + row_ix as f32 * Y_STEP,
+                        );
                         action.pos = Some(pos);
                         positions.insert(format!("{path_prefix}{id}"), pos);
                     }
@@ -481,7 +744,11 @@ fn auto_layout_map(actions: &mut ActionMap, path_prefix: &str, positions: &mut H
                     auto_layout_map(body, &format!("{path_prefix}{id}/then/"), positions);
                 }
                 if let Some(branch) = &mut action.else_branch {
-                    auto_layout_map(&mut branch.actions, &format!("{path_prefix}{id}/else/"), positions);
+                    auto_layout_map(
+                        &mut branch.actions,
+                        &format!("{path_prefix}{id}/else/"),
+                        positions,
+                    );
                 }
             }
             "Try" => {
@@ -489,10 +756,284 @@ fn auto_layout_map(actions: &mut ActionMap, path_prefix: &str, positions: &mut H
                     auto_layout_map(body, &format!("{path_prefix}{id}/try/"), positions);
                 }
                 if let Some(branch) = &mut action.catch {
-                    auto_layout_map(&mut branch.actions, &format!("{path_prefix}{id}/catch/"), positions);
+                    auto_layout_map(
+                        &mut branch.actions,
+                        &format!("{path_prefix}{id}/catch/"),
+                        positions,
+                    );
                 }
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_def() -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: "f".into(),
+            name: "F".into(),
+            actions: ActionMap::default(),
+            outputs: IndexMap::default(),
+        }
+    }
+
+    fn round_trip(def: &WorkflowDefinition) -> WorkflowDefinition {
+        let state = load(def, 0x808080, 0xff0000);
+        let (saved, _layout) = save(&state, &def.id, &def.name, &preserved_from(def));
+        saved
+    }
+
+    /// The regression that motivated `FlowPreserved`: `save` used to hardcode
+    /// `outputs: Default::default()`, so opening a flow with a hand-authored
+    /// `outputs` map and pressing Save deleted it outright.
+    #[test]
+    fn flow_level_outputs_survive_a_save() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "a1": { "type": "log", "inputs": { "level": "info", "message": "hi" } }
+              },
+              "outputs": { "echo": { "var": "a1.message" } }
+            }"#,
+        )
+        .unwrap();
+
+        let saved = round_trip(&def);
+        assert_eq!(saved.outputs, def.outputs);
+        assert_eq!(
+            saved.outputs.get("echo"),
+            Some(&serde_json::json!({"var": "a1.message"})),
+            "the expression should survive unchanged, not be re-serialized"
+        );
+    }
+
+    #[test]
+    fn a_flow_without_outputs_saves_an_empty_map() {
+        assert!(round_trip(&empty_def()).outputs.is_empty());
+    }
+
+    /// `string_to_value` unconditionally tried to parse inspector text as
+    /// JSON, so a `FieldKind::String` field holding the literal text `true`
+    /// came back out of a save as the JSON boolean `true` — the file's type
+    /// changed on every open/save cycle.
+    #[test]
+    fn string_fields_do_not_retype_on_round_trip() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "a1": { "type": "log", "inputs": { "level": "info", "message": "true" } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let saved = round_trip(&def);
+        assert_eq!(
+            saved.actions["a1"].inputs["message"],
+            Value::String("true".into()),
+            "a String field's literal text must not be re-parsed as a boolean"
+        );
+    }
+
+    /// Same coercion, in the other direction: a numeric-looking string stays a
+    /// string, but a declared `Number` field really does get parsed.
+    #[test]
+    fn declared_kinds_coerce_per_the_registry() {
+        assert_eq!(
+            string_to_value_as(FieldKind::String, "42"),
+            Value::String("42".into())
+        );
+        assert_eq!(string_to_value_as(FieldKind::Number, "42"), Value::from(42));
+        assert_eq!(
+            string_to_value_as(FieldKind::Bool, "true"),
+            Value::Bool(true)
+        );
+        // A half-typed edit keeps the author's keystrokes instead of vanishing.
+        assert_eq!(
+            string_to_value_as(FieldKind::Number, "4."),
+            Value::String("4.".into())
+        );
+        assert_eq!(
+            string_to_value_as(FieldKind::Bool, "tru"),
+            Value::String("tru".into())
+        );
+        // JSON fields still accept structured values.
+        assert_eq!(
+            string_to_value_as(FieldKind::Json, r#"{"a": 1}"#),
+            serde_json::json!({"a": 1})
+        );
+    }
+
+    /// `notify.message` and `log.message` are `FieldKind::String` but accept a
+    /// JSONLogic expression, which the runtime resolves. A *structured* value
+    /// must therefore still survive even though the field is String-typed.
+    #[test]
+    fn string_fields_still_round_trip_structured_values() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "a1": { "type": "log", "inputs": { "level": "info", "message": {"var": "x.y"} } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let saved = round_trip(&def);
+        assert_eq!(
+            saved.actions["a1"].inputs["message"],
+            serde_json::json!({"var": "x.y"})
+        );
+    }
+
+    /// An input the registry doesn't declare (a leftover `strategy` key on an
+    /// old transform flow) has no type to coerce by, so it round-trips on a
+    /// best-effort JSON-or-text basis. Pinned so the fallback is a deliberate
+    /// choice rather than drift.
+    #[test]
+    fn undeclared_input_keys_round_trip() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "a1": { "type": "log", "inputs": { "level": "info", "message": "hi", "strategy": "fast" } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(declared_field("log", "strategy").is_none());
+        let saved = round_trip(&def);
+        assert_eq!(
+            saved.actions["a1"].inputs["strategy"],
+            Value::String("fast".into())
+        );
+    }
+
+    /// `limit` is one `Json` object in the registry but two canvas rows, so
+    /// only the count row is Number-typed; the timeout stays free text.
+    #[test]
+    fn container_meta_rows_map_back_to_their_registry_field() {
+        assert_eq!(
+            declared_field_for_meta("Foreach", "__foreach").map(|f| f.kind),
+            Some(FieldKind::Expression)
+        );
+        assert_eq!(
+            declared_field_for_meta("Until", "__until").map(|f| f.kind),
+            Some(FieldKind::Expression)
+        );
+        assert!(declared_field_for_meta("Foreach", "__limit_timeout").is_none());
+    }
+
+    /// Positions must be captured path-keyed, and the synthesized `If` branch
+    /// wrappers must be unwrapped back into `actions`/`else_branch` rather
+    /// than emitted as real actions.
+    #[test]
+    fn if_branches_round_trip_through_synthetic_wrappers() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "cond": {
+                  "type": "If",
+                  "expression": {"var": "x"},
+                  "actions": { "t1": { "type": "log", "inputs": { "level": "info", "message": "yes" } } },
+                  "else": { "actions": { "e1": { "type": "log", "inputs": { "level": "warn", "message": "no" } } } }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let state = load(&def, 0x808080, 0xff0000);
+        // The wrappers are canvas-only scaffolding.
+        assert!(
+            state
+                .get_node(&format!("cond{BRANCH_THEN}").into())
+                .is_some()
+        );
+
+        let (saved, _layout) = save(&state, "f", "F", &FlowPreserved::default());
+        let cond = &saved.actions["cond"];
+        assert_eq!(cond.type_id, "If");
+        assert!(cond.actions.as_ref().unwrap().contains_key("t1"));
+        assert_eq!(
+            cond.else_branch.as_ref().unwrap().actions["e1"].type_id,
+            "log"
+        );
+        assert_eq!(
+            cond.actions.as_ref().unwrap()["t1"].inputs["message"],
+            Value::String("yes".into())
+        );
+        // No wrapper leaked into the saved actions map at any nesting level.
+        assert!(!saved.actions.contains_key(BRANCH_THEN));
+        assert_eq!(saved.actions.len(), 1);
+    }
+
+    #[test]
+    fn run_after_is_rebuilt_from_incoming_edges() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "a1": { "type": "log", "inputs": { "level": "info", "message": "1" } },
+                "a2": {
+                  "type": "log",
+                  "inputs": { "level": "info", "message": "2" },
+                  "runAfter": { "a1": ["Failed"] }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let saved = round_trip(&def);
+        assert_eq!(
+            saved.actions["a2"].run_after.get("a1").map(Vec::as_slice),
+            Some(&[RunOutcome::Failed][..])
+        );
+    }
+
+    #[test]
+    fn nested_container_bodies_round_trip_with_scoped_positions() {
+        let def: WorkflowDefinition = serde_json::from_str(
+            r#"{
+              "id": "f", "name": "F",
+              "actions": {
+                "loop": {
+                  "type": "Foreach",
+                  "foreach": "items",
+                  "actions": {
+                    "inner": { "type": "log", "inputs": { "level": "info", "message": "x" } }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let state = load(&def, 0x808080, 0xff0000);
+        let inner = state.get_node(&"inner".into()).expect("child node");
+        assert_eq!(inner.parent_id.as_deref(), Some("loop"));
+
+        let (_saved, layout) = save(&state, "f", "F", &FlowPreserved::default());
+        // Same id at two nesting levels must not collide in the layout map.
+        assert!(layout.positions.contains_key("loop"));
+        assert!(layout.positions.contains_key("loop/inner"));
+    }
+
+    #[test]
+    fn node_positions_are_captured_absolute() {
+        let mut state = load(&empty_def(), 0x808080, 0xff0000);
+        state.set_nodes(vec![FlowNode::new("a1", 12.0, 34.0).node_type("log")]);
+
+        let (_saved, layout) = save(&state, "f", "F", &FlowPreserved::default());
+        assert_eq!(layout.positions.get("a1"), Some(&(12.0, 34.0)));
     }
 }

@@ -201,6 +201,7 @@ pub enum IconName {
     MicMute,
     Minimize,
     Node,
+    Network,
     Dotnet,
     Notepad,
     OnCall,

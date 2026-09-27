@@ -22,7 +22,17 @@ pub enum RemoteConnectionIdentity {
         name: String,
         remote_user: String,
     },
-    #[cfg(any(test, feature = "test-support"))]
+    /// A synthetic identity used by tests and the mock transport.
+    ///
+    /// This variant is deliberately **not** feature-gated, even though
+    /// `RemoteConnectionOptions::Mock` is. A cfg-gated variant on a public enum
+    /// breaks exhaustive `match`es in dependent crates: cargo feature unification
+    /// can enable `remote/test-support` for one consumer while a dependent
+    /// crate's identically named `test-support` feature stays off, and a
+    /// dependent cannot observe another crate's features to line its own `cfg`
+    /// up. Gating the *constructor* instead of the variant keeps production
+    /// builds unable to create a `Mock` identity while leaving the enum's shape
+    /// — and therefore every downstream `match` — stable in all builds.
     Mock { id: u64 },
 }
 
@@ -51,7 +61,6 @@ impl RemoteConnectionIdentity {
                 name,
                 remote_user,
             } => format!("docker:{remote_user}@{name}:{container_id}"),
-            #[cfg(any(test, feature = "test-support"))]
             Self::Mock { id } => format!("mock:{id}"),
         }
     }

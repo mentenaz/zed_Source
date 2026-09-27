@@ -24,6 +24,7 @@ pub mod scheduler;
 pub mod schema;
 pub mod status;
 pub mod task_chain;
+pub mod validation;
 
 pub use container::execute_action;
 pub use engine::RunContext;
@@ -32,7 +33,7 @@ pub use history::{ActionHistoryRecord, RunHistoryEntry};
 pub use layout::WorkflowLayout;
 pub use process_tracker::{ProcessInfo, ProcessStatus};
 pub use project_scan::{DetectedService, ServiceKind, scan as scan_project};
-pub use registry::{ActionCategory, ActionDef, FieldKind, InputField, OutputField};
+pub use registry::{ActionCategory, ActionDef, CatalogGroup, FieldKind, InputField, OutputField};
 pub use runner::run_workflow;
 pub use scheduler::{LevelResult, compute_levels, validate};
 pub use schema::{
@@ -41,3 +42,4 @@ pub use schema::{
 };
 pub use status::{RunStatus, StatusSink};
 pub use task_chain::ServiceSpec;
+pub use validation::{ValidationIssue, ValidationSeverity, validate_definition};

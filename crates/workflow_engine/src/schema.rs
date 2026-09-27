@@ -17,9 +17,74 @@
 //! `allOf`/`if`/`then`), not a discriminated union, and this type matches
 //! that shape exactly.
 
+use std::path::Path;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Directory, next to `<flow>.flow.json`, holding a flow's per-action request
+/// body companions — the same relationship `.flow.layout.json` already has to
+/// its flow file.
+///
+/// Lives here rather than in the Designer because two independent crates have
+/// to agree on it: the Designer *writes* companions to these paths, and the
+/// JSON language server's schema associations have to *recognize* them to
+/// validate them. Duplicating the literal in both would let the writer and
+/// the validator drift apart silently, which is worse than a slightly odd
+/// home for the constant.
+pub const HTTP_BODY_DIR_SUFFIX: &str = ".flow-http";
+
+/// Suffix of a per-action request-body companion: `<action_id>.body.json`.
+///
+/// The trailing `.json` is what gets the file the JSON language server (and
+/// `json.schemas` file associations) at all; `*.flow-http/**` alone would
+/// match nothing that Zed has a language for.
+pub const HTTP_BODY_FILE_SUFFIX: &str = ".body.json";
+
+/// Suffix of the optional user-authored schema for a body companion:
+/// `<action_id>.body.schema.json`, sitting next to the body it validates.
+///
+/// Optional by design: the body is always validated by the registry-derived
+/// schema (see `registry::body_json_schema`) plus plain well-formedness. This
+/// sidecar is how a user states the shape the registry can't know — the
+/// actual API contract of the service being called.
+pub const HTTP_BODY_SCHEMA_SUFFIX: &str = ".body.schema.json";
+
+/// Whether `path` is a request-body companion file, judged purely on its
+/// name. Used by the JSON language server wiring to decide which schemas to
+/// apply to an opened file, and by the sidecar lookup to find the schema that
+/// belongs to a given body.
+///
+/// Requires both the directory *and* the file suffix so a `.body.json` file
+/// that isn't part of a `.flow-http` tree isn't mistaken for one.
+pub fn is_http_body_companion(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let dir_matches = path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .contains(HTTP_BODY_DIR_SUFFIX)
+    });
+    dir_matches && name.ends_with(HTTP_BODY_FILE_SUFFIX)
+}
+
+/// The sidecar schema path belonging to a body companion at `body_path`:
+/// `foo.body.json` -> `foo.body.schema.json`, in the same directory.
+///
+/// Returns `None` if `body_path` isn't a body companion or has no parent, so
+/// callers can't accidentally synthesize a path for an unrelated file.
+pub fn http_body_sidecar_path(body_path: &Path) -> Option<std::path::PathBuf> {
+    if !is_http_body_companion(body_path) {
+        return None;
+    }
+    let name = body_path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(HTTP_BODY_FILE_SUFFIX)?;
+    let sidecar = format!("{stem}{HTTP_BODY_SCHEMA_SUFFIX}");
+    Some(body_path.with_file_name(sidecar))
+}
 
 /// A flow's `actions` map, and every nested `actions`/`else.actions`/
 /// `catch.actions` body — same shape, fully recursive. `IndexMap` (not
@@ -195,11 +260,107 @@ pub enum ScriptRuntime {
     Node,
     Dotnet,
     Powershell,
+    Bash,
+}
+
+impl ScriptRuntime {
+    /// The file extension this runtime's scripts use: the suffix of the temp
+    /// file inline code is spilled to, and of the companion file the designer
+    /// writes beside the flow.
+    ///
+    /// This is the single source of truth for the runtime <-> extension
+    /// mapping. The executors spill and spawn from it and
+    /// `designer_panel::script_companion` names companion files from it, so a
+    /// new runtime can't be added to one and forgotten in the other — the same
+    /// "one definition per concept" rule the module doc states for action
+    /// types.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ScriptRuntime::Python => "py",
+            ScriptRuntime::Node => "js",
+            ScriptRuntime::Powershell => "ps1",
+            ScriptRuntime::Dotnet => "csproj",
+            ScriptRuntime::Bash => "sh",
+        }
+    }
+
+    /// The runtime a script at `path` should run under, inferred from its
+    /// extension. `None` when the extension isn't recognized, in which case
+    /// file mode requires an explicit `runtime` override.
+    ///
+    /// Note `.ts` maps to `Node`, not a TypeScript runtime: the executor
+    /// spawns `node`, which runs the annotated source directly on current
+    /// Node versions.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "py" => Some(ScriptRuntime::Python),
+            "js" | "ts" => Some(ScriptRuntime::Node),
+            "ps1" => Some(ScriptRuntime::Powershell),
+            "csproj" => Some(ScriptRuntime::Dotnet),
+            "sh" | "bash" => Some(ScriptRuntime::Bash),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_a_top_level_body_companion() {
+        assert!(is_http_body_companion(Path::new(
+            "/repo/checkout.flow-http/fetch_users.body.json"
+        )));
+    }
+
+    #[test]
+    fn recognizes_a_nested_body_companion() {
+        // Nested inside an `If`/`Foreach`/`Try` body, so the scope directory
+        // sits between the `.flow-http` dir and the file.
+        assert!(is_http_body_companion(Path::new(
+            "/repo/checkout.flow-http/loop/then/fetch_users.body.json"
+        )));
+    }
+
+    #[test]
+    fn rejects_files_that_are_not_body_companions() {
+        // Right suffix, wrong directory: a `.body.json` the Designer didn't
+        // write must not be captured by the schema association.
+        assert!(!is_http_body_companion(Path::new(
+            "/repo/other/fetch_users.body.json"
+        )));
+        // Right directory, wrong file: the `.flow-http` dir may later hold
+        // the sidecar schema itself, which is a schema, not an instance.
+        assert!(!is_http_body_companion(Path::new(
+            "/repo/checkout.flow-http/fetch_users.body.schema.json"
+        )));
+        assert!(!is_http_body_companion(Path::new(
+            "/repo/checkout.flow.json"
+        )));
+    }
+
+    #[test]
+    fn sidecar_path_sits_next_to_its_body() {
+        let sidecar = http_body_sidecar_path(Path::new(
+            "/repo/checkout.flow-http/loop/fetch_users.body.json",
+        ))
+        .expect("a body companion has a sidecar path");
+        assert_eq!(
+            sidecar,
+            Path::new("/repo/checkout.flow-http/loop/fetch_users.body.schema.json")
+        );
+    }
+
+    #[test]
+    fn sidecar_path_is_none_for_non_bodies() {
+        // Guards against synthesizing a path for an unrelated file, which
+        // would then advertise a schema association for it.
+        assert_eq!(
+            http_body_sidecar_path(Path::new("/repo/other/thing.body.json")),
+            None
+        );
+    }
 
     /// The actual worked example from `DOCS/workflow-schema/example-flow.json`
     /// must deserialize cleanly through these types — if the JSON Schema and

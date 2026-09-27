@@ -75,6 +75,12 @@ pub struct FlowGraph {
     /// color (default: 0x3b82f6, this crate's original hardcoded blue —
     /// unset consumers keep today's look).
     accent_color: u32,
+    /// Ring color for nodes flagged `FlowNode::validation_error` (default:
+    /// 0xef4444). Kept separate from `node_border_color`/`accent_color`
+    /// because "this node is broken" has to stay legible on top of both the
+    /// selection ring and live run status, and because hosts drive it from
+    /// their theme's danger color.
+    node_error_color: u32,
     /// Whether we've done the initial measurement pass.
     measured: bool,
     /// Fired on right-click for any node with `FlowNode.context_menu` set.
@@ -108,6 +114,15 @@ pub struct FlowGraph {
     /// a constant offset cancels out on its own — only *absolute* position
     /// comparisons like edge hit-testing are affected.
     canvas_origin: Rc<Cell<Point<Pixels>>>,
+    /// This element's own on-screen box (window space), captured each paint
+    /// from the background `canvas()`'s bounds. Unlike `canvas_origin` (the
+    /// pan-offset *world* container's origin), this is the untransformed
+    /// viewport rect, which is what a host needs to turn a window-absolute
+    /// point into flow space — see [`FlowGraph::flow_point_at`] — and to
+    /// locate the canvas' own center (the default drop position for
+    /// "add an action here"). Left at its default until the first prepaint,
+    /// so hosts should treat a zero-sized box as "not laid out yet".
+    panel_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl FlowGraph {
@@ -128,12 +143,44 @@ impl FlowGraph {
             node_bg_color: 0xffffff,
             node_border_color: 0xe2e2e2,
             accent_color: 0x3b82f6,
+            node_error_color: 0xef4444,
             measured: false,
+
             on_node_context_menu: None,
             on_edge_context_menu: None,
             on_canvas_context_menu: None,
             canvas_origin: Rc::new(Cell::new(Point::default())),
+            panel_bounds: Rc::new(Cell::new(Bounds::default())),
         }
+    }
+
+    /// This element's own on-screen box in window space, as of the last
+    /// prepaint. Zero-sized until the first frame is laid out.
+    ///
+    /// Hosts need it to place things in the canvas without guessing: a
+    /// "drop here" affordance that inserts at the cursor needs
+    /// [`Self::flow_point_at`], and a "put it in the middle" fallback needs
+    /// the box's center.
+    pub fn panel_bounds(&self) -> Bounds<Pixels> {
+        self.panel_bounds.get()
+    }
+
+    /// Convert a **window-absolute** point into flow space, the inverse of
+    /// the layout transform the world container applies.
+    ///
+    /// This is deliberately not the private [`window_to_flow`] helper: that
+    /// one takes the *world* origin, which already folds in the viewport pan,
+    /// while a host only knows window-absolute coordinates (what mouse and
+    /// drop events deliver). Subtracting this element's own origin first
+    /// turns those into canvas-local screen coordinates, which is exactly
+    /// what [`Viewport::screen_to_flow`] expects.
+    ///
+    /// `viewport` is the host's `FlowState::viewport` — it's passed in rather
+    /// than read here so callers can hold the same snapshot they used for
+    /// the rest of their hit-testing.
+    pub fn flow_point_at(&self, pos: Point<Pixels>, viewport: crate::types::Viewport) -> FlowPoint {
+        let origin = self.panel_bounds.get().origin;
+        viewport.screen_to_flow((pos.x - origin.x).as_f32(), (pos.y - origin.y).as_f32())
     }
 
     /// Register a right-click handler for nodes with `context_menu` set.
@@ -272,6 +319,13 @@ impl FlowGraph {
         self.accent_color = accent_color;
     }
 
+    /// Live-resync the `FlowNode::validation_error` ring color — the builder
+    /// setter takes `mut self` and so can't be re-applied to a living
+    /// `Entity<FlowGraph>` the way [`Self::set_theme_colors`] can.
+    pub fn set_node_error_color(&mut self, color: u32) {
+        self.node_error_color = color;
+    }
+
     /// Set the background pattern (Dots, Lines, Cross).
     pub fn bg_pattern(mut self, pattern: BackgroundPattern) -> Self {
         self.bg_pattern = pattern;
@@ -371,8 +425,21 @@ impl FlowGraph {
         let dragging = node.dragging;
         let show_chrome = self.show_node_chrome;
         let node_bg = self.node_bg_color;
-        let node_border = node.accent_border.unwrap_or(self.node_border_color);
-        let has_accent_border = node.accent_border.is_some();
+        // Border precedence, most important first: a validation error outranks
+        // both the selection ring and live run status, because it is the only
+        // one that *blocks* the user (Run stays disabled while it stands).
+        // Reading it here — once — keeps the two style passes below from
+        // fighting over the same property in opposite orders.
+        let has_validation_error = node.validation_error;
+        let error_color = self.node_error_color;
+        let node_border = if has_validation_error {
+            error_color
+        } else {
+            node.accent_border.unwrap_or(self.node_border_color)
+        };
+        // A flagged node is always drawn `border_2`, whether or not it also has
+        // an accent/run border underneath.
+        let has_accent_border = node.accent_border.is_some() || has_validation_error;
         let element_id: ElementId = ElementId::Name(node.id.clone());
 
         // Dedicated header strip for containers: an absolutely-positioned
@@ -517,7 +584,7 @@ impl FlowGraph {
             } else {
                 CursorStyle::OpenHand
             })
-            .when(selected, |el: Stateful<Div>| {
+            .when(selected && !has_validation_error, |el: Stateful<Div>| {
                 el.border_2().border_color(gpui::rgb(self.accent_color))
             })
             .on_mouse_down(MouseButton::Left, {
@@ -618,7 +685,7 @@ impl FlowGraph {
                                 node_id.clone()
                             }
                         });
-                        callback(target.clone(), event.position, window, cx);
+                        callback(target, event.position, window, cx);
                     })
                 },
             )
@@ -711,27 +778,30 @@ impl FlowGraph {
                     })
                     // Handle mouse up → complete connection if valid
                     .on_mouse_up(MouseButton::Left, {
-                        let state = state.clone();
-                        let node_id = node_id.clone();
-                        let handle_id = handle_id.clone();
                         move |_event, _window, cx| {
                             state.update(cx, |state, _| {
                                 if let Some(draft) = state.connecting.take() {
                                     // Build the connection
+                                    let ConnectionDraft {
+                                        from_node,
+                                        from_handle,
+                                        from_type,
+                                        ..
+                                    } = draft;
                                     let (source, target, source_handle, target_handle) =
-                                        if draft.from_type == HandleType::Source {
+                                        if from_type == HandleType::Source {
                                             (
-                                                draft.from_node.clone(),
+                                                from_node,
                                                 node_id.clone(),
-                                                draft.from_handle.clone(),
+                                                from_handle,
                                                 handle_id.clone(),
                                             )
                                         } else {
                                             (
                                                 node_id.clone(),
-                                                draft.from_node.clone(),
+                                                from_node,
                                                 handle_id.clone(),
-                                                draft.from_handle.clone(),
+                                                from_handle,
                                             )
                                         };
 
@@ -1275,8 +1345,19 @@ impl Render for FlowGraph {
                     .debug_selector(|| "flow-background".to_string())
                     .child({
                         let viewport_for_background = viewport_for_world;
+                        let panel_bounds_for_layout = self.panel_bounds.clone();
                         canvas(
-                            |_bounds, _window, _cx| {},
+                            move |bounds, _window, _cx| {
+                                // The background fills this element exactly
+                                // (`.absolute().size_full()`), so its box is
+                                // the graph panel's own on-screen rect — the
+                                // untransformed viewport, with no pan or zoom
+                                // folded in. Captured here (rather than
+                                // reusing the world's `canvas_origin`, which
+                                // is the panned world container) because
+                                // `Self::flow_point_at` needs exactly this.
+                                panel_bounds_for_layout.set(bounds);
+                            },
                             move |bounds, _: (), window, _cx| {
                                 Self::paint_grid(
                                     &bounds,
@@ -1593,20 +1674,25 @@ impl Render for FlowGraph {
                         }
                         if let Some(draft) = state.connecting.take() {
                             if let Some(snap) = draft.snap_target {
+                                let SnapTarget {
+                                    node_id: snap_node_id,
+                                    handle_id: snap_handle_id,
+                                    ..
+                                } = snap;
                                 // Complete the connection
                                 let (source, target, source_handle, target_handle) =
                                     if draft.from_type == HandleType::Source {
                                         (
                                             draft.from_node.clone(),
-                                            snap.node_id.clone(),
+                                            snap_node_id,
                                             draft.from_handle.clone(),
-                                            snap.handle_id.clone(),
+                                            snap_handle_id,
                                         )
                                     } else {
                                         (
-                                            snap.node_id.clone(),
+                                            snap_node_id,
                                             draft.from_node.clone(),
-                                            snap.handle_id.clone(),
+                                            snap_handle_id,
                                             draft.from_handle.clone(),
                                         )
                                     };

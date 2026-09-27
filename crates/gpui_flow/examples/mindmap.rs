@@ -224,7 +224,7 @@ fn add_child_to_selected(state: &Entity<FlowState>, color: u32, cx: &mut App) {
                 HandleDef::source(HandlePosition::Right),
             ]);
         let edge_id: SharedString = format!("e{}-{}", parent.id, child_id).into();
-        let edge = FlowEdge::new(edge_id, parent.id.clone(), child_id)
+        let edge = FlowEdge::new(edge_id, parent.id, child_id)
             .color(color)
             .stroke_width(3.0);
         state.nodes.push(child);

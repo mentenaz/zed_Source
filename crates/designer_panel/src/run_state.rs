@@ -104,14 +104,17 @@ impl RunState {
         type_id: String,
     ) {
         let now = Instant::now();
-        let entry = self.nodes.entry(action_id.to_string()).or_insert_with(|| ActionRun {
-            name: name.clone(),
-            type_id: type_id.clone(),
-            phase,
-            detail: None,
-            started_at: None,
-            finished_at: None,
-        });
+        let entry = self
+            .nodes
+            .entry(action_id.to_string())
+            .or_insert_with(|| ActionRun {
+                name: name.clone(),
+                type_id: type_id.clone(),
+                phase,
+                detail: None,
+                started_at: None,
+                finished_at: None,
+            });
         entry.name = name.clone();
         entry.type_id = type_id.clone();
         entry.phase = phase;

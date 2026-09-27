@@ -99,7 +99,7 @@ impl Render for Minimap {
                 }
             })
             .on_mouse_move({
-                let state = state_for_mouse.clone();
+                let state = state_for_mouse;
                 let entity_id = entity_id;
                 move |event, _window, cx| {
                     if event.pressed_button == Some(MouseButton::Left) {

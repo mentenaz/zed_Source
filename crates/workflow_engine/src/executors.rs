@@ -217,7 +217,7 @@ fn resolve_script_invocation(
             }
             let mut file = tempfile::Builder::new()
                 .prefix("forge-workflow-")
-                .suffix(&format!(".{}", extension_for(*runtime)))
+                .suffix(&format!(".{}", runtime.extension()))
                 .tempfile()
                 .map_err(|e| format!("script: failed to create a temp file: {e}"))?;
             std::io::Write::write_all(&mut file, code.as_bytes())
@@ -233,56 +233,71 @@ fn resolve_script_invocation(
             let resolved = solution_root.join(path);
             let runtime = match runtime {
                 Some(r) => *r,
-                None => infer_runtime_from_extension(&resolved).ok_or_else(|| {
+                None => ScriptRuntime::from_path(&resolved).ok_or_else(|| {
                     format!("script: couldn't infer a runtime from \"{path}\" — give an explicit \"runtime\" override")
                 })?,
             };
             (runtime, resolved, None)
         }
     };
-    let (program, args) = build_command_args(runtime, &path);
+    let (program, args) = build_command_args(runtime, &path)?;
     Ok((program, args, temp_guard))
 }
 
-fn extension_for(runtime: ScriptRuntime) -> &'static str {
-    match runtime {
-        ScriptRuntime::Python => "py",
-        ScriptRuntime::Node => "js",
-        ScriptRuntime::Powershell => "ps1",
-        // Unreachable — inline mode rejects `Dotnet` before this is called.
-        ScriptRuntime::Dotnet => "csproj",
+/// Error text for a missing `bash`, split per-platform so each names the
+/// install the user actually needs: on Windows bash is almost never on `PATH`
+/// (it ships inside Git for Windows), everywhere else it's a package.
+#[cfg(windows)]
+const BASH_NOT_FOUND: &str =
+    "script: bash not found — install Git for Windows (Git Bash) or add bash to PATH";
+#[cfg(not(windows))]
+const BASH_NOT_FOUND: &str = "script: bash not found — install bash or add it to PATH";
+
+/// Locate the `bash` to spawn.
+///
+/// Windows first asks Zed's own Git Bash locator, which searches
+/// `GIT_INSTALL_ROOT` and then the install root above `git` on `PATH` — the
+/// same resolution the terminal uses, so a workflow script and a terminal tab
+/// agree on what "bash" means. That misses the other common Windows installs
+/// (scoop, a manual MSYS2, WSL-forwarded shims), so a plain `PATH` lookup is
+/// the fallback before giving up.
+fn resolve_bash() -> Result<String, String> {
+    #[cfg(windows)]
+    if let Some(bash) = util::shell::get_windows_bash() {
+        return Ok(bash);
     }
+
+    which::which("bash")
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|_| BASH_NOT_FOUND.to_string())
 }
 
-fn infer_runtime_from_extension(path: &Path) -> Option<ScriptRuntime> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "py" => Some(ScriptRuntime::Python),
-        "js" | "ts" => Some(ScriptRuntime::Node),
-        "ps1" => Some(ScriptRuntime::Powershell),
-        "csproj" => Some(ScriptRuntime::Dotnet),
-        _ => None,
-    }
-}
-
-fn build_command_args(runtime: ScriptRuntime, path: &Path) -> (String, Vec<String>) {
+fn build_command_args(
+    runtime: ScriptRuntime,
+    path: &Path,
+) -> Result<(String, Vec<String>), String> {
     let path = path.to_string_lossy().to_string();
-    match runtime {
-        ScriptRuntime::Python => ("python".to_string(), vec![path]),
-        ScriptRuntime::Node => ("node".to_string(), vec![path]),
-        ScriptRuntime::Powershell => (
-            "pwsh".to_string(),
-            vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-File".to_string(),
-                path,
-            ],
-        ),
-        ScriptRuntime::Dotnet => (
-            "dotnet".to_string(),
-            vec!["run".to_string(), "--project".to_string(), path],
-        ),
-    }
+    let program = match runtime {
+        ScriptRuntime::Python => "python".to_string(),
+        ScriptRuntime::Node => "node".to_string(),
+        ScriptRuntime::Powershell => "pwsh".to_string(),
+        ScriptRuntime::Dotnet => "dotnet".to_string(),
+        // Resolved rather than spawned as a bare `bash`, so a missing
+        // interpreter is reported as "not found" with install guidance
+        // instead of the raw OS spawn error.
+        ScriptRuntime::Bash => resolve_bash()?,
+    };
+    let args = match runtime {
+        ScriptRuntime::Python | ScriptRuntime::Node | ScriptRuntime::Bash => vec![path],
+        ScriptRuntime::Powershell => vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-File".to_string(),
+            path,
+        ],
+        ScriptRuntime::Dotnet => vec!["run".to_string(), "--project".to_string(), path],
+    };
+    Ok((program, args))
 }
 
 /// Spawns `program args...`, writes `stdin_json` (if any) to its stdin then
@@ -1071,29 +1086,81 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /// Mirrors the availability probe the production path uses, so a skipped
+    /// test means "no bash on this machine", not "the resolver is broken".
+    fn bash_available() -> bool {
+        resolve_bash().is_ok()
+    }
+
+    #[test]
+    fn missing_bash_error_names_the_install() {
+        assert!(
+            BASH_NOT_FOUND.contains("bash not found"),
+            "the error must say bash is missing: {BASH_NOT_FOUND}"
+        );
+        if cfg!(windows) {
+            assert!(
+                BASH_NOT_FOUND.contains("Git Bash"),
+                "on Windows the error should point at Git Bash: {BASH_NOT_FOUND}"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_args_pass_the_script_path_to_the_resolved_interpreter() {
+        let (program, args) = match build_command_args(ScriptRuntime::Bash, Path::new("calc.sh")) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                eprintln!("skipping: {error}");
+                return;
+            }
+        };
+        assert_eq!(args, vec!["calc.sh".to_string()]);
+        assert!(
+            !program.is_empty(),
+            "the interpreter must be resolved to a real program"
+        );
+    }
+
     #[test]
     fn extension_inference_covers_known_and_unknown_extensions() {
         assert_eq!(
-            infer_runtime_from_extension(Path::new("x.py")),
+            ScriptRuntime::from_path(Path::new("x.py")),
             Some(ScriptRuntime::Python)
         );
         assert_eq!(
-            infer_runtime_from_extension(Path::new("x.js")),
+            ScriptRuntime::from_path(Path::new("x.js")),
             Some(ScriptRuntime::Node)
         );
         assert_eq!(
-            infer_runtime_from_extension(Path::new("x.ts")),
+            ScriptRuntime::from_path(Path::new("x.ts")),
             Some(ScriptRuntime::Node)
         );
         assert_eq!(
-            infer_runtime_from_extension(Path::new("x.ps1")),
+            ScriptRuntime::from_path(Path::new("x.ps1")),
             Some(ScriptRuntime::Powershell)
         );
         assert_eq!(
-            infer_runtime_from_extension(Path::new("x.csproj")),
+            ScriptRuntime::from_path(Path::new("x.csproj")),
             Some(ScriptRuntime::Dotnet)
         );
-        assert_eq!(infer_runtime_from_extension(Path::new("x.exe")), None);
+        // Both spellings of a shell script infer `bash`; companions are
+        // written as `.sh` (see `designer_panel::script_companion`), while a
+        // hand-written `.bash` file has to infer the same runtime.
+        assert_eq!(
+            ScriptRuntime::from_path(Path::new("x.sh")),
+            Some(ScriptRuntime::Bash)
+        );
+        assert_eq!(
+            ScriptRuntime::from_path(Path::new("x.bash")),
+            Some(ScriptRuntime::Bash)
+        );
+        assert_eq!(ScriptRuntime::from_path(Path::new("x.exe")), None);
+    }
+
+    #[test]
+    fn bash_spills_inline_code_to_a_sh_temp_file() {
+        assert_eq!(ScriptRuntime::Bash.extension(), "sh");
     }
 
     #[tokio::test]
@@ -1182,6 +1249,52 @@ mod tests {
         action.inputs.insert(
             "source".to_string(),
             serde_json::json!({"kind": "file", "path": "calc.py"}),
+        );
+
+        let outputs = execute_script(&action, dir.path()).await.unwrap();
+        assert_eq!(outputs.get("ok"), Some(&Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn script_inline_bash_round_trips_stdin_args_to_outputs() {
+        if !bash_available() {
+            eprintln!("skipping: bash not found");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Reads the piped `args` JSON the same way the Python test does, using
+        // only POSIX string operations so it runs under any `bash` (Git Bash
+        // included) without needing jq.
+        std::fs::write(
+            dir.path().join("calc.sh"),
+            "read -r payload\necho \"{\\\"doubled\\\": $(( $(echo \"$payload\" | sed 's/[^0-9]//g') * 2 ))}\"\n",
+        )
+        .unwrap();
+        let mut action = Action::new("script");
+        action.inputs.insert(
+            "source".to_string(),
+            serde_json::json!({"kind": "file", "path": "calc.sh"}),
+        );
+        action
+            .inputs
+            .insert("args".to_string(), serde_json::json!({"n": 21}));
+
+        let outputs = execute_script(&action, dir.path()).await.unwrap();
+        assert_eq!(outputs.get("doubled"), Some(&Value::from(42)));
+    }
+
+    #[tokio::test]
+    async fn script_file_mode_honors_a_bash_runtime_override_for_an_unknown_extension() {
+        if !bash_available() {
+            eprintln!("skipping: bash not found");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runnable"), "echo '{\"ok\": true}'\n").unwrap();
+        let mut action = Action::new("script");
+        action.inputs.insert(
+            "source".to_string(),
+            serde_json::json!({"kind": "file", "path": "runnable", "runtime": "bash"}),
         );
 
         let outputs = execute_script(&action, dir.path()).await.unwrap();

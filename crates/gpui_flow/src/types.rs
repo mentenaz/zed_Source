@@ -168,6 +168,21 @@ pub struct FlowNode {
     /// `None` (the overwhelming majority of nodes) keeps the graph's
     /// ordinary uniform border.
     pub accent_border: Option<u32>,
+    /// Marks this node as failing validation, drawn as a
+    /// `FlowGraph::node_error_color` ring.
+    ///
+    /// Deliberately a *separate* flag from [`Self::accent_border`] rather than
+    /// just another value in it: `accent_border` is a single slot that live run
+    /// status also writes, and the two have different lifetimes. A node can be
+    /// red because it just failed *and* red because it has a blocking
+    /// validation error, and the "clear the run marker when the user edits
+    /// this node" path must not wipe the validation ring on its way past.
+    /// Keeping them apart means each subsystem owns its own field and neither
+    /// has to know the other exists.
+    ///
+    /// Wins over `accent_border` *and* over the selection ring, since a node
+    /// the user is looking at still needs its blocking error to be visible.
+    pub validation_error: bool,
 }
 
 impl FlowNode {
@@ -195,6 +210,7 @@ impl FlowNode {
             container_padding: None,
             header_height: None,
             accent_border: None,
+            validation_error: false,
         }
     }
 
@@ -255,6 +271,12 @@ impl FlowNode {
     /// See the `accent_border` field doc.
     pub fn accent_border(mut self, color: impl Into<Option<u32>>) -> Self {
         self.accent_border = color.into();
+        self
+    }
+
+    /// See the `validation_error` field doc.
+    pub fn validation_error(mut self, validation_error: bool) -> Self {
+        self.validation_error = validation_error;
         self
     }
 }

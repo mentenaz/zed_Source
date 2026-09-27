@@ -22,6 +22,13 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "net", "sync", "time", "rt", "rt-multi-thread"] }
 uuid.workspace = true
+which.workspace = true
+
+# Only the Windows branch of `executors::resolve_bash` needs Zed's Git Bash
+# locator, so the `util` tree (zip/embed/regex/url) stays out of non-Windows
+# builds of this headless crate.
+[target.'cfg(windows)'.dependencies]
+util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

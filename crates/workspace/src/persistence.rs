@@ -1741,7 +1741,6 @@ impl WorkspaceDb {
                 name = Some(identity_name);
                 user = Some(remote_user);
             }
-            #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionIdentity::Mock { id } => {
                 kind = RemoteConnectionKind::Ssh;
                 host = Some(format!("mock-{}", id));

@@ -20,10 +20,13 @@
 //! `flows_panel`'s own "everything as text for now" pragmatism; a typed
 //! form is a natural follow-up, not required to make editing usable.
 
-mod project_item;
+mod catalog;
+mod http_companion;
 mod persistence;
+mod project_item;
 mod run_results;
 mod run_state;
+mod script_companion;
 mod workflow_json;
 
 use std::cell::RefCell;
@@ -37,19 +40,22 @@ use anyhow::Context as _;
 use editor::Editor;
 use gpui::{
     Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TaskExt as _, WeakEntity, Window,
-    div, prelude::FluentBuilder as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Point, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TaskExt as _,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, Theme,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, PopupMenuItem},
+    input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState},
+    list::{List, ListEvent, ListState},
+    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    popover::Popover,
     resizable::{h_resizable, resizable_panel},
     scroll::Scrollbar,
     spinner::Spinner,
+    switch::Switch,
     tag::Tag,
     v_flex,
 };
@@ -61,9 +67,9 @@ use notifications::status_toast::StatusToast;
 use project::Project;
 use run_state::{ActionRun, RunLogLine, RunPhase, RunState, SharedRunState};
 use workflow_engine::{
-    registry::REGISTRY,
-    ActionHistoryRecord, RunHistoryEntry, RunOutcome, RunStatus, StatusSink, WorkflowDefinition,
-    run_workflow,
+    ActionHistoryRecord, FieldKind, InputField, RunHistoryEntry, RunOutcome, RunStatus,
+    ScriptRuntime, ScriptSource, StatusSink, ValidationIssue, ValidationSeverity,
+    WorkflowDefinition, registry::REGISTRY, run_workflow, validate_definition,
 };
 use workspace::{ItemId, Pane, ProjectItem, SerializableItem, Workspace, WorkspaceId, item::Item};
 
@@ -76,6 +82,21 @@ const CANVAS_SIZE: (f32, f32) = (1200.0, 800.0);
 struct ContextTarget {
     node_id: Option<NodeId>,
     position: FlowPoint,
+}
+
+/// Where a newly added action goes, resolved by the caller before any node
+/// exists. See [`DesignerPanel::push_action_node`], the one consumer.
+#[derive(Clone, Debug)]
+struct ActionAnchor {
+    /// Absolute flow-space position. `FlowState::set_parent` re-expresses it
+    /// relative to `parent_id` after insertion, so callers can always compute
+    /// it in the same absolute frame.
+    position: FlowPoint,
+    /// Container to nest the new node inside.
+    parent_id: Option<NodeId>,
+    /// Node to draw the new node's incoming edge from. Absent for an
+    /// explicitly placed node — a deliberate drop has no "previous step".
+    source_id: Option<NodeId>,
 }
 
 /// `FlowGraph`'s `bg_color`/`grid_color`/`node_bg_color`/`node_border_color`
@@ -107,6 +128,31 @@ const CONTAINER_TYPES: &[(&str, &str)] = &[
     (workflow_json::BRANCH_CATCH, "Catch"),
 ];
 
+/// The four synthetic branch nodes `workflow_json::load` synthesizes to give
+/// an `If`/`Try`'s nested bodies a canvas container. `set` here is the
+/// authoritative list — `workflow_json::is_branch_wrapper` is the same set and
+/// the two must stay in sync.
+const BRANCH_WRAPPER_TYPES: &[&str] = &[
+    workflow_json::BRANCH_THEN,
+    workflow_json::BRANCH_ELSE,
+    workflow_json::BRANCH_TRY,
+    workflow_json::BRANCH_CATCH,
+];
+
+fn is_branch_wrapper_type(type_id: impl AsRef<str>) -> bool {
+    BRANCH_WRAPPER_TYPES.contains(&type_id.as_ref())
+}
+
+/// Human-readable role of a branch wrapper, for the inspector's explanation.
+fn branch_wrapper_label(type_id: &str) -> &'static str {
+    match type_id {
+        workflow_json::BRANCH_THEN => "the True branch",
+        workflow_json::BRANCH_ELSE => "the False branch",
+        workflow_json::BRANCH_TRY => "the Try body",
+        _ => "the Catch handler",
+    }
+}
+
 /// "View Raw" tab-context-menu action — carries the flow's own abs path so
 /// the handler (registered once, workspace-wide, in [`init`]) doesn't need
 /// to know which `DesignerPanel` instance the click came from. Opens the
@@ -114,6 +160,23 @@ const CONTAINER_TYPES: &[(&str, &str)] = &[
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = designer_panel, no_json)]
 pub struct ViewRaw(PathBuf);
+
+/// Opens the workspace-visible Inline script companion as a normal editor
+/// buffer, giving it the file URI and worktree context required for LSP.
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = designer_panel, no_json)]
+pub struct ViewScriptCompanion(PathBuf);
+
+/// Opens an `http` action's request-body companion (`<flow>.flow-http/…`) as
+/// a normal editor buffer, giving it the file URI and worktree context the
+/// JSON language server needs to apply the body's schemas.
+///
+/// Same shape and reason as [`ViewScriptCompanion`]: dispatched to a
+/// workspace-wide handler so it works for designers opened via
+/// `ProjectItem::for_project_item`, which have no workspace handle of their own.
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = designer_panel, no_json)]
+pub struct ViewHttpBody(PathBuf);
 
 /// "Results" action — opens (or reactivates) the `RunResults` tab bound to
 /// the flow at `path`. Dispatched from the designer toolbar through the
@@ -150,7 +213,9 @@ pub fn init(cx: &mut gpui::App) {
             // it to the pane is what actually bypasses that routing.
             let abs_path = action.0.clone();
             let project = workspace.project().clone();
-            let Some(project_path) = project.read(cx).project_path_for_absolute_path(&abs_path, cx)
+            let Some(project_path) = project
+                .read(cx)
+                .project_path_for_absolute_path(&abs_path, cx)
             else {
                 log::warn!("View Raw: {abs_path:?} isn't inside a worktree of this project");
                 return;
@@ -161,8 +226,51 @@ pub fn init(cx: &mut gpui::App) {
                     .update(cx, |project, cx| project.open_buffer(project_path, cx))
                     .await?;
                 workspace.update_in(cx, |workspace, window, cx| {
-                    let editor =
-                        cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
+                    let editor = cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
+                    workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+        workspace.register_action(|workspace, action: &ViewScriptCompanion, window, cx| {
+            let abs_path = action.0.clone();
+            let project = workspace.project().clone();
+            let Some(project_path) = project
+                .read(cx)
+                .project_path_for_absolute_path(&abs_path, cx)
+            else {
+                log::warn!("Open Script: {abs_path:?} isn't inside a worktree of this project");
+                return;
+            };
+
+            cx.spawn_in(window, async move |workspace, cx| {
+                let buffer = project
+                    .update(cx, |project, cx| project.open_buffer(project_path, cx))
+                    .await?;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    let editor = cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
+                    workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+                })
+            })
+            .detach_and_log_err(cx);
+        });
+        workspace.register_action(|workspace, action: &ViewHttpBody, window, cx| {
+            let abs_path = action.0.clone();
+            let project = workspace.project().clone();
+            let Some(project_path) = project
+                .read(cx)
+                .project_path_for_absolute_path(&abs_path, cx)
+            else {
+                log::warn!("Edit Body: {abs_path:?} isn't inside a worktree of this project");
+                return;
+            };
+
+            cx.spawn_in(window, async move |workspace, cx| {
+                let buffer = project
+                    .update(cx, |project, cx| project.open_buffer(project_path, cx))
+                    .await?;
+                workspace.update_in(cx, |workspace, window, cx| {
+                    let editor = cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
                     workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
                 })
             })
@@ -188,6 +296,29 @@ pub fn init(cx: &mut gpui::App) {
     workspace::register_serializable_item::<DesignerPanel>(cx);
 }
 
+/// The runtime a `File`-mode script at `absolute` will run under: the
+/// flow's explicit override when it has one, otherwise inferred from the
+/// extension by the same `ScriptRuntime::from_path` the executor uses.
+///
+/// Checked before opening the file so a script the engine couldn't run is
+/// reported here - naming the path and the fix - rather than as a spawn
+/// failure on the next Run.
+fn inferred_runtime(
+    absolute: &Path,
+    override_runtime: Option<ScriptRuntime>,
+) -> Result<ScriptRuntime, String> {
+    match override_runtime {
+        Some(runtime) => Ok(runtime),
+        None => ScriptRuntime::from_path(absolute).ok_or_else(|| {
+            format!(
+                "Couldn't infer a runtime from {} - give the script an explicit \"runtime\" \
+                 override, or use a known extension (py, js, ts, ps1, sh, bash, csproj)",
+                absolute.display()
+            )
+        }),
+    }
+}
+
 fn node_label(node: &FlowNode) -> String {
     if node.label.is_empty() {
         node.id.to_string()
@@ -207,11 +338,22 @@ fn accent_for_type(type_id: &str, cx: &App) -> gpui::Hsla {
         hash = hash.wrapping_mul(0x01000193);
     }
     let theme = cx.theme();
-    let palette = [theme.chart_1, theme.chart_2, theme.chart_3, theme.chart_4, theme.chart_5];
+    let palette = [
+        theme.chart_1,
+        theme.chart_2,
+        theme.chart_3,
+        theme.chart_4,
+        theme.chart_5,
+    ];
     palette[(hash as usize) % palette.len()]
 }
 
-fn render_container_header(node: &FlowNode, title: &str, _w: &mut gpui::Window, cx: &mut App) -> gpui::AnyElement {
+fn render_container_header(
+    node: &FlowNode,
+    title: &str,
+    _w: &mut gpui::Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
     div()
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -278,10 +420,92 @@ fn render_leaf(node: &FlowNode, _w: &mut gpui::Window, cx: &mut App) -> gpui::An
         .into_any_element()
 }
 
+/// One editable field in the inspector.
+///
+/// `kind`/`required`/`help` come from the `ActionDef` registry entry for the
+/// node's `type_id` (see `workflow_json::declared_field`), so the editor the
+/// user gets — and the guidance under it — is generated from the same
+/// metadata the runtime validates against, rather than restated here.
+///
+/// A `None` `kind` means the key is **undeclared**: an extra the registry has
+/// no schema for (a leftover `strategy` key on an old transform flow, or a
+/// container meta row like `__limit_timeout`). Those still round-trip
+/// (`workflow_json`'s `string_to_value`) but get a plain text editor and no
+/// required/help treatment, because there's nothing truthful to assert.
 struct PropertyRow {
     key: SharedString,
     value: Entity<InputState>,
+    /// Backing state for the multi-line editor used by `Json`/`Expression`
+    /// fields. `None` renders the single-line `value` input instead. Both are
+    /// always kept in sync, so either can be read back.
+    textarea: Option<Entity<TextareaState>>,
+    /// Declared `FieldKind`, or `None` for an undeclared extra.
+    kind: Option<FieldKind>,
+    required: bool,
+    help: SharedString,
+    /// A short type badge (`Text`, `Number`, `Bool`, `JSON`, `Expr`) shown
+    /// next to the label, so the shape of a field is legible before editing.
+    type_badge: Option<&'static str>,
+    /// Programmatic write path, shared with this row's widgets.
+    ///
+    /// The `Switch` and the expression-picker chips *must* go through this
+    /// rather than relying on an `InputEvent::Change`: both `set_value` and
+    /// `insert` set `emit_events = false` (they're silent by design, so a
+    /// programmatic sync doesn't look like a user edit), so a toggle that only
+    /// wrote to the input would repaint without ever reaching `FlowNode` — and
+    /// a save would then persist the old value.
+    commit: Commit,
     _sub: Subscription,
+}
+
+/// Short label for a declared `FieldKind`, for the inspector's type badge.
+fn field_kind_badge(kind: FieldKind) -> &'static str {
+    match kind {
+        FieldKind::String => "Text",
+        FieldKind::Number => "Number",
+        FieldKind::Bool => "Bool",
+        FieldKind::Json => "JSON",
+        FieldKind::Expression => "Expr",
+    }
+}
+
+/// Collects the `<action_id>.<output>` paths an expression on `node_id` could
+/// legally reference: every output of every action that is guaranteed to have
+/// run first.
+///
+/// "Guaranteed to have run first" is the real constraint — a JSONLogic `var`
+/// against an action that may not have run yet resolves to null and silently
+/// changes behavior, so offering only level-ordered predecessors keeps the
+/// picker honest. Ordering comes from `compute_levels` over the node's own
+/// scope's reconstructed `runAfter` graph, and output names from each action's
+/// `ActionDef::outputs` (the same metadata the runtime fills them from).
+///
+/// Actions with no declared outputs (the four container types) contribute
+/// `sync_selection` uses to decide whether to render a row for a missing
+/// required field.
+/// Writes a property row's new text back onto its `FlowNode` and revalidates.
+///
+/// Shared by a row's two editors (`Input` and, for `Json`/`Expression`, a
+/// `Textarea`) so a toggle and a typed edit are indistinguishable downstream.
+type Commit = Rc<dyn Fn(&mut DesignerPanel, String, &mut Context<DesignerPanel>)>;
+
+fn meta_property(
+    properties: &[(SharedString, SharedString)],
+    name: &str,
+) -> Option<(SharedString, SharedString)> {
+    let storage_key = match name {
+        "expression" => "__expression",
+        "foreach" => "__foreach",
+        "until" => "__until",
+        // `limit` is one `Json` object in the registry but two canvas rows; the
+        // count row is the one that carries the field's presence.
+        "limit" => "__limit_count",
+        _ => name,
+    };
+    properties
+        .iter()
+        .find(|(k, _)| k.as_ref() == storage_key)
+        .cloned()
 }
 
 /// The content-dependent half of `DesignerPanel`'s state — everything that
@@ -295,12 +519,24 @@ struct LoadedFlow {
     error: Option<String>,
     flow_id: String,
     flow_name: String,
+    /// Flow-level content the canvas can't represent (today just the
+    /// flow-level `outputs` map), carried so `save` can write it back
+    /// verbatim instead of silently dropping it.
+    preserved: workflow_json::FlowPreserved,
     state: Entity<FlowState>,
     context_target: Rc<RefCell<ContextTarget>>,
     flow: Entity<FlowGraph>,
     minimap: Entity<Minimap>,
     controls: Entity<Controls>,
     state_sub: Subscription,
+    /// The companion content last synced per script action, as of the moment
+    /// this state was built - the baseline `script_companion`'s two-way sync
+    /// compares against to tell a panel edit from an external one.
+    script_sync: script_companion::SyncState,
+    /// The same baseline for `http` request bodies, which sync through their
+    /// own companions and their own key space (an action id can be a script
+    /// and an `http` body in different flows without either baseline knowing).
+    body_sync: script_companion::SyncState,
 }
 
 pub struct DesignerPanel {
@@ -332,20 +568,57 @@ pub struct DesignerPanel {
     root: PathBuf,
     flow_id: String,
     flow_name: String,
+    /// Baseline for `script_companion`'s two-way inline/companion sync: the
+    /// companion content each script action was last seen to hold. Reset by
+    /// `reload_from_disk` (which re-derives it from disk) and never assumed
+    /// for an action it doesn't know about.
+    script_sync: script_companion::SyncState,
+    /// Baseline for `http_companion`'s two-way inline/companion sync, kept
+    /// separate from `script_sync` because it tracks a different set of files
+    /// (request bodies rather than script sources).
+    body_sync: script_companion::SyncState,
+    /// Flow-level content the canvas can't represent (see
+    /// `workflow_json::FlowPreserved`). Re-read on every load and handed to
+    /// `workflow_json::save`, so a hand-authored flow-level `outputs` map
+    /// survives editing instead of being wiped on the first save.
+    flow_preserved: workflow_json::FlowPreserved,
     state: Entity<FlowState>,
     context_target: Rc<RefCell<ContextTarget>>,
     flow: Entity<FlowGraph>,
     minimap: Entity<Minimap>,
     controls: Entity<Controls>,
+    /// The action catalog pane: a `gpui_component` list over
+    /// `catalog::CatalogDelegate`, so search, group headings, arrow-key
+    /// navigation, and `Role::List` semantics come from the shared widget
+    /// rather than being re-implemented here. Its contents are derived from
+    /// `REGISTRY` and never invalidated, which is why `reload_from_disk`
+    /// leaves it alone.
+    catalog: Entity<ListState<catalog::CatalogDelegate>>,
+    /// Turns a confirmed catalog row into a node insertion. Clicking a row
+    /// and pressing Enter on it both arrive here as `ListEvent::Confirm`.
+    _catalog_sub: Subscription,
     label_input: Option<Entity<InputState>>,
     _label_sub: Option<Subscription>,
     property_rows: Vec<PropertyRow>,
     selected_node_id: Option<NodeId>,
+    script_file_input: Option<Entity<InputState>>,
+    _script_file_sub: Option<Subscription>,
     new_prop_key: Entity<InputState>,
     new_prop_value: Entity<InputState>,
     running: bool,
     status: Option<String>,
     error: Option<String>,
+    /// Validation issues from the last `revalidate()` call, keyed by the
+    /// layout path of the affected node (same convention as
+    /// `WorkflowLayout::positions`). Populated after every load, save, and
+    /// property edit. A node with no entry has no known issues. The full
+    /// list drives the toolbar error badge and the per-node inspector hints.
+    validation_issues: Vec<ValidationIssue>,
+    /// Whether the toolbar error badge's issues popover is open. A plain
+    /// bool rather than a `Popover` handle: the badge only needs "is it
+    /// showing", and `Popover::on_open_change` keeps the two in sync for
+    /// outside-click and Escape.
+    show_issues: bool,
     /// The live run state shared with the `StatusSink` (written off-thread)
     /// and with the "Run Results" tab. Snapshot into `run_snapshot` by the
     /// poll task a few times a second while a run is active.
@@ -411,6 +684,29 @@ impl DesignerPanel {
         let new_prop_key = cx.new(|cx| InputState::new(window, cx).placeholder("property"));
         let new_prop_value = cx.new(|cx| InputState::new(window, cx).placeholder("value"));
 
+        // `searchable(true)` puts the shared list widget's own search input at
+        // the top of the pane and routes each keystroke into the delegate's
+        // `perform_search`, so there is no panel-side query state to keep in
+        // sync.
+        let catalog = cx
+            .new(|cx| ListState::new(catalog::CatalogDelegate::new(), window, cx).searchable(true));
+        let _catalog_sub = cx.subscribe_in(&catalog, window, |this, _list, event, _window, cx| {
+            let ListEvent::Confirm(ix) = event else {
+                return;
+            };
+            // Resolve the index path back to a `type_id` through the delegate
+            // rather than trusting the index: the visible rows are a filtered
+            // view of the registry, so an index captured before a keystroke
+            // could otherwise name a different action than the one shown.
+            // `addable_type_id` also drops not-ready rows — `ListState` has no
+            // concept of a disabled item, so the styling alone wouldn't stop a
+            // "not ready" action being added by click or Enter.
+            let type_id = this.catalog.read(cx).delegate().addable_type_id(*ix);
+            if let Some(type_id) = type_id {
+                this.add_action_at(type_id, None, cx);
+            }
+        });
+
         let run_state: SharedRunState = Arc::new(Mutex::new(RunState::default()));
         run_state::register_run_state(path.clone(), run_state.clone());
 
@@ -425,20 +721,29 @@ impl DesignerPanel {
             root,
             flow_id: loaded.flow_id,
             flow_name: loaded.flow_name,
+            script_sync: loaded.script_sync,
+            body_sync: loaded.body_sync,
+            flow_preserved: loaded.preserved,
             state: loaded.state,
             context_target: loaded.context_target,
             flow: loaded.flow,
             minimap: loaded.minimap,
             controls: loaded.controls,
+            catalog,
+            _catalog_sub,
             label_input: None,
             _label_sub: None,
             property_rows: Vec::new(),
             selected_node_id: None,
+            script_file_input: None,
+            _script_file_sub: None,
             new_prop_key,
             new_prop_value,
             running: false,
             status: None,
             error: loaded.error,
+            validation_issues: Vec::new(),
+            show_issues: false,
             run_state,
             run_snapshot: RunState::default(),
             run_revision: 0,
@@ -448,6 +753,7 @@ impl DesignerPanel {
             _theme_sub,
         };
         this.watch_file(window, cx);
+        this.revalidate(cx);
         this
     }
 
@@ -459,11 +765,15 @@ impl DesignerPanel {
     /// (empty canvas, `error` set), never a `Result` the caller has to
     /// unwind through. Returns the exact raw file content alongside it (or
     /// `""` if the file couldn't be read) so callers can track `last_raw`.
-    fn load_from_raw(path: &Path, _window: &mut Window, cx: &mut Context<Self>) -> (String, LoadedFlow) {
+    fn load_from_raw(
+        path: &Path,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (String, LoadedFlow) {
         let raw_result = std::fs::read_to_string(path);
         let raw = raw_result.as_deref().unwrap_or("").to_string();
 
-        let (mut def, error) = match raw_result
+        let (mut def, mut error) = match raw_result
             .map_err(|e| format!("couldn't read {}: {e}", path.display()))
             .and_then(|raw| {
                 serde_json::from_str::<WorkflowDefinition>(&raw)
@@ -489,6 +799,36 @@ impl DesignerPanel {
             }
         };
 
+        // Populated by the companion sync below; stays empty (i.e. "unknown"
+        // for every action) when the flow itself failed to load, which is
+        // exactly the right baseline - the next sync pass then falls back to
+        // the documented "a saved companion is the latest source" rule.
+        let mut loaded_sync = script_companion::SyncState::default();
+        // Same deal for `http` request bodies, which hydrate from their own
+        // companions. Reported separately so a body conflict doesn't get
+        // blamed on scripts.
+        let mut loaded_body_sync = script_companion::SyncState::default();
+        if error.is_none() {
+            let mut script_sync = script_companion::SyncState::default();
+            if let Err(sync_error) =
+                script_companion::sync_inline_scripts(&mut def, path, &mut script_sync)
+            {
+                error = Some(format!("Couldn't load script companion: {sync_error}"));
+            }
+            loaded_sync = script_sync;
+        }
+        if error.is_none() {
+            let mut body_sync = script_companion::SyncState::default();
+            if let Err(sync_error) =
+                http_companion::sync_inline_bodies(&mut def, path, &mut body_sync)
+            {
+                error = Some(format!(
+                    "Couldn't load request body companion: {sync_error}"
+                ));
+            }
+            loaded_body_sync = body_sync;
+        }
+
         if error.is_none() {
             if let Some(layout) = workflow_engine::layout::load(path) {
                 workflow_json::apply_saved_layout(&mut def, &layout);
@@ -500,6 +840,10 @@ impl DesignerPanel {
                 let _ = workflow_engine::layout::save(path, &layout);
             }
         }
+
+        // Snapshot the flow-level fields the canvas has no node for *before*
+        // `def` is consumed, so `save` can round-trip them.
+        let preserved = workflow_json::preserved_from(&def);
 
         let mut flow_state = workflow_json::load(
             &def,
@@ -538,13 +882,19 @@ impl DesignerPanel {
             });
             for (type_id, title) in CONTAINER_TYPES {
                 graph = graph
-                    .node_renderer(*type_id, move |n, w, cx| render_container_header(n, title, w, cx))
-                    .container_header(*type_id, move |n, w, cx| render_container_header(n, title, w, cx));
+                    .node_renderer(*type_id, move |n, w, cx| {
+                        render_container_header(n, title, w, cx)
+                    })
+                    .container_header(*type_id, move |n, w, cx| {
+                        render_container_header(n, title, w, cx)
+                    });
             }
             graph
         });
-        let minimap = cx.new(|_| Minimap::new(state.clone()).container_bounds(CANVAS_SIZE.0, CANVAS_SIZE.1));
-        let controls = cx.new(|_| Controls::new(state.clone()).container_size(CANVAS_SIZE.0, CANVAS_SIZE.1));
+        let minimap =
+            cx.new(|_| Minimap::new(state.clone()).container_bounds(CANVAS_SIZE.0, CANVAS_SIZE.1));
+        let controls =
+            cx.new(|_| Controls::new(state.clone()).container_size(CANVAS_SIZE.0, CANVAS_SIZE.1));
 
         let flow_id = def.id.clone();
         let flow_name = def.name.clone();
@@ -556,12 +906,15 @@ impl DesignerPanel {
                 error,
                 flow_id,
                 flow_name,
+                preserved,
                 state,
                 context_target,
                 flow,
                 minimap,
                 controls,
                 state_sub,
+                script_sync: loaded_sync,
+                body_sync: loaded_body_sync,
             },
         )
     }
@@ -589,10 +942,16 @@ impl DesignerPanel {
         self.minimap = loaded.minimap;
         self.controls = loaded.controls;
         self._state_sub = loaded.state_sub;
+        // The reloaded state is what the old baseline described, so it goes
+        // with it - otherwise the next sync pass would compare a fresh
+        // canvas against companion content recorded for a canvas that's gone.
+        self.script_sync = loaded.script_sync;
+        self.body_sync = loaded.body_sync;
+        self.flow_preserved = loaded.preserved;
         if self.error.is_some() {
             window.dispatch_action(Box::new(ShowInvalidFlowToast(self.flow_name.clone())), cx);
         }
-        cx.notify();
+        self.revalidate(cx);
     }
 
     /// Subscribes to this flow's worktree so external edits (the "Raw" tab,
@@ -641,9 +1000,9 @@ impl DesignerPanel {
 
     /// Re-applies the canvas chrome from the active theme. The node renderers
     /// already read `cx.theme()` on every paint, but `FlowGraph`'s
-    /// `bg_color`/`grid_color`/`node_bg_color`/`node_border_color`/`accent_color`
-    /// are one-shot builder values — this keeps them tracking a live theme
-    /// switch instead of freezing at open time.
+    /// `bg_color`/`grid_color`/`node_bg_color`/`node_border_color`/`accent_color`/
+    /// `node_error_color` are one-shot builder values — this keeps them
+    /// tracking a live theme switch instead of freezing at open time.
     fn sync_canvas_colors(&mut self, cx: &mut Context<Self>) {
         self.flow.update(cx, |graph, cx| {
             graph.set_theme_colors(
@@ -653,12 +1012,46 @@ impl DesignerPanel {
                 hex(cx.theme().border),
                 hex(cx.theme().primary),
             );
+            // The validation ring is theme-driven too, so an invalid node reads
+            // as "danger" in light and dark rather than a fixed red that only
+            // works on one of them.
+            graph.set_node_error_color(hex(cx.theme().danger));
             cx.notify();
         });
     }
 
     fn selected_node(&self, cx: &App) -> Option<FlowNode> {
-        self.state.read(cx).nodes.iter().find(|n| n.selected).cloned()
+        self.state
+            .read(cx)
+            .nodes
+            .iter()
+            .find(|n| n.selected)
+            .cloned()
+    }
+
+    /// The node type of the current selection, if any.
+    fn selected_node_type(&self, cx: &Context<Self>) -> Option<SharedString> {
+        self.state
+            .read(cx)
+            .get_node(self.selected_node_id.as_ref()?)
+            .and_then(|n| n.node_type.clone())
+    }
+
+    /// True when the current selection is one of the synthetic branch nodes
+    /// `workflow_json::load` creates. Those are canvas-only scaffolding for an
+    /// `If`/`Try`'s nested bodies — they have no `Action` of their own, so
+    /// editing or deleting one can't be expressed in `flow.json`.
+    fn selected_is_branch_wrapper(&self, cx: &Context<Self>) -> bool {
+        self.selected_node_type(cx)
+            .as_deref()
+            .is_some_and(is_branch_wrapper_type)
+    }
+
+    fn selected_branch_label(&self, cx: &Context<Self>) -> &'static str {
+        match self.selected_node_type(cx).as_deref() {
+            Some(t) => branch_wrapper_label(t),
+            None => "A branch container",
+        }
     }
 
     /// Rebuilds the property panel's input entities when the selected node
@@ -675,10 +1068,13 @@ impl DesignerPanel {
         self.property_rows.clear();
         self.label_input = None;
         self._label_sub = None;
+        self.script_file_input = None;
+        self._script_file_sub = None;
 
         let Some(node) = selected else { return };
 
-        let label_input = cx.new(|cx| InputState::new(window, cx).default_value(node.label.clone()));
+        let label_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(node.label.clone()));
         let node_id = node.id.clone();
         let state = self.state.clone();
         let _label_sub = cx.subscribe(&label_input, move |this, input, event, cx| {
@@ -696,19 +1092,139 @@ impl DesignerPanel {
         self.label_input = Some(label_input);
         self._label_sub = Some(_label_sub);
 
+        let is_script = node.node_type.as_deref() == Some("script");
+        if is_script {
+            if let Some((_, source_str)) =
+                node.properties.iter().find(|(k, _)| k.as_ref() == "source")
+            {
+                if let Ok(ScriptSource::File { ref path, .. }) =
+                    serde_json::from_str::<ScriptSource>(source_str.as_ref())
+                {
+                    let file_path = path.clone();
+                    let file_input = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .default_value(file_path)
+                            .placeholder("path/to/script.py")
+                    });
+                    let nid = node.id.clone();
+                    let state = self.state.clone();
+                    let _script_file_sub = cx.subscribe(&file_input, move |this, input, event, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let new_path = input.read(cx).value().trim().to_string();
+                            this.clear_run_marker(&nid, cx);
+                            state.update(cx, |state, cx| {
+                                if let Some(n) = state.get_node_mut(&nid) {
+                                    if let Some(prop) = n.properties.iter_mut().find(|(k, _)| k.as_ref() == "source") {
+                                        if let Ok(mut src) = serde_json::from_str::<ScriptSource>(prop.1.as_ref()) {
+                                            if let ScriptSource::File { ref mut path, .. } = src {
+                                                *path = new_path;
+                                                if let Ok(val) = serde_json::to_string(&src) {
+                                                    prop.1 = val.into();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    });
+                    self.script_file_input = Some(file_input);
+                    self._script_file_sub = Some(_script_file_sub);
+                }
+            }
+        }
+
+        // Generate rows from the registry so a *missing required* field still
+        // gets a row — previously a field absent from `properties` produced no
+        // editor at all, so the only signal it was required was a message in
+        // the toolbar popover with nothing to type into. Declared fields come
+        // first in registry order, then undeclared extras, so the common case
+        // reads top-down in the order the runtime expects.
+        let node_type = node.node_type.as_deref().unwrap_or_default().to_string();
+        let mut emitted: Vec<SharedString> = Vec::new();
+        if let Some(def) = workflow_engine::registry::find(&node_type) {
+            for field in def.inputs {
+                let Some((key, value)) = meta_property(&node.properties, field.name) else {
+                    // Not set. Show the editor anyway when it's required, so
+                    // there's somewhere to enter a value; otherwise stay quiet
+                    // rather than showing a row for something the flow doesn't
+                    // use.
+                    if field.required {
+                        self.push_property_row(
+                            field.name.into(),
+                            "".into(),
+                            Some(*field),
+                            window,
+                            cx,
+                        );
+                        emitted.push(field.name.into());
+                    }
+                    continue;
+                };
+                self.push_property_row(key.clone(), value, Some(*field), window, cx);
+                emitted.push(key);
+            }
+        }
+
         for (key, value) in &node.properties {
-            self.push_property_row(key.clone(), value.clone(), window, cx);
+            if is_script && key.as_ref() == "source" {
+                continue;
+            }
+            // Already emitted above as a declared field.
+            if emitted.contains(key) {
+                continue;
+            }
+            // Container meta rows are declared under a different input name
+            // (`__limit_count` for `limit`, etc.); resolve those too so they
+            // get the right editor instead of falling through as extras.
+            let field = workflow_json::declared_field_for_meta(&node_type, key);
+            self.push_property_row(key.clone(), value.clone(), field, window, cx);
         }
     }
 
-    fn push_property_row(&mut self, key: SharedString, value: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(node_id) = self.selected_node_id.clone() else { return };
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+    /// Builds one inspector row, typed from `field` when the registry
+    /// declares it.
+    ///
+    /// The `FieldKind` decides the control: a `Bool` gets a `Switch` (with
+    /// the backing `InputState` kept in step so the property text stays the
+    /// single source of truth for save), a `Number` a `NumberInput`, and
+    /// `Json`/`Expression` a multi-line `Textarea` — a JSON body or a
+    /// JSONLogic expression on one line is unreadable. Everything else is a
+    /// plain single-line `Input`.
+    ///
+    /// `field` is `None` for an undeclared extra, which keeps the old
+    /// text-input behavior.
+    fn push_property_row(
+        &mut self,
+        key: SharedString,
+        value: SharedString,
+        field: Option<InputField>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return;
+        };
+        let kind = field.map(|f| f.kind);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value.clone()));
+        // `Json`/`Expression` get the tall editor; see the doc comment.
+        let multiline = matches!(kind, Some(FieldKind::Json | FieldKind::Expression));
+        let textarea = multiline.then(|| {
+            cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(4)
+                    .default_value(value.to_string())
+            })
+        });
+
         let state = self.state.clone();
         let row_key = key.clone();
-        let sub = cx.subscribe(&input, move |this, input, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                let value = input.read(cx).value().to_string();
+        // Both widgets write through the same closure so a `Switch` toggle and
+        // a typed edit are indistinguishable downstream. `Rc` because a
+        // `Json`/`Expression` row has two subscriptions (input + textarea).
+        let commit: Commit = Rc::new(
+            move |this: &mut Self, value: String, cx: &mut Context<Self>| {
                 let row_key = row_key.clone();
                 this.clear_run_marker(&node_id, cx);
                 state.update(cx, |state, cx| {
@@ -719,17 +1235,48 @@ impl DesignerPanel {
                     }
                     cx.notify();
                 });
+                this.revalidate(cx);
+            },
+        );
+        let commit_input = commit.clone();
+        let sub = cx.subscribe(&input, move |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = input.read(cx).value().to_string();
+                commit_input(this, value, cx);
             }
         });
+
+        let mut subs = vec![sub];
+        if let Some(area) = &textarea {
+            let commit = commit.clone();
+            subs.push(cx.subscribe(area, move |this, area, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = area.read(cx).value().to_string();
+                    commit(this, value, cx);
+                }
+            }));
+        }
+
         self.property_rows.push(PropertyRow {
             key,
             value: input,
-            _sub: sub,
+            textarea,
+            kind,
+            required: field.is_some_and(|f| f.required),
+            help: field.map(|f| f.help).unwrap_or_default().into(),
+            type_badge: kind.map(field_kind_badge),
+            commit,
+            _sub: subs
+                .into_iter()
+                .reduce(Subscription::join)
+                .expect("at least the input subscription"),
         });
     }
 
     fn on_add_property_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(node_id) = self.selected_node_id.clone() else { return };
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return;
+        };
         let key = self.new_prop_key.read(cx).value().trim().to_string();
         if key.is_empty() {
             return;
@@ -741,20 +1288,56 @@ impl DesignerPanel {
                 if let Some(prop) = n.properties.iter_mut().find(|(k, _)| k.as_ref() == key) {
                     prop.1 = value.clone().into();
                 } else {
-                    n.properties.push((key.clone().into(), value.clone().into()));
+                    n.properties
+                        .push((key.clone().into(), value.clone().into()));
                 }
             }
             cx.notify();
         });
-        self.push_property_row(key.into(), value.into(), window, cx);
-        self.new_prop_key.update(cx, |input, cx| input.set_value("", window, cx));
-        self.new_prop_value.update(cx, |input, cx| input.set_value("", window, cx));
+        // A hand-added key that the registry *does* declare still gets the
+        // declared editor/required/help treatment — this path is how a user
+        // fills in a required field the canvas didn't create a row for.
+        let field = workflow_engine::registry::find(
+            self.state
+                .read(cx)
+                .get_node(&node_id)
+                .and_then(|n| n.node_type.clone())
+                .unwrap_or_default()
+                .as_ref(),
+        )
+        .and_then(|def| def.inputs.iter().copied().find(|f| f.name == key));
+        self.push_property_row(key.into(), value.into(), field, window, cx);
+        self.new_prop_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.new_prop_value
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.revalidate(cx);
     }
 
     /// Deletes the selected node, every descendant (a container's own
     /// children), and every edge touching any of them.
+    ///
+    /// A synthetic branch wrapper is refused rather than deleted. Deleting one
+    /// used to recursively remove the whole branch body it stood for, and
+    /// since the wrapper exists only to *display* `If`/`Try`'s nested
+    /// `actions`/`else`/`catch` maps, there is no JSON to write the removal
+    /// to — the user would lose real, saved actions with no undo and no
+    /// confirmation. Removing a branch means deleting the action that owns it
+    /// (or an action inside it), which is what this still allows.
     fn on_delete_node_click(&mut self, cx: &mut Context<Self>) {
-        let Some(node_id) = self.selected_node_id.clone() else { return };
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return;
+        };
+        if self.selected_is_branch_wrapper(cx) {
+            self.status = Some(format!(
+                "{} can't be deleted on its own — it only groups the actions \
+                 inside it. Delete one of those actions, or the whole \
+                 container, instead.",
+                self.selected_branch_label(cx)
+            ));
+            cx.notify();
+            return;
+        }
         self.state.update(cx, |state, cx| {
             let mut doomed = vec![node_id.clone()];
             let mut frontier = vec![node_id];
@@ -765,7 +1348,9 @@ impl DesignerPanel {
                 }
             }
             state.nodes.retain(|n| !doomed.contains(&n.id));
-            state.edges.retain(|e| !doomed.contains(&e.source) && !doomed.contains(&e.target));
+            state
+                .edges
+                .retain(|e| !doomed.contains(&e.source) && !doomed.contains(&e.target));
             state.rebuild_lookup();
             state.refit_all_containers();
             cx.notify();
@@ -773,13 +1358,479 @@ impl DesignerPanel {
         self.selected_node_id = None;
         self.property_rows.clear();
         self.label_input = None;
+        self.script_file_input = None;
+        self._script_file_sub = None;
     }
 
-    fn on_save_click(&mut self, cx: &mut Context<Self>) {
-        let (def, layout) = {
-            let state = self.state.read(cx);
-            workflow_json::save(state, self.flow_id.clone(), self.flow_name.clone())
+    /// Reconciles `def`'s inline scripts with their companion files, then
+    /// pushes any code that came *back* from a companion into the live canvas
+    /// state (and the inspector row showing it).
+    ///
+    /// The push-back is load-bearing, not a convenience: the live state is
+    /// what the next Save/Run rebuilds `def` from, so a hydration left only
+    /// in the throwaway `def` would let the next sync pass see "inline code
+    /// changed since the last sync" and write the stale inline code straight
+    /// back over the user's external edit. After this returns `Ok`, the three
+    /// representations - canvas state, `def`, companion file - agree for
+    /// every inline script.
+    fn sync_scripts(
+        &mut self,
+        def: &mut WorkflowDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let report = script_companion::sync_inline_scripts(def, &self.path, &mut self.script_sync)?;
+        let hydrated: Vec<String> = report
+            .iter()
+            .filter(|(_, outcome)| *outcome == script_companion::Sync::Hydrated)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if hydrated.is_empty() {
+            return Ok(());
+        }
+        self.state.update(cx, |state, cx| {
+            for key in &hydrated {
+                let action_path: Vec<String> = key.split('/').map(str::to_string).collect();
+                let Some(node_id) = action_path.last().map(|id| SharedString::from(id.as_str()))
+                else {
+                    continue;
+                };
+                let Some(text) = script_companion::source_text_for_action_path(def, &action_path)
+                else {
+                    continue;
+                };
+                if let Some(node) = state.get_node_mut(&node_id)
+                    && let Some(property) = node
+                        .properties
+                        .iter_mut()
+                        .find(|(name, _)| name.as_ref() == "source")
+                {
+                    property.1 = text.into();
+                }
+            }
+            cx.notify();
+        });
+        // The inspector's `InputState` is a separate entity from the property
+        // it edits, so it still holds the pre-hydration text; without this
+        // the next keystroke would write that stale text back over the
+        // companion edit we just accepted.
+        self.refresh_property_rows(window, cx);
+        Ok(())
+    }
+
+    /// [`Self::sync_scripts`] for `http` request bodies: reconciles `def`'s
+    /// bodies with their `<flow>.flow-http/…` companions, then pushes any body
+    /// that came *back* from a companion into the live canvas state.
+    ///
+    /// The push-back matters for the same reason it does for scripts: the live
+    /// state is what the next Save rebuilds `def` from, so a body hydrated only
+    /// into the throwaway `def` would be seen as "changed since the last sync"
+    /// on the next pass and written straight back over the user's external edit.
+    fn sync_bodies(
+        &mut self,
+        def: &mut WorkflowDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let report = http_companion::sync_inline_bodies(def, &self.path, &mut self.body_sync)?;
+        let hydrated: Vec<String> = report
+            .iter()
+            .filter(|(_, outcome)| *outcome == script_companion::Sync::Hydrated)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if hydrated.is_empty() {
+            return Ok(());
+        }
+        self.state.update(cx, |state, cx| {
+            for key in &hydrated {
+                let action_path: Vec<String> = key.split('/').map(str::to_string).collect();
+                let Some(node_id) = action_path.last().map(|id| SharedString::from(id.as_str()))
+                else {
+                    continue;
+                };
+                let Some(text) = http_companion::body_text_for_action_path(def, &action_path)
+                else {
+                    continue;
+                };
+                if let Some(node) = state.get_node_mut(&node_id)
+                    && let Some(property) = node
+                        .properties
+                        .iter_mut()
+                        .find(|(name, _)| name.as_ref() == "body")
+                {
+                    property.1 = text.into();
+                }
+            }
+            cx.notify();
+        });
+        self.refresh_property_rows(window, cx);
+        Ok(())
+    }
+
+    /// Re-seeds every property input from the live state, for when the state
+    /// was changed programmatically (a companion hydration) rather than
+    /// through the inputs themselves.
+    fn refresh_property_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return;
         };
+        // Read the current values out and drop the state borrow before
+        // touching the input entities: `InputState::update` needs `&mut cx`,
+        // which a live `state.read(cx)` guard would still be holding.
+        let values: Vec<(Entity<InputState>, String)> = {
+            let state = self.state.read(cx);
+            let Some(node) = state.nodes.iter().find(|node| node.id == node_id) else {
+                return;
+            };
+            self.property_rows
+                .iter()
+                .map(|row| {
+                    let value = node
+                        .properties
+                        .iter()
+                        .find(|(name, _)| *name == row.key)
+                        .map(|(_, value)| value.to_string())
+                        .unwrap_or_default();
+                    (row.value.clone(), value)
+                })
+                .collect()
+        };
+        for (input, value) in values {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        if let Some(file_input) = &self.script_file_input {
+            let state = self.state.read(cx);
+            if let Some(node) = state.nodes.iter().find(|node| node.id == node_id) {
+                if let Some((_, source_str)) =
+                    node.properties.iter().find(|(k, _)| k.as_ref() == "source")
+                {
+                    if let Ok(ScriptSource::File { ref path, .. }) =
+                        serde_json::from_str::<ScriptSource>(source_str.as_ref())
+                    {
+                        let path_val = path.clone();
+                        file_input.update(cx, |input, cx| input.set_value(path_val, window, cx));
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_open_script_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node_id) = self.selected_node_id.as_ref().map(|id| id.to_string()) else {
+            return;
+        };
+        let (action_path, source) = {
+            let state = self.state.read(cx);
+            let (definition, _) = workflow_json::save(
+                &state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            );
+            let Some(action_path) =
+                script_companion::action_path_for_node(&definition, &state, &node_id)
+            else {
+                self.error = Some(format!("Couldn't resolve Script action {node_id}"));
+                cx.notify();
+                return;
+            };
+            let Some(source) = script_companion::source_for_action_path(&definition, &action_path)
+            else {
+                self.error = Some(format!("Script action {node_id} has no valid source input"));
+                cx.notify();
+                return;
+            };
+            (action_path, source)
+        };
+
+        // A `File` source names a workspace file the executor reads directly;
+        // there is no companion to materialize, so this just opens it. The
+        // runtime is the executor's own inference, checked here so the panel
+        // can say *why* a run would fail before the run is attempted.
+        let path = match source {
+            ScriptSource::File {
+                path: script_path,
+                runtime,
+            } => {
+                // `solution_root.join(path)`, the executor's own resolution
+                // (executors.rs), so this opens the file that would run.
+                let absolute = self.root.join(&script_path);
+                if let Err(error) = inferred_runtime(&absolute, runtime) {
+                    self.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+                if !absolute.is_file() {
+                    self.error = Some(format!(
+                        "Script file {} doesn't exist (resolved to {})",
+                        script_path,
+                        absolute.display()
+                    ));
+                    cx.notify();
+                    return;
+                }
+                absolute
+            }
+            ScriptSource::Inline { runtime, .. } => {
+                if runtime == ScriptRuntime::Dotnet {
+                    self.error =
+                        Some("Inline .NET scripts aren't supported; use File mode".to_string());
+                    cx.notify();
+                    return;
+                }
+                let (definition, _) = {
+                    let state = self.state.read(cx);
+                    workflow_json::save(
+                        &state,
+                        self.flow_id.clone(),
+                        self.flow_name.clone(),
+                        &self.flow_preserved,
+                    )
+                };
+                let path = match script_companion::companion_path(&self.path, &action_path, runtime)
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                };
+                // Write the inspector's code through to the companion rather
+                // than creating it once and never touching it again, which is
+                // what made an inline edit vanish on the next save. A
+                // companion edited outside this panel in the meantime is a
+                // conflict, not something to overwrite.
+                if let Err(error) = script_companion::write_through(
+                    &definition,
+                    &self.path,
+                    &action_path,
+                    &mut self.script_sync,
+                ) {
+                    self.error = Some(format!("Couldn't sync script companion: {error}"));
+                    cx.notify();
+                    return;
+                }
+                path
+            }
+        };
+
+        if self
+            .project
+            .read(cx)
+            .project_path_for_absolute_path(&path, cx)
+            .is_none()
+        {
+            self.error = Some(format!(
+                "{} isn't inside an open project, so it can't be opened in an editor",
+                path.display()
+            ));
+            cx.notify();
+            return;
+        }
+
+        self.error = None;
+        self.status = Some(format!("Opening {}", path.display()));
+        window.dispatch_action(Box::new(ViewScriptCompanion(path)), cx);
+        cx.notify();
+    }
+
+    /// Opens the selected `http` action's request body as its own JSON editor
+    /// tab, materializing the companion on first use.
+    ///
+    /// The inspector's `body` row stays editable and stays the source of truth;
+    /// this button is how you get a real JSON editor for it, with the body and
+    /// action schemas applied. Mirrors [`Self::on_open_script_click`]: the
+    /// inspector's current body is written through first, so a companion
+    /// edited out of band since the last sync is reported as a conflict rather
+    /// than silently overwritten.
+    fn on_edit_body_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node_id) = self.selected_node_id.as_ref().map(|id| id.to_string()) else {
+            return;
+        };
+        let action_path = {
+            let state = self.state.read(cx);
+            let (definition, _) = workflow_json::save(
+                &state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            );
+            let Some(action_path) =
+                script_companion::action_path_for_node(&definition, &state, &node_id)
+            else {
+                self.error = Some(format!("Couldn't resolve HTTP action {node_id}"));
+                cx.notify();
+                return;
+            };
+            // `body` is a plain `FieldKind::Json` input, so it holds no
+            // canonical form to compare — but its presence is what makes this
+            // action body-bearing at all (it's optional for GET/DELETE).
+            if http_companion::body_text_for_action_path(&definition, &action_path).is_none() {
+                self.error = Some(format!("HTTP action {node_id} has no body input"));
+                cx.notify();
+                return;
+            }
+            action_path
+        };
+
+        let path = match http_companion::companion_path(&self.path, &action_path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+
+        // A body that isn't valid JSON has no canonical form, but it is still
+        // the user's work. `write_through` round-trips malformed text verbatim,
+        // so writing it unconditionally hands it over as-is instead of losing
+        // it to a parse failure (and leaves a real file behind to open).
+        let (definition, _) = {
+            let state = self.state.read(cx);
+            workflow_json::save(
+                &state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            )
+        };
+        if let Err(error) = http_companion::write_through(
+            &definition,
+            &self.path,
+            &action_path,
+            &mut self.body_sync,
+        ) {
+            self.error = Some(format!("Couldn't sync request body companion: {error}"));
+            cx.notify();
+            return;
+        }
+
+        if self
+            .project
+            .read(cx)
+            .project_path_for_absolute_path(&path, cx)
+            .is_none()
+        {
+            self.error = Some(format!(
+                "{} isn't inside an open project, so it can't be opened in an editor",
+                path.display()
+            ));
+            cx.notify();
+            return;
+        }
+
+        self.error = None;
+        self.status = Some(format!("Opening {}", path.display()));
+        window.dispatch_action(Box::new(ViewHttpBody(path)), cx);
+        cx.notify();
+    }
+
+    /// Re-runs `validate_definition` over the current canvas state and
+    /// stores the result in `self.validation_issues`. Called after every
+    /// load, save, and property edit — cheap enough to call synchronously
+    /// (it is a pure in-memory traversal of the action tree).
+    fn revalidate(&mut self, cx: &mut Context<Self>) {
+        let (def, _) = {
+            let state = self.state.read(cx);
+            workflow_json::save(
+                &state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            )
+        };
+        self.validation_issues = validate_definition(&def);
+        self.apply_validation_borders(cx);
+        cx.notify();
+    }
+
+    /// Mirrors `self.validation_issues` onto the canvas as
+    /// `FlowNode::validation_error`, so a broken node is visibly broken
+    /// instead of only being discoverable by selecting it and reading the
+    /// inspector.
+    ///
+    /// A whole-list rewrite rather than a diff, because the issue list is
+    /// recomputed from scratch on every keystroke anyway and a node's
+    /// *un*-flagging is the case that matters most — a stale red ring the user
+    /// can't clear is worse than one they have to wait a frame for.
+    fn apply_validation_borders(&mut self, cx: &mut Context<Self>) {
+        let flagged: Vec<String> = self
+            .validation_issues
+            .iter()
+            .filter(|issue| issue.severity == ValidationSeverity::Error)
+            .map(|issue| issue.node_path.clone())
+            .collect();
+        self.state.update(cx, |state, cx| {
+            for node in &mut state.nodes {
+                // `node_path` uses the same prefix convention as the node ids
+                // `WorkflowLayout` is keyed by, so a node is flagged when its
+                // own id is a path prefix of the issue's path — that's what
+                // makes a *container* light up for an error on something
+                // nested three levels inside it.
+                node.validation_error = flagged
+                    .iter()
+                    .any(|path| Self::issue_targets_node(path, node.id.as_ref()));
+            }
+            cx.notify();
+        });
+    }
+
+    /// Whether an issue at `issue_path` should mark the node `node_id`.
+    ///
+    /// The two strings are *not* in the same frame, which is the whole subtlety
+    /// here. A node's own id is bare (`a1`), while the path an issue is
+    /// reported at carries the full ancestor chain (`foreach-1/if-1/then/a1`) —
+    /// the same `{prefix}{id}` convention `workflow_json::build_actions_map`
+    /// uses for its layout keys. So equality never works for a nested action,
+    /// and the match has to be "does this id appear *anywhere* along the
+    /// chain", which covers all three positions at once:
+    ///
+    /// - last segment → the issue is *on* this action;
+    /// - first segment → the issue is inside this container;
+    /// - a middle segment → the issue is inside a container nested in this one.
+    ///
+    /// Flagging ancestors is deliberate: an error buried in a container body
+    /// isn't visible from the canvas, so the nearest enclosing container the
+    /// user can actually see has to light up too.
+    ///
+    /// Matching a bare segment is safe against false positives because node ids
+    /// are globally unique on the canvas and contain no `/` —
+    /// `push_action_node` suffixes `type_id-N` until `FlowState::get_node`
+    /// misses, so no id can straddle or imitate a path boundary.
+    ///
+    /// A flow-level issue (empty `node_path` — a `runAfter` cycle or dangling
+    /// reference, which `validate_definition` attributes to the definition
+    /// root) flags nothing, because there is no node to flag. It stays
+    /// reachable through the issues overlay instead.
+    fn issue_targets_node(issue_path: &str, node_id: &str) -> bool {
+        if issue_path.is_empty() {
+            return false;
+        }
+        issue_path.split('/').any(|segment| segment == node_id)
+    }
+
+    fn on_save_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (mut def, layout) = {
+            let state = self.state.read(cx);
+            workflow_json::save(
+                state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            )
+        };
+        if let Err(error) = self.sync_scripts(&mut def, window, cx) {
+            self.error = Some(format!("Couldn't sync script companion: {error}"));
+            cx.notify();
+            return;
+        }
+        if let Err(error) = self.sync_bodies(&mut def, window, cx) {
+            self.error = Some(format!("Couldn't sync request body companion: {error}"));
+            cx.notify();
+            return;
+        }
         let json = match serde_json::to_string_pretty(&def) {
             Ok(json) => json,
             Err(e) => {
@@ -805,17 +1856,32 @@ impl DesignerPanel {
         }
         self.error = None;
         self.status = Some("Saved".to_string());
-        cx.notify();
+        self.revalidate(cx);
     }
 
     fn on_run_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.running {
             return;
         }
-        let (def, _layout) = {
+        let (mut def, _layout) = {
             let state = self.state.read(cx);
-            workflow_json::save(state, self.flow_id.clone(), self.flow_name.clone())
+            workflow_json::save(
+                state,
+                self.flow_id.clone(),
+                self.flow_name.clone(),
+                &self.flow_preserved,
+            )
         };
+        if let Err(error) = self.sync_scripts(&mut def, window, cx) {
+            self.error = Some(format!("Couldn't sync script companion: {error}"));
+            cx.notify();
+            return;
+        }
+        if let Err(error) = self.sync_bodies(&mut def, window, cx) {
+            self.error = Some(format!("Couldn't sync request body companion: {error}"));
+            cx.notify();
+            return;
+        }
 
         let mut action_meta = HashMap::new();
         collect_action_meta(&def.actions, &mut action_meta);
@@ -967,7 +2033,11 @@ impl DesignerPanel {
                     RunPhase::Failed => Some(danger_hex),
                     RunPhase::Skipped => None,
                 };
-                if let Some(node) = state.nodes.iter_mut().find(|n| n.id.as_ref() == id.as_str()) {
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|n| n.id.as_ref() == id.as_str())
+                {
                     if node.accent_border != color {
                         node.accent_border = color;
                     }
@@ -1080,26 +2150,175 @@ impl DesignerPanel {
         });
     }
 
+    /// Brings the node an issue was reported against into view: selects it
+    /// (which the inspector follows) and centers the viewport on it.
+    ///
+    /// Selecting alone isn't enough — the offending node may well be scrolled
+    /// or panned off-screen, in which case "click the error" appears to do
+    /// nothing. The centering uses the *laid-out* canvas box rather than
+    /// `CANVAS_SIZE` for the same reason [`Self::canvas_center`] does: a
+    /// viewport centered on coordinates that assume a canvas which isn't the
+    /// size on screen lands the node in the wrong place.
+    fn reveal_node(&mut self, node_id: NodeId, cx: &mut Context<Self>) {
+        self.select_node(node_id.clone(), cx);
+        let bounds = self.flow.read(cx).panel_bounds();
+        let width = bounds.size.width;
+        let height = bounds.size.height;
+        let container = (width > px(0.0) && height > px(0.0))
+            .then(|| (width.as_f32(), height.as_f32()))
+            .unwrap_or(CANVAS_SIZE);
+        self.state.update(cx, |state, cx| {
+            // `absolute_position` resolves any parent chain, so a node nested
+            // inside a container is centered where it's actually drawn rather
+            // than at its parent-relative coordinates.
+            let point = state.absolute_position(&node_id).unwrap_or_default();
+            state.set_center(point.x, point.y, container.0, container.1);
+            cx.notify();
+        });
+    }
+
+    /// Adds `type_id` at the last right-click's spot: below the node that was
+    /// clicked if there was one (also connecting from it), otherwise at the
+    /// click's own canvas position. This is the pre-existing quick-add
+    /// gesture, preserved unchanged; it now shares
+    /// [`Self::push_action_node`] with the catalog so all three entry points
+    /// build identical nodes.
     fn add_action(&mut self, type_id: &'static str, cx: &mut Context<Self>) {
         let context = self.context_target.borrow().clone();
-        let (position, parent_id, source_id) = {
+        let anchor = {
             let state = self.state.read(cx);
-            match context.node_id.as_ref().and_then(|id| state.get_node(id)) {
-                Some(source) => {
-                    let height = if state.is_container(&source.id) {
-                        source.container_size.map(|(_, height)| height).unwrap_or(220.0)
-                    } else {
-                        workflow_json::LEAF_SIZE.1
-                    };
-                    (
-                        FlowPoint::new(source.position.x, source.position.y + height + 30.0),
-                        source.parent_id.clone(),
-                        Some(source.id.clone()),
-                    )
-                }
-                None => (context.position, None, None),
+            context
+                .node_id
+                .as_ref()
+                .and_then(|id| state.get_node(id))
+                .map(|source| Self::below_node(state, source))
+        };
+        let anchor = anchor.unwrap_or(ActionAnchor {
+            position: context.position,
+            parent_id: None,
+            source_id: None,
+        });
+        self.push_action_node(type_id, anchor, cx);
+    }
+
+    /// Adds `type_id` from the catalog, where there is no right-click
+    /// position to work from.
+    ///
+    /// `at` is `Some` for a drag-and-drop and places the node exactly there,
+    /// nesting into whatever container the user dropped onto. `at` is `None`
+    /// for click-to-add and Enter-to-add, which anchor below the current
+    /// selection and fall back to the canvas' center, so a flow's very first
+    /// action lands in view rather than off at the world origin.
+    ///
+    /// Either way the new node ends up selected, so its inspector opens
+    /// ready for the required inputs the registry declares.
+    fn add_action_at(
+        &mut self,
+        type_id: &'static str,
+        at: Option<FlowPoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = match at {
+            Some(position) => self.container_at(position, cx).unwrap_or(ActionAnchor {
+                position,
+                parent_id: None,
+                source_id: None,
+            }),
+            None => {
+                let below_selection = {
+                    let state = self.state.read(cx);
+                    state
+                        .nodes
+                        .iter()
+                        .find(|node| node.selected)
+                        .map(|source| Self::below_node(state, source))
+                };
+                below_selection.unwrap_or(ActionAnchor {
+                    position: self.canvas_center(cx),
+                    parent_id: None,
+                    source_id: None,
+                })
             }
         };
+        self.push_action_node(type_id, anchor, cx);
+    }
+
+    /// The flow-space spot, owning container, and upstream node for a new
+    /// action added below `source`: directly beneath its footprint, inside
+    /// the same container, and connected from it.
+    fn below_node(state: &FlowState, source: &FlowNode) -> ActionAnchor {
+        let height = if state.is_container(&source.id) {
+            source
+                .container_size
+                .map(|(_, height)| height)
+                .unwrap_or(220.0)
+        } else {
+            workflow_json::LEAF_SIZE.1
+        };
+        ActionAnchor {
+            position: FlowPoint::new(source.position.x, source.position.y + height + 30.0),
+            parent_id: source.parent_id.clone(),
+            source_id: Some(source.id.clone()),
+        }
+    }
+
+    /// The flow-space center of the visible canvas, the default insertion
+    /// point when nothing is selected. Read back off `FlowGraph`'s laid-out
+    /// box so it tracks the pane's real size — the hardcoded `CANVAS_SIZE`
+    /// that `fit_view` and auto-layout use is a layout hint, not a claim
+    /// about how much canvas is actually on screen.
+    fn canvas_center(&self, cx: &App) -> FlowPoint {
+        let bounds = self.flow.read(cx).panel_bounds();
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            // Not laid out yet (first frame) — the origin beats dividing by an
+            // empty rect.
+            return FlowPoint::new(0.0, 0.0);
+        }
+        let viewport = self.state.read(cx).viewport;
+        self.flow.read(cx).flow_point_at(
+            Point::new(
+                bounds.origin.x + bounds.size.width / 2.0,
+                bounds.origin.y + bounds.size.height / 2.0,
+            ),
+            viewport,
+        )
+    }
+
+    /// The deepest container enclosing `position`, so a drop lands *inside*
+    /// the container the user aimed at rather than on top of it. `None` for
+    /// open canvas. Walks up from whatever node is under the point, so
+    /// dropping onto a child of a container still nests in that container.
+    fn container_at(&self, position: FlowPoint, cx: &App) -> Option<ActionAnchor> {
+        let state = self.state.read(cx);
+        let under = state.node_at_flow((position.x, position.y))?;
+        let mut current = state.get_node(&under);
+        while let Some(node) = current {
+            if state.is_container(&node.id) {
+                return Some(ActionAnchor {
+                    position,
+                    parent_id: Some(node.id.clone()),
+                    source_id: None,
+                });
+            }
+            current = node.parent_id.as_ref().and_then(|id| state.get_node(id));
+        }
+        None
+    }
+
+    /// The single place a node is actually created, shared by right-click
+    /// quick-add, catalog click, and catalog drag-and-drop. Selects the new
+    /// node so its inspector opens, and returns its id.
+    fn push_action_node(
+        &mut self,
+        type_id: &'static str,
+        anchor: ActionAnchor,
+        cx: &mut Context<Self>,
+    ) -> NodeId {
+        let ActionAnchor {
+            position,
+            parent_id,
+            source_id,
+        } = anchor;
         let id = {
             let state = self.state.read(cx);
             let base = type_id.to_ascii_lowercase();
@@ -1112,14 +2331,10 @@ impl DesignerPanel {
                 index += 1;
             }
         };
-        let label = REGISTRY
-            .iter()
-            .find(|def| def.type_id == type_id)
-            .map(|def| def.label)
-            .unwrap_or(type_id);
-        let is_container = REGISTRY
-            .iter()
-            .any(|def| def.type_id == type_id && matches!(def.category, workflow_engine::ActionCategory::Container));
+        let def = REGISTRY.iter().find(|def| def.type_id == type_id);
+        let label = def.map(|def| def.label).unwrap_or(type_id);
+        let is_container = def
+            .is_some_and(|def| matches!(def.category, workflow_engine::ActionCategory::Container));
         let mut node = FlowNode::new(id.clone(), position.x, position.y)
             .node_type(type_id)
             .label(label)
@@ -1128,12 +2343,11 @@ impl DesignerPanel {
                 HandleDef::target(HandlePosition::Top),
                 HandleDef::source(HandlePosition::Bottom),
             ]);
-        if let Some(parent_id) = parent_id {
-            node = node.parent(parent_id);
-        }
         if !is_container {
             node = node.size(workflow_json::LEAF_SIZE.0, workflow_json::LEAF_SIZE.1);
         }
+        node.properties = workflow_json::default_properties_for_type(type_id);
+        let node_id: NodeId = id.clone().into();
         self.state.update(cx, |state, cx| {
             state.push_undo();
             state.nodes.push(node);
@@ -1144,14 +2358,26 @@ impl DesignerPanel {
                     id.clone(),
                 ));
             }
+            // Nest *after* insertion, via `set_parent`, rather than building
+            // the node with a parent: `position` was computed in absolute
+            // flow space (it's a cursor position, or sits below a node that
+            // may itself be nested), and `set_parent` is what re-expresses it
+            // relative to the new parent. Building the node pre-parented
+            // would misplace it by the container's own origin — the same
+            // jump `set_parent`'s doc comment exists to prevent.
+            if let Some(parent_id) = parent_id {
+                state.set_parent(&node_id, Some(parent_id));
+            }
             state.rebuild_lookup();
             cx.notify();
         });
-        cx.notify();
+        self.select_node(node_id.clone(), cx);
+        node_id
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let run_state_has_results = !self.run_snapshot.log.is_empty() || !self.run_snapshot.nodes.is_empty();
+        let run_state_has_results =
+            !self.run_snapshot.log.is_empty() || !self.run_snapshot.nodes.is_empty();
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -1194,7 +2420,9 @@ impl DesignerPanel {
                                 } else {
                                     "Show the run log"
                                 })
-                                .on_click(cx.listener(|this, _, _, cx| this.on_toggle_log_click(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.on_toggle_log_click(cx)),
+                                ),
                         )
                         .child(
                             Button::new("designer-open-results")
@@ -1203,7 +2431,10 @@ impl DesignerPanel {
                                 .icon(IconName::ChartPie)
                                 .tooltip("Open the run results in a new tab")
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    window.dispatch_action(Box::new(ViewRunResults(this.path.clone())), cx);
+                                    window.dispatch_action(
+                                        Box::new(ViewRunResults(this.path.clone())),
+                                        cx,
+                                    );
                                 })),
                         )
                         .child(
@@ -1212,7 +2443,9 @@ impl DesignerPanel {
                                 .xsmall()
                                 .icon(IconName::Close)
                                 .tooltip("Clear run results and status colors")
-                                .on_click(cx.listener(|this, _, _, cx| this.on_clear_results_click(cx)))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.on_clear_results_click(cx)),
+                                ),
                         )
                     })
                     .when_some(self.running_action(), |el, run| {
@@ -1231,7 +2464,12 @@ impl DesignerPanel {
                         )
                     })
                     .when_some(self.status.clone(), |el, status| {
-                        el.child(div().text_xs().text_color(cx.theme().muted_foreground).child(status))
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(status),
+                        )
                     })
                     .child(
                         Button::new("designer-fit-view")
@@ -1245,18 +2483,43 @@ impl DesignerPanel {
                             .ghost()
                             .xsmall()
                             .label("Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.on_save_click(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.on_save_click(window, cx)),
+                            ),
                     )
                     .child(if self.running {
                         Spinner::new().xsmall().into_any_element()
                     } else {
-                        Button::new("designer-run")
+                        let error_count = self
+                            .validation_issues
+                            .iter()
+                            .filter(|i| i.severity == ValidationSeverity::Error)
+                            .count();
+                        let blocked = error_count > 0;
+                        let run_btn = Button::new("designer-run")
                             .primary()
                             .xsmall()
                             .icon(IconName::Play)
                             .label("Run")
-                            .on_click(cx.listener(|this, _, window, cx| this.on_run_click(window, cx)))
-                            .into_any_element()
+                            .disabled(blocked)
+                            .tooltip(if blocked {
+                                "Fix validation errors before running"
+                            } else {
+                                "Run this workflow"
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.on_run_click(window, cx)),
+                            );
+                        if blocked {
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(run_btn)
+                                .child(self.render_issues_badge(error_count, cx))
+                                .into_any_element()
+                        } else {
+                            run_btn.into_any_element()
+                        }
                     })
                     .child(
                         Button::new("designer-view-raw")
@@ -1269,6 +2532,157 @@ impl DesignerPanel {
                             })),
                     ),
             )
+    }
+
+    /// The clickable "N errors" badge, and the popover it opens.
+    ///
+    /// This exists because the count alone was unactionable: Run is disabled,
+    /// the badge says "2 errors", and the only place the messages were rendered
+    /// was the inspector for whichever node happened to be selected — so
+    /// flow-level issues (`node_path == ""`: a `runAfter` cycle or a dangling
+    /// reference) matched no node and were shown *nowhere at all*.
+    ///
+    /// Every issue gets a row here, so the overlay is the one place the full
+    /// list is guaranteed visible. A row that names a node selects it and pans
+    /// it into view; a flow-level row says so instead of pretending to point
+    /// somewhere.
+    fn render_issues_badge(&self, error_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        Popover::new("designer-issues-popover")
+            .open(self.show_issues)
+            .on_open_change(move |open, _, cx| {
+                // Covers the dismissals the trigger click doesn't drive:
+                // clicking outside, or Escape.
+                entity.update(cx, |this, cx| {
+                    this.show_issues = *open;
+                    cx.notify();
+                });
+            })
+            .trigger(
+                Button::new("designer-issues-badge")
+                    .danger()
+                    .outline()
+                    .xsmall()
+                    .label(format!(
+                        "{error_count} error{} \u{25be}",
+                        if error_count == 1 { "" } else { "s" }
+                    ))
+                    .tooltip("Show what's blocking Run")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_issues = !this.show_issues;
+                        cx.notify();
+                    })),
+            )
+            .child(self.render_issues_overlay(cx))
+    }
+
+    /// The popover body: one row per issue, errors first, each naming the node
+    /// it belongs to and clickable to reveal it.
+    fn render_issues_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Errors before warnings, then by node path so the order is stable
+        // across re-renders (issue order follows the action tree, which the
+        // user can reshuffle by editing, and a list that reorders under the
+        // cursor while they're clicking through it is unusable).
+        let mut issues: Vec<&ValidationIssue> = self.validation_issues.iter().collect();
+        issues.sort_by_key(|issue| {
+            (
+                match issue.severity {
+                    ValidationSeverity::Error => 0,
+                    ValidationSeverity::Warning => 1,
+                },
+                issue.node_path.clone(),
+                issue.field.clone(),
+            )
+        });
+
+        if issues.is_empty() {
+            return div()
+                .p_3()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("No validation issues.")
+                .into_any_element();
+        }
+
+        v_flex()
+            .id("designer-issues-list")
+            .w(px(420.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .gap_0p5()
+            .p_1()
+            .children(issues.into_iter().map(|issue| {
+                let is_error = issue.severity == ValidationSeverity::Error;
+                let color = if is_error {
+                    cx.theme().danger
+                } else {
+                    cx.theme().warning
+                };
+                let (icon, subject) = if issue.node_path.is_empty() {
+                    ("\u{26a0}", "Workflow".to_string())
+                } else {
+                    ("\u{25cf}", issue.node_path.clone())
+                };
+                // A flow-level issue has no node to jump to, so its row is
+                // rendered flat rather than clickable — an affordance that
+                // silently does nothing is worse than no affordance.
+                let target: Option<NodeId> = if issue.node_path.is_empty() {
+                    None
+                } else {
+                    Some(issue.node_path.as_str().into())
+                };
+                let row_target = target.clone();
+                // The row id has to be a 2-tuple at most (`ElementId` has no
+                // 3-tuple impl), so the field is folded into the string key
+                // rather than kept as a separate tuple element.
+                let row_id = format!(
+                    "designer-issue:{}:{}",
+                    issue.node_path,
+                    issue.field.as_deref().unwrap_or("")
+                );
+                // `Div::hover` takes only a `StyleRefinement` (no `cx`), so the
+                // theme has to be sampled out here rather than read inside.
+                let hover_bg = cx.theme().accent;
+                let hover_border = cx.theme().border;
+                h_flex()
+                    .id(row_id)
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_sm()
+                    .when(target.is_some(), |el| {
+                        el.cursor_pointer().hover(move |style| {
+                            style.bg(hover_bg).border_1().border_color(hover_border)
+                        })
+                    })
+                    .when(target.is_some(), |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(node_id) = &row_target {
+                                this.reveal_node(node_id.clone(), cx);
+                            }
+                            this.show_issues = false;
+                            cx.notify();
+                        }))
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color)
+                            .child(format!("{icon} {subject}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(cx.theme().foreground)
+                            // `field` is already folded into `message` by the
+                            // validator, so it isn't repeated here.
+                            .child(issue.message.clone()),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn render_properties(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1287,6 +2701,49 @@ impl DesignerPanel {
             .and_then(|n| n.node_type.clone())
             .unwrap_or_default();
 
+        // Collect issues belonging to this node (any nesting depth: the leaf
+        // id segment is always the node_id, so we match on suffix).
+        let node_id_str = node_id.as_ref();
+        let node_issues: Vec<&ValidationIssue> = self
+            .validation_issues
+            .iter()
+            .filter(|i| {
+                i.node_path == node_id_str || i.node_path.ends_with(&format!("/{node_id_str}"))
+            })
+            .collect();
+
+        let node_level_issues: Vec<&ValidationIssue> = node_issues
+            .iter()
+            .copied()
+            .filter(|i| i.field.is_none())
+            .collect();
+
+        // Synthetic branch node: no editable properties, no Delete. Resolve the
+        // owning action's label so the explanation names something the user
+        // can actually find on the canvas.
+        let is_branch_wrapper = is_branch_wrapper_type(type_id.as_ref());
+        let (label, owning_label, child_count) = if is_branch_wrapper {
+            let node_id = self
+                .selected_node_id
+                .as_ref()
+                .expect("rendered node has an id");
+            let state = self.state.read(cx);
+            // A wrapper's id is always `<owning action id><wrapper type id>`.
+            let owner_id = node_id
+                .as_ref()
+                .strip_suffix(type_id.as_ref())
+                .map(SharedString::from);
+            let owning = owner_id
+                .as_ref()
+                .and_then(|id| state.get_node(id))
+                .map(|n| n.label.to_string())
+                .unwrap_or_else(|| "container".to_string());
+            let child_count = state.children_of(node_id).len();
+            (branch_wrapper_label(type_id.as_ref()), owning, child_count)
+        } else {
+            ("", String::new(), 0)
+        };
+
         v_flex()
             .size_full()
             .gap_2()
@@ -1297,39 +2754,807 @@ impl DesignerPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{type_id} \u{00b7} {node_id}")),
             )
+            // Node-level validation issues (unregistered type, unrunnable, cycle, etc.)
+            .when(!node_level_issues.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .children(node_level_issues.iter().map(|issue| {
+                            let (color, prefix) = if issue.severity == ValidationSeverity::Error {
+                                (cx.theme().danger, "\u{2717} ") // ✗
+                            } else {
+                                (cx.theme().warning, "\u{26a0} ") // ⚠
+                            };
+                            div()
+                                .text_xs()
+                                .text_color(color)
+                                .child(format!("{prefix}{}", issue.message))
+                        })),
+                )
+            })
             .when_some(
                 self.run_snapshot.nodes.get(node_id.as_ref()).cloned(),
                 |el, run| el.child(self.render_run_result(&run, cx).into_any_element()),
             )
             .when_some(self.label_input.clone(), |el, input| {
-                el.child(labeled_field("Label", cx.theme().muted_foreground, Input::new(&input)))
+                el.child(labeled_field(
+                    "Label",
+                    cx.theme().muted_foreground,
+                    Input::new(&input),
+                ))
+            })
+            .when_some(self.get_selected_script_source(cx), |el, src| {
+                el.child(self.render_script_properties(&src, cx))
+            })
+            .when(type_id == "http", |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Request body"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "Edit the body as JSON in its own tab. The registry-derived \
+                                     schema and any .body.schema.json sidecar are applied there.",
+                                ),
+                        )
+                        .child(
+                            Button::new("designer-edit-body")
+                                .ghost()
+                                .xsmall()
+                                .label("Edit Body")
+                                .tooltip(
+                                    "Open this request body as a JSON file, with schema validation.",
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_edit_body_click(window, cx)
+                                })),
+                        ),
+                )
             })
             .child(div().h(gpui::px(1.0)).w_full().bg(cx.theme().border))
-            .children(self.property_rows.iter().map(|row| {
-                labeled_field(row.key.clone(), cx.theme().muted_foreground, Input::new(&row.value)).into_any_element()
-            }))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(Input::new(&self.new_prop_key).xsmall().w_24())
-                    .child(Input::new(&self.new_prop_value).xsmall().flex_1())
-                    .child(
-                        Button::new("designer-add-property")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, window, cx| this.on_add_property_click(window, cx))),
-                    ),
-            )
+            // A synthetic branch node has no `Action` to edit: its properties
+            // would be discarded on the next save, and Delete would wipe the
+            // real actions it groups. Show what it is and why instead.
+            .when(is_branch_wrapper, |el| {
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "This box is {label}, a canvas grouping for the actions inside it. \
+                                     It isn't a separate step in the flow, so it has no properties of \
+                                     its own and can't be deleted on its own. Edit or delete the \
+                                     actions inside it, or the {} that owns it.",
+                                    owning_label,
+                                )),
+                        )
+                        .child(
+                            div().text_xs().text_color(cx.theme().accent).child(format!(
+                                "{} action(s) inside",
+                                child_count
+                            )),
+                        ),
+                )
+            })
+            .when(!is_branch_wrapper, |el| {
+                el.children(self.property_rows.iter().map(|row| {
+                    // Collect field-level issues for this property key.
+                    let field_issues: Vec<&ValidationIssue> = node_issues
+                        .iter()
+                        .copied()
+                        .filter(|i| i.field.as_deref() == Some(row.key.as_ref()))
+                        .collect();
+                    let muted = cx.theme().muted_foreground;
+                    // A required field left empty is a field-level error in its
+                    // own right, so the user gets it next to the input rather
+                    // than only in the toolbar popover.
+                    let missing_required = row.required
+                        && row.value.read(cx).value().trim().is_empty();
+                    let field_el = v_flex()
+                        .gap_0p5()
+                        .child(self.render_property_label(row, muted, cx))
+                        .child(self.render_property_editor(row, cx))
+                        .when(!row.help.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(row.help.to_string()),
+                            )
+                        })
+                        // JSONLogic assistance: offer the outputs that are
+                        // actually in scope, so a `var` can be written without
+                        // guessing an action id.
+                        .when(row.kind == Some(FieldKind::Expression), |el| {
+                            el.child(self.render_expression_picker(row, cx))
+                        })
+                        .when(missing_required, |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().danger)
+                                    .child("\u{2717} This field is required"),
+                            )
+                        })
+                        .children(field_issues.iter().map(|issue| {
+                            let (color, prefix) = if issue.severity == ValidationSeverity::Error {
+                                (cx.theme().danger, "\u{2717} ")
+                            } else {
+                                (cx.theme().warning, "\u{26a0} ")
+                            };
+                            div()
+                                .text_xs()
+                                .text_color(color)
+                                .child(format!("{prefix}{}", issue.message))
+                        }));
+                    field_el.into_any_element()
+                }))
+            })
+            .when(!is_branch_wrapper, |el| {
+                el.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Input::new(&self.new_prop_key).xsmall().w_24())
+                        .child(Input::new(&self.new_prop_value).xsmall().flex_1())
+                        .child(
+                            Button::new("designer-add-property")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Plus)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_add_property_click(window, cx)
+                                })),
+                        ),
+                )
+            })
             .child(
                 Button::new("designer-delete-node")
                     .ghost()
                     .xsmall()
                     .icon(IconName::Delete)
                     .label("Delete Node")
+                    .when(is_branch_wrapper, |b| {
+                        b.disabled(true).tooltip(
+                            "This box only groups the actions inside it — delete one of those, \
+                             or the container that owns it.",
+                        )
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.on_delete_node_click(cx))),
             )
             .into_any_element()
+    }
+
+    /// A property row's label: the field name, a `*` when the registry marks
+    /// it required, and a muted type badge so the expected shape is legible
+    /// before the user starts typing.
+    fn render_property_label(
+        &self,
+        row: &PropertyRow,
+        muted: gpui::Hsla,
+        cx: &App,
+    ) -> impl IntoElement {
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(row.key.to_string())
+                    .when(row.required, |el| {
+                        el.child(div().text_xs().text_color(cx.theme().danger).child("*"))
+                    }),
+            )
+            .when_some(row.type_badge, |el, badge| {
+                el.child(div().text_xs().text_color(muted).opacity(0.7).child(badge))
+            })
+    }
+
+    /// The control for a property row, chosen by its declared `FieldKind`:
+    /// a `Switch` for `Bool`, a `NumberInput` for `Number`, a multi-line
+    /// `Textarea` for `Json`/`Expression`, and a single-line `Input`
+    /// otherwise (including undeclared extras).
+    ///
+    /// The `Switch` writes through [`PropertyRow::commit`] rather than
+    /// through an input event, because `set_value` deliberately doesn't emit
+    /// one — see `commit`'s doc comment.
+    fn render_property_editor(
+        &self,
+        row: &PropertyRow,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match row.kind {
+            Some(FieldKind::Bool) => {
+                let checked = row.value.read(cx).value().trim() == "true";
+                let commit = row.commit.clone();
+                let input = row.value.clone();
+                Switch::new(SharedString::from(format!("designer-prop-{}", row.key)))
+                    .checked(checked)
+                    .label(if checked { "Enabled" } else { "Disabled" })
+                    .on_click(cx.listener(move |this, next: &bool, window, cx| {
+                        let text = next.to_string();
+                        // Keep the backing input in step so a later read of the
+                        // row agrees with the toggle and with what we persist.
+                        input.update(cx, |input, cx| {
+                            input.set_value(text.clone(), window, cx);
+                        });
+                        commit(this, text, cx);
+                    }))
+                    .into_any_element()
+            }
+            Some(FieldKind::Number) => NumberInput::new(&row.value).xsmall().into_any_element(),
+            Some(FieldKind::Json) | Some(FieldKind::Expression) => {
+                match &row.textarea {
+                    Some(area) => Textarea::new(area).h(gpui::px(72.0)).into_any_element(),
+                    // Unreachable in practice: the builder always pairs a
+                    // `Json`/`Expression` row with a textarea. Fall back rather
+                    // than panic.
+                    None => Input::new(&row.value).into_any_element(),
+                }
+            }
+            _ => Input::new(&row.value).into_any_element(),
+        }
+    }
+
+    /// Collects the `<action_id>.<output>` paths an expression on `node_id`
+    /// could legally reference: every output of every action that is
+    /// guaranteed to have run first.
+    ///
+    /// "Guaranteed to have run first" is the real constraint — a JSONLogic
+    /// `var` against an action that may not have run yet resolves to null and
+    /// silently changes behavior, so offering only level-ordered predecessors
+    /// keeps the picker honest. Ordering comes from `compute_levels` over the
+    /// node's own scope's `runAfter` graph, and the output names from each
+    /// action's `ActionDef::outputs` — the same metadata the runtime fills
+    /// them from.
+    ///
+    /// Actions with no declared outputs (the four container types) contribute
+    /// nothing, which is correct: they set no state for a sibling to read.
+    fn expression_references(&self, node_id: &NodeId, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        let node_type = state
+            .get_node(node_id)
+            .and_then(|n| n.node_type.clone())
+            .unwrap_or_default();
+        if node_type.is_empty() || is_branch_wrapper_type(node_type.as_ref()) {
+            return Vec::new();
+        }
+        // The canvas draws `runAfter` as incoming arrows, so a node's
+        // dependencies are its incoming edge sources.
+        let incoming: Vec<String> = state
+            .edges
+            .iter()
+            .filter(|e| e.target == *node_id)
+            .map(|e| e.source.to_string())
+            .collect();
+
+        // Rebuild the scope's action map to hand the scheduler. Only top-level
+        // nodes: `runAfter` never crosses a nesting level (see `Action`'s doc
+        // comment), so a nested node's scope is the container body it sits in,
+        // which this pass deliberately doesn't model.
+        let mut scope: workflow_engine::ActionMap = Default::default();
+        for node in state
+            .nodes
+            .iter()
+            .filter(|n| n.parent_id.is_none() && n.id != *node_id)
+        {
+            let Some(node_type) = node.node_type.as_deref() else {
+                continue;
+            };
+            if is_branch_wrapper_type(node_type) {
+                continue;
+            }
+            let mut action = workflow_engine::Action::new(node_type);
+            action.run_after = incoming
+                .iter()
+                .filter(|dep| *dep == &node.id)
+                .map(|dep| (dep.clone(), vec![workflow_engine::RunOutcome::Succeeded]))
+                .collect();
+            scope.insert(node.id.to_string(), action);
+        }
+
+        let Ok(levels) = workflow_engine::scheduler::compute_levels(&scope) else {
+            return Vec::new();
+        };
+        // Everything in the scope that isn't the node itself is a candidate
+        // predecessor; the level structure only tells us it terminates, which
+        // is what we need to avoid offering a cycle participant.
+        let mut refs = Vec::new();
+        for level in &levels {
+            for id in level {
+                let Some(action) = scope.get(id) else {
+                    continue;
+                };
+                let Some(def) = workflow_engine::registry::find(&action.type_id) else {
+                    continue;
+                };
+                for output in def.outputs {
+                    refs.push(format!("{id}.{}", output.name));
+                }
+            }
+        }
+        // Stable order, no duplicates.
+        refs.sort();
+        refs.dedup();
+        refs
+    }
+
+    /// A row of clickable `{"var": "..."}` snippets for an `Expression`
+    /// field, built from the outputs of the actions that run before the
+    /// selected node (see [`Self::expression_references`]).
+    ///
+    /// Clicking one inserts the whole JSONLogic object at the cursor, so it
+    /// composes with whatever the user has already typed instead of replacing
+    /// it, and writes through [`PropertyRow::commit`] — `insert` is silent by
+    /// design, so without that the node's stored value would never change.
+    /// Both of a row's editors are updated, so this works whether the field is
+    /// being edited in the textarea or (after a re-selection) the single-line
+    /// input.
+    fn render_expression_picker(
+        &self,
+        row: &PropertyRow,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return div().into_any_element();
+        };
+        let refs = self.expression_references(&node_id, cx);
+        if refs.is_empty() {
+            return v_flex()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("No earlier action produces an output to reference here."),
+                )
+                .into_any_element();
+        }
+
+        let input = row.value.clone();
+        let textarea = row.textarea.clone();
+        let commit = row.commit.clone();
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Insert a reference:"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(refs.into_iter().map(|reference| {
+                        let snippet = format!("{{\"var\": \"{reference}\"}}");
+                        let input = input.clone();
+                        let textarea = textarea.clone();
+                        let commit = commit.clone();
+                        Button::new(SharedString::from(format!(
+                            "designer-var-{}-{reference}",
+                            row.key
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .label(reference)
+                        .tooltip(snippet.clone())
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                // Insert into whichever editor is live, then mirror
+                                // into the other so a later read agrees.
+                                if let Some(area) = &textarea {
+                                    area.update(cx, |area, cx| {
+                                        area.insert(snippet.clone(), window, cx);
+                                    });
+                                }
+                                input.update(cx, |input, cx| {
+                                    input.insert(snippet.clone(), window, cx);
+                                });
+                                // `insert` doesn't emit, so persist explicitly from
+                                // the resulting text.
+                                let new_text = match &textarea {
+                                    Some(area) => area.read(cx).value().to_string(),
+                                    None => input.read(cx).value().to_string(),
+                                };
+                                commit(this, new_text, cx);
+                            },
+                        ))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn get_selected_script_source(&self, cx: &App) -> Option<ScriptSource> {
+        let node_id = self.selected_node_id.as_ref()?;
+        let state = self.state.read(cx);
+        let node = state.get_node(node_id)?;
+        if node.node_type.as_deref() != Some("script") {
+            return None;
+        }
+        let (_, source_val) = node
+            .properties
+            .iter()
+            .find(|(k, _)| k.as_ref() == "source")?;
+        serde_json::from_str(source_val.as_ref()).ok()
+    }
+
+    fn set_selected_script_source(
+        &mut self,
+        source: ScriptSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node_id) = self.selected_node_id.clone() else {
+            return;
+        };
+        let serialized: SharedString = match serde_json::to_string(&source) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                self.error = Some(format!("Failed to serialize script source: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.clear_run_marker(&node_id, cx);
+        self.state.update(cx, |state, cx| {
+            if let Some(n) = state.get_node_mut(&node_id) {
+                if let Some(prop) = n
+                    .properties
+                    .iter_mut()
+                    .find(|(k, _)| k.as_ref() == "source")
+                {
+                    prop.1 = serialized.clone();
+                } else {
+                    n.properties.push(("source".into(), serialized.clone()));
+                }
+            }
+            cx.notify();
+        });
+
+        match &source {
+            ScriptSource::File { path, .. } => {
+                let path_str = path.clone();
+                let file_input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .default_value(path_str)
+                        .placeholder("path/to/script.py")
+                });
+                let nid = node_id.clone();
+                let state = self.state.clone();
+                let _sub = cx.subscribe(&file_input, move |this, input, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let new_path = input.read(cx).value().trim().to_string();
+                        this.clear_run_marker(&nid, cx);
+                        state.update(cx, |state, cx| {
+                            if let Some(n) = state.get_node_mut(&nid) {
+                                if let Some(prop) = n
+                                    .properties
+                                    .iter_mut()
+                                    .find(|(k, _)| k.as_ref() == "source")
+                                {
+                                    if let Ok(mut src) =
+                                        serde_json::from_str::<ScriptSource>(prop.1.as_ref())
+                                    {
+                                        if let ScriptSource::File { ref mut path, .. } = src {
+                                            *path = new_path;
+                                            if let Ok(val) = serde_json::to_string(&src) {
+                                                prop.1 = val.into();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                });
+                self.script_file_input = Some(file_input);
+                self._script_file_sub = Some(_sub);
+            }
+            ScriptSource::Inline { .. } => {
+                self.script_file_input = None;
+                self._script_file_sub = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_script_mode_change(
+        &mut self,
+        to_file: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_source) = self.get_selected_script_source(cx) else {
+            return;
+        };
+        let Some(node_id) = self.selected_node_id.as_ref().map(|id| id.to_string()) else {
+            return;
+        };
+
+        if to_file {
+            match current_source {
+                ScriptSource::Inline { runtime, code } => {
+                    let ext = runtime.extension();
+                    let relative_path = format!("scripts/{node_id}.{ext}");
+                    let target_path = self.root.join(&relative_path);
+                    if !target_path.exists() {
+                        if let Some(parent) = target_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&target_path, &code);
+                    }
+                    self.error = None;
+                    self.set_selected_script_source(
+                        ScriptSource::File {
+                            path: relative_path,
+                            runtime: None,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                ScriptSource::File { .. } => {}
+            }
+        } else {
+            match current_source {
+                ScriptSource::File { path, runtime } => {
+                    let target_path = self.root.join(&path);
+                    let inferred = match inferred_runtime(&target_path, runtime) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.error = Some(e);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    if inferred == ScriptRuntime::Dotnet {
+                        self.error = Some(
+                            "Inline mode does not support .NET scripts; .NET is file-only"
+                                .to_string(),
+                        );
+                        cx.notify();
+                        return;
+                    }
+                    let code = std::fs::read_to_string(&target_path)
+                        .unwrap_or_else(|_| workflow_json::DEFAULT_SCRIPT_CODE.to_string());
+                    self.error = None;
+                    self.set_selected_script_source(
+                        ScriptSource::Inline {
+                            runtime: inferred,
+                            code,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                ScriptSource::Inline { .. } => {}
+            }
+        }
+    }
+
+    fn on_script_runtime_change(
+        &mut self,
+        new_runtime: ScriptRuntime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_source) = self.get_selected_script_source(cx) else {
+            return;
+        };
+        match current_source {
+            ScriptSource::Inline { code, .. } => {
+                if new_runtime == ScriptRuntime::Dotnet {
+                    self.error =
+                        Some("Inline .NET scripts aren't supported; use File mode".to_string());
+                    cx.notify();
+                    return;
+                }
+                self.error = None;
+                self.set_selected_script_source(
+                    ScriptSource::Inline {
+                        runtime: new_runtime,
+                        code,
+                    },
+                    window,
+                    cx,
+                );
+            }
+            ScriptSource::File { path, .. } => {
+                self.error = None;
+                self.set_selected_script_source(
+                    ScriptSource::File {
+                        path,
+                        runtime: Some(new_runtime),
+                    },
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn on_script_runtime_override_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(current_source) = self.get_selected_script_source(cx) else {
+            return;
+        };
+        if let ScriptSource::File { path, .. } = current_source {
+            self.error = None;
+            self.set_selected_script_source(
+                ScriptSource::File {
+                    path,
+                    runtime: None,
+                },
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn render_script_properties(
+        &self,
+        source: &ScriptSource,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_inline = matches!(source, ScriptSource::Inline { .. });
+        let muted = cx.theme().muted_foreground;
+
+        v_flex()
+            .gap_2()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(muted).child("Mode"))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("script-mode-inline")
+                                    .xsmall()
+                                    .when(!is_inline, |btn| btn.ghost())
+                                    .when(is_inline, |btn| btn.outline())
+                                    .label("Inline")
+                                    .tooltip("Edit inline code with a workflow companion file")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_script_mode_change(false, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("script-mode-file")
+                                    .xsmall()
+                                    .when(is_inline, |btn| btn.ghost())
+                                    .when(!is_inline, |btn| btn.outline())
+                                    .label("File")
+                                    .tooltip("Execute a workspace file directly")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_script_mode_change(true, window, cx)
+                                    })),
+                            ),
+                    ),
+            )
+            .when(is_inline, |el| {
+                let current_runtime = match source {
+                    ScriptSource::Inline { runtime, .. } => *runtime,
+                    _ => ScriptRuntime::Python,
+                };
+                let runtimes = [
+                    (ScriptRuntime::Python, "Python"),
+                    (ScriptRuntime::Node, "Node"),
+                    (ScriptRuntime::Powershell, "PowerShell"),
+                    (ScriptRuntime::Bash, "Bash"),
+                ];
+
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_xs().text_color(muted).child("Language"))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .children(runtimes.into_iter().map(|(rt, label)| {
+                                    let is_active = current_runtime == rt;
+                                    Button::new(format!("script-rt-{}", label.to_ascii_lowercase()))
+                                        .xsmall()
+                                        .when(!is_active, |btn| btn.ghost())
+                                        .when(is_active, |btn| btn.outline())
+                                        .label(label)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.on_script_runtime_change(rt, window, cx);
+                                        }))
+                                        .into_any_element()
+                                })),
+                        ),
+                )
+            })
+            .when(!is_inline, |el| {
+                let (path_str, override_rt) = match source {
+                    ScriptSource::File { path, runtime } => (path.as_str(), *runtime),
+                    _ => ("", None),
+                };
+                let inferred_text = {
+                    let abs = self.root.join(path_str);
+                    match inferred_runtime(&abs, override_rt) {
+                        Ok(rt) => match override_rt {
+                            Some(_) => format!("Override: {:?}", rt),
+                            None => format!("Inferred from extension: {:?}", rt),
+                        },
+                        Err(err) => err,
+                    }
+                };
+
+                let override_options = [
+                    (None, "Auto"),
+                    (Some(ScriptRuntime::Python), "Python"),
+                    (Some(ScriptRuntime::Node), "Node"),
+                    (Some(ScriptRuntime::Powershell), "PowerShell"),
+                    (Some(ScriptRuntime::Bash), "Bash"),
+                    (Some(ScriptRuntime::Dotnet), ".NET"),
+                ];
+
+                el.child(
+                    v_flex()
+                        .gap_2()
+                        .when_some(self.script_file_input.clone(), |el, input| {
+                            el.child(labeled_field("File Path", muted, Input::new(&input)))
+                        })
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_xs().text_color(muted).child("Runtime"))
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .flex_wrap()
+                                        .children(override_options.into_iter().map(|(opt, label)| {
+                                            let is_active = override_rt == opt;
+                                            Button::new(format!("script-ovr-{}", label.to_ascii_lowercase()))
+                                                .xsmall()
+                                                .when(!is_active, |btn| btn.ghost())
+                                                .when(is_active, |btn| btn.outline())
+                                                .label(label)
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    if let Some(rt) = opt {
+                                                        this.on_script_runtime_change(rt, window, cx);
+                                                    } else {
+                                                        this.on_script_runtime_override_clear(window, cx);
+                                                    }
+                                                }))
+                                                .into_any_element()
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(inferred_text),
+                        ),
+                )
+            })
+            .child(
+                Button::new("designer-open-script")
+                    .ghost()
+                    .xsmall()
+                    .label("Open Script")
+                    .tooltip("Edit this script in a workspace file: the companion for an Inline script, or the file itself for a File script.")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.on_open_script_click(window, cx)
+                    })),
+            )
     }
 }
 
@@ -1339,7 +3564,11 @@ impl Drop for DesignerPanel {
     }
 }
 
-fn labeled_field(label: impl Into<SharedString>, muted: gpui::Hsla, input: Input) -> impl IntoElement {
+fn labeled_field(
+    label: impl Into<SharedString>,
+    muted: gpui::Hsla,
+    input: Input,
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(div().text_xs().text_color(muted).child(label.into()))
@@ -1351,7 +3580,10 @@ fn labeled_field(label: impl Into<SharedString>, muted: gpui::Hsla, input: Input
 /// [`ActionHistoryRecord`]'s `name`/`type` fields from a `StatusSink`
 /// callback, which only gets the bare id. Mirrors `flows_panel`'s own
 /// helper of the same shape.
-fn collect_action_meta(actions: &workflow_engine::ActionMap, out: &mut HashMap<String, (String, String)>) {
+fn collect_action_meta(
+    actions: &workflow_engine::ActionMap,
+    out: &mut HashMap<String, (String, String)>,
+) {
     for (id, action) in actions {
         let name = action.label.clone().unwrap_or_else(|| id.clone());
         out.insert(id.clone(), (name, action.type_id.clone()));
@@ -1542,9 +3774,7 @@ impl SerializableItem for DesignerPanel {
         let workspace_id = workspace.database_id()?;
         let path = self.path.to_string_lossy().into_owned();
         let db = persistence::DesignerDb::global(cx);
-        Some(cx.background_spawn(async move {
-            db.save_flow(item_id, workspace_id, path).await
-        }))
+        Some(cx.background_spawn(async move { db.save_flow(item_id, workspace_id, path).await }))
     }
 
     fn should_serialize(&self, _event: &Self::Event) -> bool {
@@ -1578,66 +3808,31 @@ impl Render for DesignerPanel {
                     .min_h_0()
                     .child(
                         div().flex_1().min_h_0().child(
-                            h_resizable("designer-split")
-                                .child(
-                                    resizable_panel().child(
-                                        div()
-                                            .relative()
-                                            .size_full()
-                                            .child(
-                                                div()
-                                                    .id("designer-flow-context")
-                                                    .size_full()
-                                                    .context_menu({
-                                                        let panel = cx.entity().downgrade();
-                                                        move |mut menu, window, cx| {
-                                                            let panel_for_actions = panel.clone();
-                                                            menu = menu.label("Add Action");
-                                                            menu.submenu(
-                                                                "Choose action type",
-                                                                window,
-                                                                cx,
-                                                                move |mut submenu, _window, _cx| {
-                                                                    for definition in REGISTRY {
-                                                                        let type_id = definition.type_id;
-                                                                        let panel = panel_for_actions.clone();
-                                                                        submenu = submenu.item(
-                                                                            PopupMenuItem::new(definition.label)
-                                                                                .on_click(move |_, _, cx| {
-                                                                                    let _ = panel.update(
-                                                                                        cx,
-                                                                                        |panel, cx| panel.add_action(type_id, cx),
-                                                                                    );
-                                                                                }),
-                                                                        );
-                                                                    }
-                                                                    submenu
-                                                                },
-                                                            )
-                                                        }
-                                                    })
-                                                    .child(self.flow.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom(gpui::px(16.0))
-                                                    .left(gpui::px(16.0))
-                                                    .child(self.controls.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom(gpui::px(16.0))
-                                                    .right(gpui::px(16.0))
-                                                    .child(self.minimap.clone()),
-                                            ),
-                                    ),
-                                )
+                            // Tuple id, not a bare string: the split's saved
+                            // sizes are keyed per-entity, and every flow tab is
+                            // its own `DesignerPanel`, so a shared `"split"`
+                            // id would have the tabs overwriting each other's
+                            // pane widths. Same convention `database_panel`
+                            // uses for its three-pane body split.
+                            h_resizable(("designer-body", cx.entity().entity_id()))
+                                // Catalog — fixed-ish, collapsible by dragging
+                                // its handle to the very edge.
                                 .child(
                                     resizable_panel()
-                                        .size(gpui::px(280.0))
-                                        .size_range(gpui::px(220.0)..gpui::px(420.0))
+                                        .size(px(240.0))
+                                        .size_range(px(180.0)..px(420.0))
+                                        .flex_none()
+                                        .child(self.render_catalog(cx)),
+                                )
+                                // Canvas — the flexible middle pane, bare
+                                // `resizable_panel()` so it absorbs the
+                                // remaining width.
+                                .child(resizable_panel().child(self.render_canvas(cx)))
+                                .child(
+                                    resizable_panel()
+                                        .size(px(280.0))
+                                        .size_range(px(220.0)..px(420.0))
+                                        .flex_none()
                                         .child(
                                             div()
                                                 .size_full()
@@ -1652,6 +3847,154 @@ impl Render for DesignerPanel {
                         el.child(self.render_run_log(cx).into_any_element())
                     }),
             )
+    }
+}
+
+impl DesignerPanel {
+    /// The left pane: a titled action catalog over
+    /// `catalog::CatalogDelegate`. Search, group headings, keyboard
+    /// navigation, and list semantics all come from the shared
+    /// `gpui_component` list widget.
+    fn render_catalog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (shown, total) = {
+            let delegate = self.catalog.read(cx).delegate();
+            (delegate.shown_count(), delegate.total_count())
+        };
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(catalog::header(cx, shown, total))
+            .child(
+                // `min_h_0` so the virtual list can shrink below its content
+                // height in a short window instead of pushing the canvas
+                // pane out of the split.
+                div().flex_1().min_h_0().child(
+                    List::new(&self.catalog)
+                        .search_placeholder("Search actions")
+                        .with_size(Size::Small),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The middle pane: the `gpui_flow` canvas, its zoom controls and minimap,
+    /// and the drag-and-drop target for catalog rows.
+    fn render_canvas(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .size_full()
+            .min_w_0()
+            .child(
+                div()
+                    .id("designer-flow-context")
+                    .size_full()
+                    // Bubble-phase mouse listener: `FlowGraph` never stops
+                    // propagation, so this fires for a drop anywhere over the
+                    // canvas even though the graph itself is the element under
+                    // the cursor.
+                    .on_drop::<catalog::CatalogDrag>(cx.listener(
+                        |this, drag: &catalog::CatalogDrag, window, cx| {
+                            let bounds = this.flow.read(cx).panel_bounds();
+                            let viewport = this.state.read(cx).viewport;
+                            // The drop point has to be read from the *window*,
+                            // since drag payloads carry no position of their
+                            // own, and the graph's own bounds don't include
+                            // the catalog/inspector panes around it.
+                            let position =
+                                catalog::drop_position(window.mouse_position(), bounds, viewport);
+                            this.add_action_at(drag.type_id, Some(position), cx);
+                        },
+                    ))
+                    .drag_over::<catalog::CatalogDrag>(|style, _drag, _window, cx| {
+                        // Outline the whole canvas while a catalog row is
+                        // over it: the drop lands wherever the cursor is, so
+                        // the feedback has to cover the whole surface rather
+                        // than one box.
+                        style.border_2().border_color(cx.theme().primary)
+                    })
+                    .context_menu({
+                        let panel = cx.entity().downgrade();
+                        move |menu, window, cx| {
+                            // Groups are built with `PopupMenu::build` rather
+                            // than `PopupMenu::submenu`'s builder sugar: that
+                            // builder is an `Fn`, so nesting one inside
+                            // another would have to move the outer builder's
+                            // borrowed `window`/`cx` into a closure that may
+                            // run more than once. `build` takes `FnOnce`, so
+                            // the grouping is buildable — just not through the
+                            // nested sugar. Plain `for` loops keep the
+                            // `window` reborrows in statement position.
+                            let mut groups = Vec::new();
+                            for section in catalog::build_sections() {
+                                let group = PopupMenu::build(window, cx, |mut group, _w, _c| {
+                                    for entry in section.entries {
+                                        let type_id = entry.type_id;
+                                        let runnable = entry.runnable;
+                                        // Not-runnable actions stay *visible*
+                                        // here, matching the catalog pane, but
+                                        // are disabled and annotated with the
+                                        // same `not_ready_reason` the pane's
+                                        // tooltip explains. A menu that silently
+                                        // omits them reads as "this Designer
+                                        // can't do that" rather than "this
+                                        // isn't built yet".
+                                        let label: SharedString = if runnable {
+                                            entry.label.clone()
+                                        } else {
+                                            format!(
+                                                "{} ({})",
+                                                entry.label,
+                                                catalog::not_ready_reason(type_id)
+                                            )
+                                            .into()
+                                        };
+                                        let panel = panel.clone();
+                                        group = group.item(
+                                            PopupMenuItem::new(label).disabled(!runnable).when(
+                                                runnable,
+                                                |item| {
+                                                    item.on_click(move |_, _, cx| {
+                                                        let _ = panel.update(cx, |panel, cx| {
+                                                            panel.add_action(type_id, cx)
+                                                        });
+                                                    })
+                                                },
+                                            ),
+                                        );
+                                    }
+                                    group
+                                });
+                                groups.push(PopupMenuItem::submenu(section.title.clone(), group));
+                            }
+                            let types = PopupMenu::build(window, cx, |mut types, _w, _c| {
+                                for group in groups {
+                                    types = types.item(group);
+                                }
+                                types
+                            });
+                            menu.label("Add Action")
+                                .item(PopupMenuItem::submenu("Choose action type", types))
+                        }
+                    })
+                    .child(self.flow.clone()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .left(px(16.0))
+                    .child(self.controls.clone()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .right(px(16.0))
+                    .child(self.minimap.clone()),
+            )
+            .into_any_element()
     }
 }
 
@@ -1684,7 +4027,9 @@ impl DesignerPanel {
                     .gap_1p5()
                     .items_center()
                     .child(tag.child(run.phase.label()))
-                    .when(run.phase == RunPhase::Running, |el| el.child(Spinner::new().xsmall()))
+                    .when(run.phase == RunPhase::Running, |el| {
+                        el.child(Spinner::new().xsmall())
+                    })
                     .when_some(run.elapsed(), |el, d| {
                         el.child(
                             div()
@@ -1759,7 +4104,9 @@ impl DesignerPanel {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{succeeded} ok \u{00b7} {failed} failed \u{00b7} {skipped} skipped")),
+                            .child(format!(
+                                "{succeeded} ok \u{00b7} {failed} failed \u{00b7} {skipped} skipped"
+                            )),
                     )
                     .child(
                         Button::new("designer-log-collapse")
@@ -1781,25 +4128,30 @@ impl DesignerPanel {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&mut self.log_scroll)
-                            .children(
-                                self.run_snapshot
-                                    .log
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, line)| self.render_log_row(i, line, cx).into_any_element()),
-                            ),
+                            .children(self.run_snapshot.log.iter().enumerate().map(|(i, line)| {
+                                self.render_log_row(i, line, cx).into_any_element()
+                            })),
                     )
                     .child(Scrollbar::vertical(&self.log_scroll)),
             )
     }
 
-    fn render_log_row(&self, index: usize, line: &RunLogLine, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_log_row(
+        &self,
+        index: usize,
+        line: &RunLogLine,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let color = phase_color(line.phase, cx.theme());
         let detail = line.detail.as_deref().unwrap_or("");
         let phase_label = if line.phase == RunPhase::Running {
             "running\u{2026}".to_string()
         } else {
-            format!("{} in {:.1}s", line.phase.label(), (line.time_ms as f64) / 1000.0)
+            format!(
+                "{} in {:.1}s",
+                line.phase.label(),
+                (line.time_ms as f64) / 1000.0
+            )
         };
         let action_id = line.action_id.clone();
         h_flex()
@@ -1822,7 +4174,10 @@ impl DesignerPanel {
                     .child(line.name.clone()),
             )
             .child(
-                div().text_xs().text_color(cx.theme().muted_foreground).child(line.type_id.clone()),
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(line.type_id.clone()),
             )
             .child(
                 div()
@@ -1844,5 +4199,159 @@ impl DesignerPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{}ms", line.time_ms)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four synthetic branch types must stay in lockstep with
+    /// `workflow_json`'s own set — a wrapper that this list misses becomes
+    /// deletable again, which destroys the branch body it stands for.
+    #[test]
+    fn branch_wrapper_detection_matches_the_canonical_set() {
+        for wrapper in [
+            workflow_json::BRANCH_THEN,
+            workflow_json::BRANCH_ELSE,
+            workflow_json::BRANCH_TRY,
+            workflow_json::BRANCH_CATCH,
+        ] {
+            assert!(is_branch_wrapper_type(wrapper), "{wrapper}");
+            assert!(workflow_json::is_branch_wrapper(wrapper), "{wrapper}");
+        }
+        // Real action and container types must not be mistaken for wrappers.
+        for real in ["log", "http", "script", "If", "Foreach", "Until", "Try"] {
+            assert!(!is_branch_wrapper_type(real), "{real}");
+        }
+    }
+
+    #[test]
+    fn every_branch_wrapper_has_a_role_label() {
+        assert_eq!(
+            branch_wrapper_label(workflow_json::BRANCH_THEN),
+            "the True branch"
+        );
+        assert_eq!(
+            branch_wrapper_label(workflow_json::BRANCH_CATCH),
+            "the Catch handler"
+        );
+    }
+
+    /// A registry input is found under its own name; a container-only input
+    /// under its reserved `__` key. This is what lets `sync_selection` render
+    /// a typed row for `Foreach`'s `foreach` expression.
+    #[test]
+    fn meta_property_resolves_registry_and_container_keys() {
+        let props: Vec<(SharedString, SharedString)> = vec![
+            ("level".into(), "info".into()),
+            ("__foreach".into(), r#"{"var": "items"}"#.into()),
+            ("__limit_count".into(), "10".into()),
+        ];
+        assert_eq!(
+            meta_property(&props, "level").map(|(_, v)| v.to_string()),
+            Some("info".to_string())
+        );
+        assert_eq!(
+            meta_property(&props, "foreach").map(|(_, v)| v.to_string()),
+            Some(r#"{"var": "items"}"#.to_string())
+        );
+        assert_eq!(
+            meta_property(&props, "limit").map(|(_, v)| v.to_string()),
+            Some("10".to_string())
+        );
+        // Absent is the signal to render a row for a missing required field.
+        assert!(meta_property(&props, "message").is_none());
+    }
+
+    #[test]
+    fn type_badges_are_distinct_per_kind() {
+        let badges: Vec<_> = [
+            FieldKind::String,
+            FieldKind::Number,
+            FieldKind::Bool,
+            FieldKind::Json,
+            FieldKind::Expression,
+        ]
+        .into_iter()
+        .map(field_kind_badge)
+        .collect();
+        assert_eq!(badges, ["Text", "Number", "Bool", "JSON", "Expr"]);
+    }
+
+    /// `ActionDef`s must line up with what the inspector assumes: a declared
+    /// field with no help text would silently lose its guidance line, and a
+    /// required field is what drives the `*` marker and the empty-value error.
+    #[test]
+    fn the_registry_declares_the_metadata_the_inspector_renders() {
+        for def in workflow_engine::registry::REGISTRY {
+            for field in def.inputs {
+                assert!(
+                    !field.help.is_empty(),
+                    "{}.{} has no help text",
+                    def.type_id,
+                    field.name
+                );
+            }
+        }
+    }
+
+    /// A top-level action's issue path *is* its node id.
+    #[test]
+    fn issue_on_a_top_level_action_flags_that_node() {
+        assert!(DesignerPanel::issue_targets_node("http-1", "http-1"));
+        assert!(!DesignerPanel::issue_targets_node("http-1", "http-2"));
+    }
+
+    /// The case a naive `path == id` test gets wrong: a nested action's node
+    /// id is bare while its issue path carries the whole container chain.
+    #[test]
+    fn issue_on_a_nested_action_flags_that_node() {
+        assert!(DesignerPanel::issue_targets_node("foreach-1/a1", "a1"));
+        // Branch wrappers contribute a path segment but are not themselves
+        // nodes on the canvas.
+        assert!(DesignerPanel::issue_targets_node("if-1/then/a1", "a1"));
+        assert!(DesignerPanel::issue_targets_node(
+            "foreach-1/if-1/then/a1",
+            "a1"
+        ));
+    }
+
+    /// Flagging ancestors as well as the offending action: an error buried in a
+    /// container body has to light up the container the user can actually see.
+    #[test]
+    fn issue_inside_a_container_also_flags_the_container() {
+        assert!(DesignerPanel::issue_targets_node(
+            "foreach-1/a1",
+            "foreach-1"
+        ));
+        assert!(DesignerPanel::issue_targets_node(
+            "foreach-1/if-1/then/a1",
+            "foreach-1"
+        ));
+        assert!(DesignerPanel::issue_targets_node(
+            "foreach-1/if-1/then/a1",
+            "if-1"
+        ));
+        // ...but not an unrelated sibling.
+        assert!(!DesignerPanel::issue_targets_node(
+            "foreach-1/a1",
+            "foreach-2"
+        ));
+        assert!(!DesignerPanel::issue_targets_node("foreach-1/a1", "a2"));
+    }
+
+    /// `validate_definition` attributes a `runAfter` cycle or dangling
+    /// reference to the definition root (`node_path == ""`). There is no node
+    /// to flag, so no node may be flagged - the issue stays reachable through
+    /// the overlay's "Workflow" row instead.
+    #[test]
+    fn a_flow_level_issue_flags_no_node() {
+        for node_id in ["http-1", "foreach-1", "a1", ""] {
+            assert!(
+                !DesignerPanel::issue_targets_node("", node_id),
+                "flow-level issue must not flag {node_id:?}"
+            );
+        }
     }
 }

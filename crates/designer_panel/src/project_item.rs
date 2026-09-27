@@ -115,12 +115,13 @@ mod tests {
     fn matches_only_flow_json_files() {
         assert!(FlowFile::matches(Path::new("workflow.flow.json")));
         assert!(FlowFile::matches(Path::new("nested/dir/Work.Flow.JSON")));
-        assert!(FlowFile::matches(Path::new("FLOW.JSON")));
+        assert!(FlowFile::matches(Path::new("WORKFLOW.FLOW.JSON")));
 
         // The layout sidecar and every other JSON stay with the text editor.
         assert!(!FlowFile::matches(Path::new("workflow.flow.layout.json")));
         assert!(!FlowFile::matches(Path::new("workflow.json")));
         assert!(!FlowFile::matches(Path::new("flow.json")));
+        assert!(!FlowFile::matches(Path::new("FLOW.JSON")));
         assert!(!FlowFile::matches(Path::new("aflow.json")));
         assert!(!FlowFile::matches(Path::new("workflow.flow.json.bak")));
     }

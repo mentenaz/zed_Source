@@ -44,9 +44,10 @@ impl RunResults {
     /// state), otherwise creates it and adds it to the active pane.
     pub fn open(workspace: &mut Workspace, path: &Path, window: &mut Window, cx: &mut App) {
         let existing = workspace.panes().iter().find_map(|pane| {
-            pane.read(cx)
-                .items()
-                .find_map(|item| item.downcast::<RunResults>().filter(|r| r.read(cx).path == path))
+            pane.read(cx).items().find_map(|item| {
+                item.downcast::<RunResults>()
+                    .filter(|r| r.read(cx).path == path)
+            })
         });
         if let Some(entity) = existing {
             workspace.activate_item(&entity, true, true, window, cx);
@@ -63,7 +64,12 @@ impl RunResults {
         workspace.add_item_to_active_pane(Box::new(entity), None, true, window, cx);
     }
 
-    fn new(flow_name: SharedString, path: PathBuf, run_state: SharedRunState, cx: &mut App) -> Self {
+    fn new(
+        flow_name: SharedString,
+        path: PathBuf,
+        run_state: SharedRunState,
+        cx: &mut App,
+    ) -> Self {
         let snapshot = run_state.lock().unwrap().clone();
         Self {
             focus_handle: cx.focus_handle(),
@@ -87,7 +93,8 @@ impl RunResults {
         self.poll_started = true;
         let run_state = self.run_state.clone();
         let mut last_revision = self.snapshot.revision;
-        let mut last_live = self.snapshot.started_at.is_some() && self.snapshot.finished_at.is_none();
+        let mut last_live =
+            self.snapshot.started_at.is_some() && self.snapshot.finished_at.is_none();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let (revision, live) = {
@@ -207,13 +214,22 @@ impl RunResults {
             })
     }
 
-    fn render_log_row(&self, index: usize, line: &RunLogLine, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_log_row(
+        &self,
+        index: usize,
+        line: &RunLogLine,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let color = phase_color(line.phase, cx.theme());
         let detail = line.detail.as_deref().unwrap_or("");
         let phase_label = if line.phase == RunPhase::Running {
             "running\u{2026}".to_string()
         } else {
-            format!("{} in {:.1}s", line.phase.label(), (line.time_ms as f64) / 1000.0)
+            format!(
+                "{} in {:.1}s",
+                line.phase.label(),
+                (line.time_ms as f64) / 1000.0
+            )
         };
 
         h_flex()
@@ -232,7 +248,10 @@ impl RunResults {
                     .child(line.name.clone()),
             )
             .child(
-                div().text_xs().text_color(cx.theme().muted_foreground).child(line.type_id.clone()),
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(line.type_id.clone()),
             )
             .child(
                 div()
@@ -302,13 +321,9 @@ impl RunResults {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&mut self.log_scroll)
-                            .children(
-                                self.snapshot
-                                    .log
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, line)| self.render_log_row(i, line, cx).into_any_element()),
-                            ),
+                            .children(self.snapshot.log.iter().enumerate().map(|(i, line)| {
+                                self.render_log_row(i, line, cx).into_any_element()
+                            })),
                     )
                     .child(Scrollbar::vertical(&self.log_scroll)),
             )

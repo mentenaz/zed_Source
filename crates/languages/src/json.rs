@@ -282,8 +282,20 @@ impl LspAdapter for JsonLspAdapter {
                 RelPath::new(rel_path, PathStyle::local()).ok()
             })
             .unwrap_or_else(|| Cow::Borrowed(RelPath::empty()));
+
+        // A body companion can carry a user-authored sidecar schema next to
+        // it, stating the API contract the ActionDef registry can't know.
+        // Resolved here rather than in `all_schema_file_associations` because
+        // this is the only place with both the requested file and the
+        // worktree root needed to find and relativize its sibling.
+        let sidecar_association = http_body_sidecar_association(
+            requested_path.as_deref(),
+            path_in_worktree.as_ref(),
+            delegate.worktree_root_path(),
+        );
+
         let mut config = cx.update(|cx| {
-            let schemas = json_schema_store::all_schema_file_associations(
+            let mut schemas = json_schema_store::all_schema_file_associations(
                 &self.languages,
                 Some(SettingsLocation {
                     worktree_id: delegate.worktree_id(),
@@ -291,6 +303,15 @@ impl LspAdapter for JsonLspAdapter {
                 }),
                 cx,
             );
+
+            // Appended last so a user-authored sidecar is applied after the
+            // registry-derived schema, not instead of it.
+            if let Some(sidecar_association) = &sidecar_association {
+                schemas
+                    .as_array_mut()
+                    .expect("associations are always built as an array")
+                    .push(sidecar_association.clone());
+            }
 
             // This can be viewed via `dev: open language server logs` -> `json-language-server` ->
             // `Server Info`
@@ -337,6 +358,38 @@ impl LspAdapter for JsonLspAdapter {
     fn is_primary_zed_json_schema_adapter(&self) -> bool {
         true
     }
+}
+
+/// The `json.schemas` association for the user-authored sidecar schema of the
+/// body companion at `abs_path`, or `None` when there isn't one to apply.
+///
+/// The existence check is the whole point of this function: a `url` the
+/// language server can't load is reported as a schema-resolution error, so
+/// advertising a sidecar the user never wrote would put an error in the
+/// editor for every body they open.
+fn http_body_sidecar_association(
+    abs_path: Option<&Path>,
+    rel_path: &RelPath,
+    worktree_root_path: &Path,
+) -> Option<Value> {
+    let abs_path = abs_path?;
+    if !json_schema_store::is_http_body_companion(abs_path) {
+        return None;
+    }
+    let sidecar = json_schema_store::http_body_sidecar_path(abs_path)?;
+    if !sidecar.is_file() {
+        return None;
+    }
+    let sidecar_rel = sidecar.strip_prefix(worktree_root_path).ok()?;
+
+    Some(json!({
+        // Forward slashes, matching the convention every other association in
+        // `all_schema_file_associations` uses for its `fileMatch`.
+        "fileMatch": [rel_path.as_unix_str()],
+        // `./`-prefixed so `worktree_root` resolves it against the worktree
+        // root; without the prefix it's read as a URL and never resolves.
+        "url": format!("./{}", sidecar_rel.to_string_lossy().replace('\\', "/")),
+    }))
 }
 
 fn worktree_root(delegate: &Arc<dyn LspAdapterDelegate>, settings: Option<Value>) -> Option<Value> {

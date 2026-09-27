@@ -583,7 +583,7 @@ impl Panel for FlowsPanel {
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::GitBranch)
+        Some(ui::IconName::Network)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {

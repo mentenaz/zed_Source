@@ -10308,6 +10308,7 @@ dependencies = [
  "task",
  "theme",
  "util",
+ "workflow_engine",
 ]
 
 [[package]]
@@ -24320,7 +24321,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "util",
  "uuid",
+ "which",
  "zed-reqwest",
 ]
 
