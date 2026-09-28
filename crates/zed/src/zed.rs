@@ -6268,6 +6268,7 @@ mod tests {
             gpui_component::init(cx);
             cockpit_panel::init(cx);
             helm_panel::init(cx);
+            npm_bootstrap::init(cx);
             terminal_view::init(cx);
             let credentials_provider = zed_credentials_provider::global(cx);
             copilot_chat::init(

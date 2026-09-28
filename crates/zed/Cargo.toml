@@ -177,6 +177,7 @@ mimalloc = { version = "0.1", optional = true }
 miniprofiler_ui.workspace = true
 node_runtime.workspace = true
 node_panel.workspace = true
+npm_bootstrap.workspace = true
 npm_manager_panel.workspace = true
 nuget_manager_panel.workspace = true
 notifications.workspace = true
@@ -251,6 +252,8 @@ zed_env_vars.workspace = true
 zlog.workspace = true
 zlog_settings.workspace = true
 ztracing.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 etw_tracing.workspace = true

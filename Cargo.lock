@@ -9074,6 +9074,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
+ "log",
  "reqwest_client",
  "serde",
  "serde_json",
@@ -12783,6 +12784,19 @@ dependencies = [
  "serde",
  "serde_json",
  "windows-registry 0.6.1",
+]
+
+[[package]]
+name = "npm_bootstrap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "gpui",
+ "gpui_tokio",
+ "project",
+ "tokio",
+ "workspace",
 ]
 
 [[package]]
@@ -24989,6 +25003,7 @@ dependencies = [
  "node_panel",
  "node_runtime",
  "notifications",
+ "npm_bootstrap",
  "npm_manager_panel",
  "nuget_manager_panel",
  "onboarding",
@@ -25049,6 +25064,8 @@ dependencies = [
  "time",
  "time_format",
  "title_bar",
+ "tokio",
+ "tokio-postgres",
  "toolchain_selector",
  "tracing",
  "ui",

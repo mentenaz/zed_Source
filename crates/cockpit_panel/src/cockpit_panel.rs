@@ -146,7 +146,16 @@ impl CockpitPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         cx.new(|cx| {
-            let cores = System::new_all().cpus().len();
+            // `System::new_all()` refreshes CPU, memory, every process,
+            // disks, components, and networks — synchronously, on whatever
+            // thread calls it. Just to count logical cores, that's a full
+            // system scan on the foreground thread during panel
+            // construction (part of `initialize_panels`'s startup `join!`),
+            // which can stall app startup by seconds. `available_parallelism`
+            // gets the same number from the OS directly, no sysinfo needed.
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
             let metrics_refresh = Self::spawn_metrics_refresh(cx);
             Self {
                 focus_handle: cx.focus_handle(),

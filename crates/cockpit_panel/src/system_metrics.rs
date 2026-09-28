@@ -3,7 +3,8 @@
 
 use gpui::{
     Context, Hsla, InteractiveElement as _, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient, px, relative,
+    StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Sizable as _, Size, StyledExt,
@@ -371,32 +372,38 @@ impl CockpitPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
                     )
                     .content(
-                        div().h(px(160.)).w_full().px_3().pb_3().child(
-                            AreaChart::new(
-                                self.history.iter().cloned().collect::<Vec<HistorySample>>(),
-                            )
-                            .x(move |d: &HistorySample| {
-                                format!("-{}s", latest_tick.saturating_sub(d.tick) * tick_secs)
-                            })
-                            .y(|d: &HistorySample| d.cpu)
-                            .stroke(cpu_color)
-                            .fill(linear_gradient(
-                                0.,
-                                linear_color_stop(cpu_color.opacity(0.4), 1.),
-                                linear_color_stop(background.opacity(0.3), 0.),
-                            ))
-                            .name("CPU")
-                            .y(|d: &HistorySample| d.ram)
-                            .stroke(ram_color)
-                            .fill(linear_gradient(
-                                0.,
-                                linear_color_stop(ram_color.opacity(0.4), 1.),
-                                linear_color_stop(background.opacity(0.3), 0.),
-                            ))
-                            .name("RAM")
-                            .tick_margin(6)
-                            .id("cockpit-history-chart"),
-                        ),
+                        div()
+                            .h(px(160.))
+                            .when(self.embedded, |el| el.h(px(320.)))
+                            .w_full()
+                            .px_3()
+                            .pb_3()
+                            .child(
+                                AreaChart::new(
+                                    self.history.iter().cloned().collect::<Vec<HistorySample>>(),
+                                )
+                                .x(move |d: &HistorySample| {
+                                    format!("-{}s", latest_tick.saturating_sub(d.tick) * tick_secs)
+                                })
+                                .y(|d: &HistorySample| d.cpu)
+                                .stroke(cpu_color)
+                                .fill(linear_gradient(
+                                    0.,
+                                    linear_color_stop(cpu_color.opacity(0.4), 1.),
+                                    linear_color_stop(background.opacity(0.3), 0.),
+                                ))
+                                .name("CPU")
+                                .y(|d: &HistorySample| d.ram)
+                                .stroke(ram_color)
+                                .fill(linear_gradient(
+                                    0.,
+                                    linear_color_stop(ram_color.opacity(0.4), 1.),
+                                    linear_color_stop(background.opacity(0.3), 0.),
+                                ))
+                                .name("RAM")
+                                .tick_margin(6)
+                                .id("cockpit-history-chart"),
+                            ),
                     ),
             )
             .child(div().h_px().w_full().bg(border))

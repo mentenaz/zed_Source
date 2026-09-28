@@ -1,0 +1,20 @@
+[package]
+name = "npm_bootstrap"
+description = "Offers to run `npm install` when a workspace's root looks like an uninstalled JS project."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/npm_bootstrap.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+db.workspace = true
+gpui.workspace = true
+gpui_tokio.workspace = true
+project.workspace = true
+tokio = { workspace = true, features = ["process"] }
+workspace.workspace = true

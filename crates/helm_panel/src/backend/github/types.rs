@@ -396,6 +396,58 @@ pub struct RepoTraffic {
     pub paths: Vec<TrafficPath>,
 }
 
+/// One item from `/repos/{owner}/{repo}/deployments`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Deployment {
+    pub id: u64,
+    #[serde(default)]
+    pub environment: String,
+    #[serde(rename = "ref", default)]
+    pub r#ref: String,
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub created_at: String,
+    /// Not present on the deployment object itself (GitHub only exposes
+    /// status via the separate deployment-statuses endpoint) — defaults to
+    /// "unknown" rather than making a second call per deployment.
+    #[serde(default = "default_deployment_status")]
+    pub status: String,
+}
+
+fn default_deployment_status() -> String {
+    "unknown".to_string()
+}
+
+/// One item from `/repos/{owner}/{repo}/tags`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Tag {
+    pub name: String,
+    #[serde(default)]
+    pub commit: TagCommit,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TagCommit {
+    #[serde(default)]
+    pub sha: String,
+}
+
+/// A pending (not yet accepted) org membership, from
+/// `/user/memberships/orgs` filtered to `state == "pending"`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrgInvitation {
+    pub role: String,
+    pub organization: OrgInvitationOrg,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrgInvitationOrg {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRun {
     pub id: u64,
@@ -414,21 +466,24 @@ pub struct WorkflowRun {
 /// A line of `gh auth login`/`gh auth refresh` output, or its final result.
 /// Replaces the Tauri `gh-auth-line`/`gh-auth-done` window events: panels
 /// subscribe via `GhState::auth_tx.subscribe()` while a login is in flight.
+/// `Done` carries no payload — the success/error result is returned directly
+/// from `gh_login`/`gh_ensure_*_scope`'s own awaited call, which every
+/// consumer already reads; this event only marks "stop listening for lines".
 #[derive(Clone, Debug)]
 pub enum GhAuthEvent {
     Line(String),
-    Done(Result<(), String>),
+    Done,
 }
 
 /// A line of `gh repo clone`/`npm install` output, the npm phase starting, or
 /// the whole clone's final result. Replaces the Tauri `gh-clone-line` window
 /// event: panels subscribe via `GhState::clone_tx.subscribe()` while a clone
-/// is in flight.
+/// is in flight. `Done` carries no payload — see `GhAuthEvent::Done`.
 #[derive(Clone, Debug)]
 pub enum CloneEvent {
     Line(String),
     NpmStart,
-    Done(Result<(), String>),
+    Done,
 }
 
 /// Simple in-memory token/base-url cache. Owned by `AppState` and shared via

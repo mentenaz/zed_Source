@@ -2761,7 +2761,7 @@ impl GitGraph {
             };
 
             CommitAvatar::new(&full_sha, author_email_for_avatar, remote.as_ref())
-                .size(px(32.))
+                .size(px(64.))
                 .render(window, cx)
         };
 

@@ -579,6 +579,7 @@ impl DashboardPanel {
                 row.child(
                     Tag::warning()
                         .xsmall()
+                        .text_color(theme.foreground)
                         .child(format!("{outdated} outdated")),
                 )
             })
@@ -586,6 +587,7 @@ impl DashboardPanel {
                 row.child(
                     Tag::danger()
                         .xsmall()
+                        .text_color(theme.foreground)
                         .child(format!("{vulnerable} vulnerable")),
                 )
             })

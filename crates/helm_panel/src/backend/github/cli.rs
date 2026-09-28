@@ -24,27 +24,6 @@ pub async fn gh_check_cli() -> Result<(), String> {
     }
 }
 
-pub async fn gh_get_token(state: &GhState) -> Result<String, String> {
-    {
-        let guard = state.token.read().await;
-        if let Some(t) = &*guard {
-            return Ok(t.clone());
-        }
-    }
-    match gh_cmd().arg("auth").arg("token").output().await {
-        Ok(out) if out.status.success() => {
-            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            *state.token.write().await = Some(token.clone());
-            Ok(token)
-        }
-        Ok(out) => Err(format!(
-            "gh auth token failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )),
-        Err(e) => Err(format!("Failed to run gh: {}", e)),
-    }
-}
-
 pub async fn gh_auth_status() -> Result<Option<AuthInfo>, String> {
     match gh_cmd().arg("auth").arg("status").output().await {
         Ok(out) if out.status.success() => {
@@ -104,7 +83,7 @@ pub async fn gh_login(state: &GhState) -> Result<(), String> {
     if let Some(out) = child.stdout.take() {
         let tx = state.auth_tx.clone();
         tokio::spawn(async move {
-            let mut reader = TokioBufReader::new(out);
+            let reader = TokioBufReader::new(out);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let _ = tx.send(GhAuthEvent::Line(line));
@@ -114,7 +93,7 @@ pub async fn gh_login(state: &GhState) -> Result<(), String> {
     if let Some(err) = child.stderr.take() {
         let tx = state.auth_tx.clone();
         tokio::spawn(async move {
-            let mut reader = TokioBufReader::new(err);
+            let reader = TokioBufReader::new(err);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let _ = tx.send(GhAuthEvent::Line(line));
@@ -130,7 +109,7 @@ pub async fn gh_login(state: &GhState) -> Result<(), String> {
         )),
         Err(e) => Err(format!("Failed to run gh: {}", e)),
     };
-    let _ = state.auth_tx.send(GhAuthEvent::Done(result.clone()));
+    let _ = state.auth_tx.send(GhAuthEvent::Done);
     result
 }
 
@@ -155,7 +134,7 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
     if let Some(out) = child.stdout.take() {
         let tx = state.auth_tx.clone();
         tokio::spawn(async move {
-            let mut reader = TokioBufReader::new(out);
+            let reader = TokioBufReader::new(out);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let _ = tx.send(GhAuthEvent::Line(line));
@@ -165,7 +144,7 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
     if let Some(err) = child.stderr.take() {
         let tx = state.auth_tx.clone();
         tokio::spawn(async move {
-            let mut reader = TokioBufReader::new(err);
+            let reader = TokioBufReader::new(err);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let _ = tx.send(GhAuthEvent::Line(line));
@@ -181,7 +160,7 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
         )),
         Err(e) => Err(format!("Failed to run gh: {}", e)),
     };
-    let _ = state.auth_tx.send(GhAuthEvent::Done(result.clone()));
+    let _ = state.auth_tx.send(GhAuthEvent::Done);
     result
 }
 

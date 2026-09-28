@@ -11,6 +11,14 @@ pub struct LayoutConfig {
     pub header_height: f32,
     pub layer_spacing_x: f32,
     pub node_spacing_y: f32,
+    /// Gap between two tables sitting side by side *within* one layer (a
+    /// packed grid row). Distinct from `layer_spacing_x`, which separates whole
+    /// dependency layers from each other.
+    pub column_spacing_x: f32,
+    /// How many tables a single layer packs into one row before wrapping.
+    /// A layer with many tables (a schema with no foreign keys puts *every*
+    /// table in layer 0) would otherwise become one endless vertical ribbon.
+    pub max_per_row: usize,
     pub origin_x: f32,
     pub origin_y: f32,
 }
@@ -23,6 +31,8 @@ impl Default for LayoutConfig {
             header_height: 42.0,
             layer_spacing_x: 120.0,
             node_spacing_y: 60.0,
+            column_spacing_x: 48.0,
+            max_per_row: 3,
             origin_x: 40.0,
             origin_y: 40.0,
         }
@@ -116,26 +126,42 @@ impl SchemaLayout {
         reduce_crossings(&mut layers, &acyclic_edges);
 
         let mut tables = HashMap::new();
+        let per_row = config.max_per_row.max(1);
         for (layer_index, layer) in layers.iter().enumerate() {
-            let mut y = config.origin_y;
-            for id in layer {
-                let table = &graph.tables[id];
-                let height =
-                    config.header_height + table.columns.len() as f32 * config.column_row_height;
-                tables.insert(
-                    id.clone(),
-                    TableLayout {
-                        position: Point {
-                            x: config.origin_x
-                                + layer_index as f32 * (config.node_width + config.layer_spacing_x),
-                            y,
+            let layer_x =
+                config.origin_x + layer_index as f32 * (config.node_width + config.layer_spacing_x);
+            let mut row_y = config.origin_y;
+            for row in layer.chunks(per_row) {
+                // A row's height is its tallest member, so the next row starts
+                // clear of every card rather than only the first one.
+                let mut row_height: f32 = 0.0;
+                for id in row {
+                    let table = &graph.tables[id];
+                    row_height = row_height.max(
+                        config.header_height
+                            + table.columns.len() as f32 * config.column_row_height,
+                    );
+                }
+                for (column_index, id) in row.iter().enumerate() {
+                    let table = &graph.tables[id];
+                    let height = config.header_height
+                        + table.columns.len() as f32 * config.column_row_height;
+                    tables.insert(
+                        id.clone(),
+                        TableLayout {
+                            position: Point {
+                                x: layer_x
+                                    + column_index as f32
+                                        * (config.node_width + config.column_spacing_x),
+                                y: row_y,
+                            },
+                            width: config.node_width,
+                            height,
+                            layer: layer_index,
                         },
-                        width: config.node_width,
-                        height,
-                        layer: layer_index,
-                    },
-                );
-                y += height + config.node_spacing_y;
+                    );
+                }
+                row_y += row_height + config.node_spacing_y;
             }
         }
 
@@ -309,6 +335,55 @@ mod tests {
         );
         assert_eq!(layout.tables.len(), 2);
         assert_eq!(layout.ignored_cycle_relationships, vec!["b-a"]);
+    }
+
+    #[test]
+    fn packs_a_wide_layer_into_a_grid_instead_of_one_column() {
+        // No relationships => every table shares layer 0, which is the case
+        // that used to render as a single endless vertical ribbon.
+        let names = ["a", "b", "c", "d", "e", "f", "g"];
+        let layout = SchemaLayout::compute(&graph(&names, &[]), LayoutConfig::default());
+
+        let position = |name: &str| layout.tables[&TableId::new(name)].position;
+
+        // max_per_row = 3: first row is a, b, c side by side on one y.
+        assert_eq!(position("a").y, position("b").y);
+        assert_eq!(position("b").y, position("c").y);
+        assert!(position("a").x < position("b").x);
+        assert!(position("b").x < position("c").x);
+
+        // Fourth wraps to a new row below, still at the first column's x.
+        assert!(position("d").y > position("c").y);
+        assert_eq!(position("d").x, position("a").x);
+
+        // A partial final row is left-aligned, on its own row.
+        assert!(position("g").y > position("e").y);
+        assert_eq!(position("g").x, position("a").x);
+        assert_eq!(position("g").x, position("d").x);
+    }
+
+    #[test]
+    fn grid_rows_clear_the_tallest_card_in_the_row() {
+        let mut graph = graph(&["a", "b", "c", "d"], &[]);
+        // Give the first-row member 'a' an extra column so it is taller.
+        graph
+            .tables
+            .get_mut(&TableId::new("a"))
+            .unwrap()
+            .columns
+            .push(GraphColumn {
+                id: ColumnId::new(&TableId::new("a"), "name"),
+                type_name: "text".into(),
+                nullable: true,
+                primary_key: false,
+            });
+        let layout = SchemaLayout::compute(&graph, LayoutConfig::default());
+
+        let a = &layout.tables[&TableId::new("a")];
+        let d = &layout.tables[&TableId::new("d")];
+        // 'd' starts strictly below 'a' even though 'b'/'c' are shorter, so it
+        // must not collide with the tall card it shares a row with.
+        assert!(d.position.y >= a.position.y + a.height);
     }
 
     #[test]

@@ -264,7 +264,7 @@ async fn table_foreign_keys(
     table: &str,
 ) -> Result<Vec<ForeignKey>, DatabaseError> {
     let query = format!(
-        "SELECT fk_cols.COLUMN_NAME, pk_tab.TABLE_NAME, pk_cols.COLUMN_NAME \
+        "SELECT fk_cols.COLUMN_NAME, pk_tab.name, pk_cols.COLUMN_NAME \
          FROM sys.foreign_keys fk \
          JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
          JOIN sys.columns fk_col ON fk_col.object_id = fkc.parent_object_id \

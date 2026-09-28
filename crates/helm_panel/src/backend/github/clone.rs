@@ -21,7 +21,7 @@ pub async fn gh_clone_repo(
     state: &GhState,
 ) -> Result<(), String> {
     let result = clone_inner(full_name, target_path, run_npm, state).await;
-    let _ = state.clone_tx.send(CloneEvent::Done(result.clone()));
+    let _ = state.clone_tx.send(CloneEvent::Done);
     result
 }
 

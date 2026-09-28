@@ -8,9 +8,10 @@ use serde::de::DeserializeOwned;
 
 use super::gh_cmd;
 use super::types::{
-    Branch, Collaborator, Comment, CommitSummary, GhState, GitHubUser, GitHubUserDetail, Issue,
-    OrgDetail, Package, PackageVersion, Pull, Release, Repo, RepoInvitation, TrafficClones,
-    TrafficPath, TrafficReferrer, TrafficViews, WorkflowRun,
+    Branch, Collaborator, Comment, CommitSummary, Deployment, GhState, GitHubUser,
+    GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull, Release,
+    Repo, RepoInvitation, Tag, TrafficClones, TrafficPath, TrafficReferrer, TrafficViews,
+    WorkflowRun,
 };
 
 async fn gh_api_fetch<T: DeserializeOwned>(
@@ -187,6 +188,23 @@ pub async fn gh_get_org_logins(state: &GhState) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Same endpoint/shape as [`gh_get_org_logins`], filtered to `state ==
+/// "pending"` instead of `"active"` — the memberships GitHub hasn't been
+/// accepted or declined yet.
+pub async fn gh_list_org_invitations(state: &GhState) -> Result<Vec<OrgInvitation>, String> {
+    let memberships: Vec<serde_json::Value> =
+        gh_api_fetch(state, "/user/memberships/orgs?per_page=100", "GET", None).await?;
+    let mut out = Vec::new();
+    for m in memberships {
+        if m.get("state").and_then(|s| s.as_str()) == Some("pending") {
+            if let Ok(invitation) = serde_json::from_value::<OrgInvitation>(m) {
+                out.push(invitation);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub async fn gh_get_user(username: String, state: &GhState) -> Result<GitHubUserDetail, String> {
     let path = format!("/users/{}", username);
     gh_api_fetch(state, &path, "GET", None).await
@@ -215,7 +233,7 @@ pub async fn gh_list_deployments(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<Deployment>, String> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/deployments?per_page=50", owner, repo),
@@ -300,7 +318,7 @@ pub async fn gh_list_tags(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<Tag>, String> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/tags?per_page=100", owner, repo),
@@ -340,6 +358,7 @@ pub async fn gh_create_release(
     tag_name: String,
     name: Option<String>,
     body: Option<String>,
+    draft: Option<bool>,
     prerelease: Option<bool>,
     state: &GhState,
 ) -> Result<serde_json::Value, String> {
@@ -347,6 +366,7 @@ pub async fn gh_create_release(
         "tag_name": tag_name,
         "name": name,
         "body": body,
+        "draft": draft.unwrap_or(false),
         "prerelease": prerelease.unwrap_or(false),
     });
     gh_api_fetch(
@@ -564,6 +584,16 @@ pub async fn gh_accept_org_invitation(org: String, state: &GhState) -> Result<()
     .await
 }
 
+pub async fn gh_decline_org_invitation(org: String, state: &GhState) -> Result<(), String> {
+    gh_api_no_content(
+        state,
+        &format!("/user/memberships/orgs/{}", org),
+        "DELETE",
+        None,
+    )
+    .await
+}
+
 pub async fn gh_add_collaborator(
     owner: String,
     repo: String,
@@ -607,22 +637,6 @@ pub async fn gh_update_topics(
         state,
         &format!("/repos/{}/{}/topics", owner, repo),
         "PUT",
-        Some(body),
-    )
-    .await
-}
-
-pub async fn gh_rename_repo(
-    owner: String,
-    name: String,
-    new_name: String,
-    state: &GhState,
-) -> Result<Repo, String> {
-    let body = serde_json::json!({ "name": new_name });
-    gh_api_fetch(
-        state,
-        &format!("/repos/{}/{}", owner, name),
-        "PATCH",
         Some(body),
     )
     .await

@@ -440,6 +440,25 @@ impl DatabasePanel {
         cx.notify();
     }
 
+    /// The workbench tab's display title for `id`'s `database` — shared
+    /// between `open_workbench_tab` (a live, already-connected click) and
+    /// `WorkbenchTab::deserialize` (a tab restored from a previous session,
+    /// where the connection is re-established as part of the same call).
+    fn workbench_tab_title(&self, id: ConnectionId, database: &str) -> SharedString {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .map(|connection| {
+                if database.is_empty() {
+                    format!("SQL: {}", connection.title)
+                } else {
+                    format!("SQL: {} / {database}", connection.title)
+                }
+            })
+            .unwrap_or_else(|| "SQL Workbench".to_string())
+            .into()
+    }
+
     /// The "Workbench" button's entry point: ensures `id`'s active database
     /// has a `WorkbenchState`, then opens (or activates, if already open) its
     /// real workspace tab.
@@ -453,19 +472,7 @@ impl DatabasePanel {
         let key: SchemaKey = (id, database.clone());
         self.ensure_workbench(&key, window, cx);
 
-        let title: SharedString = self
-            .connections
-            .iter()
-            .find(|connection| connection.id == id)
-            .map(|connection| {
-                if database.is_empty() {
-                    format!("SQL: {}", connection.title)
-                } else {
-                    format!("SQL: {} / {database}", connection.title)
-                }
-            })
-            .unwrap_or_else(|| "SQL Workbench".to_string())
-            .into();
+        let title = self.workbench_tab_title(id, &database);
 
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -529,6 +536,26 @@ impl DatabasePanel {
                 editor.set_text(sql, window, cx);
             });
         }
+    }
+
+    /// Drops `sql` into `id`'s workbench and runs it immediately, opening
+    /// (or focusing) the workbench tab so the result is visible right away —
+    /// the schema graph's node context menu's entry point (unlike the schema
+    /// tree's equivalent menu, which only inserts and lets the user hit Run).
+    /// `open_workbench_tab` ensures the `WorkbenchState` exists before the
+    /// other two calls rely on it.
+    pub(crate) fn run_canned_query(
+        &mut self,
+        id: ConnectionId,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_workbench_tab(id, window, cx);
+        let database = self.registry.active_database(id).unwrap_or_default();
+        let key: SchemaKey = (id, database);
+        self.insert_workbench_sql(&key, sql, window, cx);
+        self.run_workbench_query(id, cx);
     }
 
     /// Runs the workbench editor's current SQL against `id`'s active
@@ -1245,6 +1272,111 @@ impl Item for WorkbenchTab {
 
     fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
         Some(self.title.clone())
+    }
+}
+
+impl workspace::SerializableItem for WorkbenchTab {
+    fn serialized_item_kind() -> &'static str {
+        "database_workbench"
+    }
+
+    /// Persisting the tab just records `(connection, database)`; the actual
+    /// SQL text/results/history live in `DatabasePanel::workbench_history`'s
+    /// own JSON persistence (see `persist_workbench_history`), not here.
+    fn cleanup(
+        workspace_id: workspace::WorkspaceId,
+        alive_items: Vec<workspace::ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
+    }
+
+    /// Reconnects `(connection, database)` (via `DatabasePanel::reopen_schema`)
+    /// before recreating the tab. On failure — connection deleted, connect
+    /// error, schema-fetch error, or timeout — shows a toast naming the
+    /// connection and fails the deserialize instead of leaving a broken tab.
+    fn deserialize(
+        _project: Entity<project::Project>,
+        workspace: gpui::WeakEntity<Workspace>,
+        workspace_id: workspace::WorkspaceId,
+        item_id: workspace::ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Entity<Self>>> {
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let persisted = db
+                .tab_for_item(item_id, workspace_id)?
+                .filter(|tab| tab.kind == crate::persistence::TabKind::Workbench)
+                .ok_or_else(|| anyhow::anyhow!("No workbench tab persisted for item"))?;
+            let key: SchemaKey = (persisted.connection_id, persisted.database);
+
+            let workspace_entity = workspace
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("Workspace released before workbench restore"))?;
+            let panel = workspace_entity
+                .read_with(cx, |workspace, cx| workspace.panel::<DatabasePanel>(cx))
+                .ok_or_else(|| anyhow::anyhow!("Database panel not available"))?;
+
+            if let Err(reason) = DatabasePanel::reopen_schema(panel.clone(), key.clone(), cx).await
+            {
+                log::warn!("database_panel: workbench restore for {key:?} failed: {reason}");
+                let message = panel.read_with(cx, |panel, _| panel.reopen_failure_message(&key));
+                workspace_entity.update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<WorkbenchTab>(),
+                            message,
+                        ),
+                        cx,
+                    );
+                });
+                anyhow::bail!("database connection could not be reopened");
+            }
+
+            cx.update(|window, cx| {
+                let (id, database) = key.clone();
+                let (editor, title) = panel.update(cx, |panel, cx| {
+                    panel.ensure_workbench(&key, window, cx);
+                    let editor = panel
+                        .workbenches
+                        .get(&key)
+                        .map(|workbench| workbench.editor.clone());
+                    (editor, panel.workbench_tab_title(id, &database))
+                });
+                let editor = editor
+                    .ok_or_else(|| anyhow::anyhow!("Workbench state missing after reconnect"))?;
+                anyhow::Ok(cx.new(|cx| WorkbenchTab::new(panel.clone(), key, title, editor, cx)))
+            })?
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: workspace::ItemId,
+        _closing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let (connection_id, database) = self.key.clone();
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_tab(
+                workspace_id,
+                item_id,
+                crate::persistence::TabKind::Workbench,
+                connection_id,
+                database,
+            )
+            .await
+        }))
+    }
+
+    fn should_serialize(&self, _event: &Self::Event) -> bool {
+        false
     }
 }
 

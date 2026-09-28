@@ -84,6 +84,12 @@ struct ProcessEntry {
 /// List all processes with a `Managed`/`External` source and run state.
 fn list_processes(system: &Mutex<System>, adopted: &Adopted) -> Vec<ProcessEntry> {
     let mut sys = system.lock().unwrap();
+    // `system` starts as an empty `System::new()` (see `ProcessesPanel::new`)
+    // rather than a pre-populated `new_all()`, so the CPU list needs its own
+    // explicit refresh here — cheap relative to the process scan below, and
+    // keeps `cpu_count` correct on every tick rather than only after
+    // whatever happened to populate it first.
+    sys.refresh_cpu_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
     let adopted = adopted.lock().unwrap();
     let cpu_count = sys.cpus().len() as f32;
@@ -552,7 +558,13 @@ impl ProcessesPanel {
                     }
                 });
 
-            let system = Arc::new(Mutex::new(System::new_all()));
+            // `System::new_all()` does a full synchronous system+process
+            // scan — expensive, and here it ran on the foreground thread
+            // during panel construction (part of `initialize_panels`'s
+            // startup `join!`), stalling app startup. `System::new()` is
+            // cheap/empty; the poll task below does the first real refresh
+            // on its own schedule instead, off the startup path.
+            let system = Arc::new(Mutex::new(System::new()));
             let adopted: Adopted = Arc::new(Mutex::new(HashMap::new()));
 
             let _poll_task = {

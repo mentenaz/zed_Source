@@ -7,9 +7,8 @@
 
 use database_backend::{ConnectionConfig, TableInfo, ViewInfo};
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName as GIconName, Sizable as _, Size,
@@ -100,22 +99,8 @@ impl DatabasePanel {
             connection.id,
             connection.database.clone().unwrap_or_default(),
         );
-        if !self.schema_graphs.contains_key(&key) {
-            let schema = database_backend::Schema {
-                tables: tables.to_vec(),
-                views: Vec::new(),
-            };
-            let graph = crate::ir::SchemaGraph::from_schema(&schema);
-            let layout = crate::layout::SchemaLayout::compute(
-                &graph,
-                crate::layout::LayoutConfig::default(),
-            );
-            self.schema_graphs.insert(
-                key.clone(),
-                cx.new(|cx| crate::graph::SchemaGraphView::new(&graph, &layout, cx)),
-            );
-        }
-        self.schema_graphs[&key].clone().into_any_element()
+        self.schema_graph_for_key(&key, tables, cx)
+            .into_any_element()
     }
 
     /// Summary cards (`GroupBox`), matching the spec's Overview tab.

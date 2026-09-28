@@ -189,6 +189,7 @@ members = [
 "crates/node_backend",
 "crates/node_panel",
 "crates/npm_backend",
+"crates/npm_bootstrap",
 "crates/npm_manager_panel",
 "crates/python_backend",
     "crates/python_manager_panel",
@@ -485,6 +486,7 @@ dotnet_panel = { path = "crates/dotnet_panel" }
 node_backend = { path = "crates/node_backend" }
 node_panel = { path = "crates/node_panel" }
 npm_backend = { path = "crates/npm_backend" }
+npm_bootstrap = { path = "crates/npm_bootstrap" }
 npm_manager_panel = { path = "crates/npm_manager_panel" }
 nuget_manager_panel = { path = "crates/nuget_manager_panel" }
 python_backend = { path = "crates/python_backend" }

@@ -854,6 +854,7 @@ fn main() {
         cockpit_panel::init(cx);
         helm_panel::init(cx);
         database_panel::init(cx);
+        npm_bootstrap::init(cx);
         script_runner_panel::init(cx);
         processes_panel::init(cx);
         python_panel::init(cx);

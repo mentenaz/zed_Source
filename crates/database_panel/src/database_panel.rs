@@ -53,6 +53,7 @@ mod header;
 mod inspector;
 mod ir;
 mod layout;
+mod persistence;
 mod workbench;
 
 use workbench::WorkbenchState;
@@ -316,6 +317,8 @@ actions!(
 /// Registers the Database panel's actions on every workspace. Call once at
 /// app startup, alongside the other panels' `init` functions.
 pub fn init(cx: &mut App) {
+    workspace::register_serializable_item::<workbench::WorkbenchTab>(cx);
+    workspace::register_serializable_item::<graph::SchemaGraphTab>(cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<DatabasePanel>(window, cx);
@@ -1132,6 +1135,104 @@ impl DatabasePanel {
                     self.discover_databases(id, cx);
                 }
             }
+        }
+    }
+
+    /// Drives `key`'s connection (via the existing `connect`/`fetch_schema`
+    /// entry points) to a loaded schema, for a workbench/graph tab being
+    /// restored from a previous session — see `workbench::WorkbenchTab` and
+    /// `graph::SchemaGraphTab`'s `SerializableItem::deserialize`, this
+    /// function's only callers.
+    ///
+    /// `connect`/`fetch_schema` report completion only by writing into
+    /// `self.statuses`/`self.schemas` (see their doc comments — there's no
+    /// channel or future of their own), so this polls those maps on a short
+    /// timer instead of awaiting a result directly. Returns `Err` with a
+    /// message fit for a toast if the connection no longer exists, fails to
+    /// connect, fails to fetch its schema, or exceeds a generous timeout —
+    /// callers close the tab rather than leave a stuck placeholder.
+    pub(crate) fn reopen_schema(
+        panel: Entity<Self>,
+        key: SchemaKey,
+        cx: &mut AsyncWindowContext,
+    ) -> Task<Result<(), String>> {
+        cx.spawn(async move |cx| {
+            let id = key.0;
+
+            let exists = panel.update(cx, |panel, cx| {
+                if !panel.connections.iter().any(|c| c.id == id) {
+                    return false;
+                }
+                match panel.statuses.get(&id) {
+                    Some(ConnectionStatus::Connected) => {
+                        if !matches!(panel.schemas.get(&key), Some(SchemaState::Loading)) {
+                            panel.fetch_schema(id, cx);
+                        }
+                    }
+                    Some(ConnectionStatus::Connecting) => {}
+                    _ => panel.connect(id, cx),
+                }
+                true
+            });
+
+            if !exists {
+                return Err("Connection no longer exists".to_string());
+            }
+
+            // `AsyncWindowContext` has no `background_executor()` of its own
+            // (only `App` does) — pull one out through `update` once, then
+            // reuse it for every poll tick below.
+            let executor = cx
+                .update(|_, cx| cx.background_executor().clone())
+                .map_err(|_| "Database panel is gone".to_string())?;
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let (schema, status) = panel.read_with(cx, |panel, _| {
+                    (
+                        panel.schemas.get(&key).cloned(),
+                        panel.statuses.get(&id).cloned(),
+                    )
+                });
+
+                match schema {
+                    Some(SchemaState::Loaded { .. }) => return Ok(()),
+                    Some(SchemaState::Error(message)) => return Err(message),
+                    _ => {}
+                }
+                if let Some(ConnectionStatus::Error(message)) = status {
+                    return Err(message);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("Timed out waiting to reconnect".to_string());
+                }
+
+                executor
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+            }
+        })
+    }
+
+    /// The toast message for a workbench/graph tab that failed to reconnect
+    /// on restore (see `reopen_schema`, whose `Err` string is logged
+    /// separately rather than shown to the user — the toast stays a short,
+    /// consistent shape regardless of the underlying driver error).
+    pub(crate) fn reopen_failure_message(&self, key: &SchemaKey) -> String {
+        let (id, database) = key;
+        match self.connections.iter().find(|c| c.id == *id) {
+            Some(connection) => {
+                let db_type = header::db_type_label(connection.db_type);
+                if database.is_empty() {
+                    format!("{db_type} {} could not be connected", connection.title)
+                } else {
+                    format!(
+                        "{db_type} {}/{database} could not be connected",
+                        connection.title
+                    )
+                }
+            }
+            None => "Database connection could not be reopened".to_string(),
         }
     }
 

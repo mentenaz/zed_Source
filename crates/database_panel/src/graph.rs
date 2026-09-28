@@ -1,12 +1,17 @@
 //! Conversion from the schema IR/layout into `gpui_flow` graph state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{
+    ActiveTheme as _, ThemeColor,
+    menu::{ContextMenuExt as _, PopupMenuItem},
+};
 use gpui_flow::{Controls, FlowGraph, FlowState, Minimap};
 use gpui_flow::{EdgeType, FlowEdge, FlowNode, HandleDef, HandlePosition, HandleType};
 
@@ -42,14 +47,27 @@ pub struct SchemaGraphView {
     controls: gpui::Entity<Controls>,
     minimap: gpui::Entity<Minimap>,
     focus_handle: FocusHandle,
+    table_count: usize,
+    relationship_count: usize,
+    ignored_cycle_relationships: usize,
 }
 
 impl SchemaGraphView {
-    pub fn new(graph: &SchemaGraph, layout: &SchemaLayout, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        graph: &SchemaGraph,
+        layout: &SchemaLayout,
+        panel: WeakEntity<super::DatabasePanel>,
+        connection_id: super::ConnectionId,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (nodes, edges) = flow_graph(graph, layout);
+        let menu_items = Rc::new(table_menu_items_by_table(graph));
         let state = cx.new(|_| FlowState::new(nodes, edges));
-        let flow =
-            cx.new(|cx| FlowGraph::new(state.clone(), cx).default_renderer(render_table_card));
+        let flow = cx.new(|cx| {
+            FlowGraph::new(state.clone(), cx).default_renderer(move |node, window, cx| {
+                render_table_card(node, &menu_items, panel.clone(), connection_id, window, cx)
+            })
+        });
         let controls = cx.new(|_| Controls::new(state.clone()));
         let minimap = cx.new(|_| Minimap::new(state));
         Self {
@@ -57,6 +75,9 @@ impl SchemaGraphView {
             controls,
             minimap,
             focus_handle: cx.focus_handle(),
+            table_count: graph.tables.len(),
+            relationship_count: graph.relationships.len(),
+            ignored_cycle_relationships: layout.ignored_cycle_relationships.len(),
         }
     }
 }
@@ -92,6 +113,13 @@ impl Render for SchemaGraphView {
             .relative()
             .bg(colors.background)
             .child(self.flow.clone())
+            .when(
+                self.table_count > 1 && self.relationship_count == 0,
+                |this| this.child(self.no_relationship_notice(colors)),
+            )
+            .when(self.ignored_cycle_relationships > 0, |this| {
+                this.child(self.cycle_notice(colors))
+            })
             .child(
                 div()
                     .absolute()
@@ -107,6 +135,51 @@ impl Render for SchemaGraphView {
                     .child(self.minimap.clone()),
             )
     }
+}
+
+impl SchemaGraphView {
+    /// A schema with tables but no foreign keys lays every table out in one
+    /// layer, so the graph renders as a grid with no lines and no obvious
+    /// reason why. Say so, rather than leaving the user to guess.
+    fn no_relationship_notice(&self, colors: ThemeColor) -> AnyElement {
+        notice_banner(
+            colors,
+            format!(
+                "No foreign keys found across {} tables - nothing to relate, so they are shown \
+                 in a grid. Declare a FOREIGN KEY constraint to see relationships.",
+                self.table_count
+            ),
+        )
+    }
+
+    fn cycle_notice(&self, colors: ThemeColor) -> AnyElement {
+        notice_banner(
+            colors,
+            format!(
+                "{} circular reference(s) cannot be laid out in dependency order; they are still \
+                 drawn.",
+                self.ignored_cycle_relationships
+            ),
+        )
+    }
+}
+
+fn notice_banner(colors: ThemeColor, message: String) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(16.0))
+        .left(px(16.0))
+        .max_w(px(420.0))
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.popover)
+        .text_color(colors.foreground)
+        .text_sm()
+        .child(message)
+        .into_any_element()
 }
 
 pub struct SchemaGraphTab {
@@ -151,7 +224,132 @@ impl Item for SchemaGraphTab {
     }
 }
 
+impl workspace::SerializableItem for SchemaGraphTab {
+    fn serialized_item_kind() -> &'static str {
+        "database_graph"
+    }
+
+    fn cleanup(
+        workspace_id: workspace::WorkspaceId,
+        alive_items: Vec<workspace::ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
+    }
+
+    /// Reconnects `(connection, database)` (via `DatabasePanel::reopen_schema`)
+    /// before rebuilding the graph. On failure — connection deleted, connect
+    /// error, schema-fetch error, or timeout — shows a toast naming the
+    /// connection and fails the deserialize instead of leaving a broken tab.
+    fn deserialize(
+        _project: Entity<project::Project>,
+        workspace: WeakEntity<Workspace>,
+        workspace_id: workspace::WorkspaceId,
+        item_id: workspace::ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Entity<Self>>> {
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let persisted = db
+                .tab_for_item(item_id, workspace_id)?
+                .filter(|tab| tab.kind == crate::persistence::TabKind::Graph)
+                .ok_or_else(|| anyhow::anyhow!("No schema graph tab persisted for item"))?;
+            let key: super::SchemaKey = (persisted.connection_id, persisted.database);
+
+            let workspace_entity = workspace
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("Workspace released before graph restore"))?;
+            let panel = workspace_entity
+                .read_with(cx, |workspace, cx| {
+                    workspace.panel::<super::DatabasePanel>(cx)
+                })
+                .ok_or_else(|| anyhow::anyhow!("Database panel not available"))?;
+
+            if let Err(reason) =
+                super::DatabasePanel::reopen_schema(panel.clone(), key.clone(), cx).await
+            {
+                log::warn!("database_panel: schema graph restore for {key:?} failed: {reason}");
+                let message = panel.read_with(cx, |panel, _| panel.reopen_failure_message(&key));
+                workspace_entity.update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<SchemaGraphTab>(),
+                            message,
+                        ),
+                        cx,
+                    );
+                });
+                anyhow::bail!("database connection could not be reopened");
+            }
+
+            cx.update(|_window, cx| {
+                let (id, database) = key.clone();
+                let (graph, title) = panel.update(cx, |panel, cx| {
+                    let tables = match panel.schemas.get(&key) {
+                        Some(super::SchemaState::Loaded { tables, .. }) => tables.clone(),
+                        // `reopen_schema` only returns `Ok` once the schema
+                        // has loaded, so this arm is unreachable in practice.
+                        _ => std::rc::Rc::from([]),
+                    };
+                    let graph = panel.schema_graph_for_key(&key, &tables, cx);
+                    (graph, panel.schema_graph_tab_title(id, &database))
+                });
+                anyhow::Ok(cx.new(|_| SchemaGraphTab::new(graph, key, title)))
+            })?
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: workspace::ItemId,
+        _closing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let (connection_id, database) = self.key.clone();
+        let db = crate::persistence::DatabasePanelTabsDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_tab(
+                workspace_id,
+                item_id,
+                crate::persistence::TabKind::Graph,
+                connection_id,
+                database,
+            )
+            .await
+        }))
+    }
+
+    fn should_serialize(&self, _event: &Self::Event) -> bool {
+        false
+    }
+}
+
 impl super::DatabasePanel {
+    /// The schema graph tab's display title for `id`'s `database` — shared
+    /// between `open_schema_graph_tab` (a live, already-connected click) and
+    /// `SchemaGraphTab::deserialize` (a tab restored from a previous
+    /// session, where the connection is re-established as part of the same
+    /// call).
+    fn schema_graph_tab_title(&self, id: super::ConnectionId, database: &str) -> SharedString {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .map(|connection| {
+                if database.is_empty() {
+                    format!("Schema: {}", connection.title)
+                } else {
+                    format!("Schema: {} / {database}", connection.title)
+                }
+            })
+            .unwrap_or_else(|| "Schema Graph".to_string())
+            .into()
+    }
+
     pub(crate) fn open_schema_graph_tab(
         &mut self,
         id: super::ConnectionId,
@@ -165,19 +363,7 @@ impl super::DatabasePanel {
         };
         let tables = tables.clone();
         let graph = self.schema_graph_for_key(&key, &tables, cx);
-        let title = self
-            .connections
-            .iter()
-            .find(|connection| connection.id == id)
-            .map(|connection| {
-                if database.is_empty() {
-                    format!("Schema: {}", connection.title)
-                } else {
-                    format!("Schema: {} / {database}", connection.title)
-                }
-            })
-            .unwrap_or_else(|| "Schema Graph".to_string())
-            .into();
+        let title = self.schema_graph_tab_title(id, &database);
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -186,7 +372,7 @@ impl super::DatabasePanel {
         });
     }
 
-    fn schema_graph_for_key(
+    pub(crate) fn schema_graph_for_key(
         &mut self,
         key: &super::SchemaKey,
         tables: &[database_backend::TableInfo],
@@ -199,7 +385,10 @@ impl super::DatabasePanel {
             };
             let graph = SchemaGraph::from_schema(&schema);
             let layout = SchemaLayout::compute(&graph, crate::layout::LayoutConfig::default());
-            let view = cx.new(|cx| SchemaGraphView::new(&graph, &layout, cx));
+            let panel = cx.entity().downgrade();
+            let connection_id = key.0;
+            let view =
+                cx.new(|cx| SchemaGraphView::new(&graph, &layout, panel, connection_id, cx));
             self.schema_graphs.insert(key.clone(), view);
         }
         self.schema_graphs[key].clone()
@@ -229,13 +418,107 @@ fn open_schema_graph(
     }
 }
 
+/// Table nodes only — a `HashMap` keyed by `FlowNode.id` (the table name),
+/// built once per graph in `SchemaGraphView::new` and shared (via `Rc`) by
+/// every node's `render_table_card` call, so it's computed from
+/// `SchemaGraph`/`GraphRelationship` once rather than per-render.
+fn table_menu_items_by_table(graph: &SchemaGraph) -> HashMap<String, Vec<(String, String)>> {
+    graph
+        .tables
+        .keys()
+        .map(|table_id| (table_id.0.clone(), table_menu_items(table_id, graph)))
+        .collect()
+}
+
+/// The node context menu's canned queries for one table: a preview, a row
+/// count, and one "preview joined with X" entry per relationship this table
+/// participates in (skipping self-referential FKs, which would need a table
+/// alias to join validly — not worth it for a canned query). Each relies
+/// only on metadata already in `GraphTable`/`GraphRelationship`, so there's
+/// no extra round-trip to the database to build the menu.
+fn table_menu_items(table_id: &TableId, graph: &SchemaGraph) -> Vec<(String, String)> {
+    let Some(table) = graph.tables.get(table_id) else {
+        return Vec::new();
+    };
+    let name = &table.name;
+    let mut items = vec![
+        (
+            "Preview rows".to_string(),
+            format!("SELECT * FROM {name} LIMIT 100;"),
+        ),
+        (
+            "Row count".to_string(),
+            format!("SELECT COUNT(*) FROM {name};"),
+        ),
+    ];
+
+    for relationship in &graph.relationships {
+        let (related_id, pairs): (&TableId, Vec<(&str, &str)>) =
+            if relationship.source_table == *table_id {
+                (
+                    &relationship.target_table,
+                    relationship
+                        .source_columns
+                        .iter()
+                        .zip(relationship.target_columns.iter())
+                        .map(|(this_col, related_col)| {
+                            (this_col.name.as_str(), related_col.name.as_str())
+                        })
+                        .collect(),
+                )
+            } else if relationship.target_table == *table_id {
+                (
+                    &relationship.source_table,
+                    relationship
+                        .target_columns
+                        .iter()
+                        .zip(relationship.source_columns.iter())
+                        .map(|(this_col, related_col)| {
+                            (this_col.name.as_str(), related_col.name.as_str())
+                        })
+                        .collect(),
+                )
+            } else {
+                continue;
+            };
+        if related_id == table_id {
+            continue;
+        }
+        let Some(related_table) = graph.tables.get(related_id) else {
+            continue;
+        };
+        let related_name = &related_table.name;
+        let on_clause = pairs
+            .iter()
+            .map(|(this_col, related_col)| {
+                format!("{name}.{this_col} = {related_name}.{related_col}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let join_columns = pairs
+            .iter()
+            .map(|(this_col, _)| *this_col)
+            .collect::<Vec<_>>()
+            .join(", ");
+        items.push((
+            format!("Preview joined with {related_name} (via {join_columns})"),
+            format!("SELECT * FROM {name} JOIN {related_name} ON {on_clause} LIMIT 100;"),
+        ));
+    }
+    items
+}
+
 fn render_table_card(
     node: &FlowNode,
+    menu_items: &HashMap<String, Vec<(String, String)>>,
+    panel: WeakEntity<super::DatabasePanel>,
+    connection_id: super::ConnectionId,
     _window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) -> AnyElement {
     let theme = cx.theme();
-    div()
+    let card = div()
+        .id(SharedString::from(format!("db-graph-node-{}", node.id)))
         .flex()
         .flex_col()
         .gap_1()
@@ -265,8 +548,29 @@ fn render_table_card(
                         .text_color(theme.colors.muted_foreground)
                         .child(type_name.clone()),
                 )
-        }))
-        .into_any_element()
+        }));
+
+    let Some(items) = menu_items.get(node.id.as_ref()).filter(|items| !items.is_empty()) else {
+        return card.into_any_element();
+    };
+    let items = items.clone();
+
+    card.context_menu(move |menu, _window, _cx| {
+        let mut menu = menu;
+        for (label, sql) in items.iter().cloned() {
+            let panel = panel.clone();
+            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let sql = sql.clone();
+                panel
+                    .update(cx, |panel, cx| {
+                        panel.run_canned_query(connection_id, sql, window, cx);
+                    })
+                    .ok();
+            }));
+        }
+        menu
+    })
+    .into_any_element()
 }
 
 fn color_u32(color: gpui::Hsla) -> u32 {
@@ -323,7 +627,10 @@ fn table_node(
             )
         })
         .collect();
-    node.draggable = false;
+    // Read-only explorer: you may rearrange cards to read the schema, but not
+    // rewire or delete them - the layout is recomputed from the live schema
+    // anyway, so an edit here would be silently discarded on refresh.
+    node.draggable = true;
     node.connectable = false;
     node.deletable = false;
     node
@@ -451,8 +758,9 @@ mod tests {
         assert_eq!(edges[0].source_handle.as_deref(), Some("posts.user_id"));
         assert_eq!(edges[0].target_handle.as_deref(), Some("users.id"));
         assert_eq!(edges[0].label.as_deref(), Some("1 : N"));
-        assert!(!nodes.iter().any(|node| node.draggable));
+        assert!(nodes.iter().all(|node| node.draggable));
         assert!(!nodes.iter().any(|node| node.connectable));
+        assert!(!nodes.iter().any(|node| node.deletable));
         assert!(nodes.iter().any(|node| {
             node.id.as_ref() == "posts"
                 && node.handles.iter().any(|handle| {

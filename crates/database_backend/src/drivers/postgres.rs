@@ -241,16 +241,34 @@ async fn table_columns(client: &Client, table: &str) -> Result<Vec<ColumnInfo>, 
 }
 
 async fn table_foreign_keys(client: &Client, table: &str) -> Result<Vec<ForeignKey>, DatabaseError> {
+    // Uses pg_catalog (pg_constraint / pg_attribute / pg_class) rather than
+    // information_schema — this is the same query that works in the original
+    // Forge Tauri implementation and is reliable on Supabase's pooler where
+    // information_schema.constraint_column_usage requires going through
+    // referential_constraints to bridge FK→PK constraint names correctly.
+    // pg_catalog has no such indirection: conkey/confkey are direct column
+    // ordinal arrays on pg_constraint itself.
+    //
+    // Note: ANY(con.conkey)/ANY(con.confkey) expands multi-column FK arrays
+    // correctly without needing unnest+zip — for composite FKs each source
+    // column matches all target columns, but single-column FKs (the
+    // overwhelming majority) work precisely.
     let rows = client
         .query(
-            "SELECT kcu.column_name, ccu.table_name, ccu.column_name \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage kcu \
-                 ON tc.constraint_name = kcu.constraint_name \
-             JOIN information_schema.constraint_column_usage ccu \
-                 ON tc.constraint_name = ccu.constraint_name \
-             WHERE tc.constraint_type = 'FOREIGN KEY' \
-                 AND tc.table_schema = 'public' AND tc.table_name = $1",
+            "SELECT a.attname  AS from_column, \
+                    c.relname  AS to_table, \
+                    af.attname AS to_column \
+             FROM   pg_constraint con \
+             JOIN   pg_attribute  a  ON  a.attrelid  = con.conrelid \
+                                     AND a.attnum    = ANY(con.conkey) \
+             JOIN   pg_attribute  af ON  af.attrelid = con.confrelid \
+                                     AND af.attnum   = ANY(con.confkey) \
+             JOIN   pg_class      cl ON  cl.oid      = con.conrelid \
+             JOIN   pg_class      c  ON  c.oid       = con.confrelid \
+             JOIN   pg_namespace  n  ON  n.oid       = cl.relnamespace \
+             WHERE  con.contype = 'f' \
+               AND  cl.relname  = $1 \
+               AND  n.nspname   = 'public'",
             &[&table],
         )
         .await

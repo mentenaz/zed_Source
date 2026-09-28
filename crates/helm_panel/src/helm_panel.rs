@@ -14,11 +14,11 @@ use std::time::Duration;
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    PathPromptOptions, Render, StatefulInteractiveElement, Styled, TaskExt, WeakEntity, Window,
-    actions, div, prelude::FluentBuilder as _, px,
+    PathPromptOptions, Render, StatefulInteractiveElement, Styled, Subscription, TaskExt,
+    WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable as _, StyledExt, WindowExt as _,
+    ActiveTheme, Disableable, Icon, IconName, Sizable as _, StyledExt,
     avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -34,20 +34,25 @@ use gpui_component::{
 use serde_json::json;
 
 use crate::backend::github::{
-    Branch, CloneEvent, Collaborator, Comment, GhAuthEvent, GhState, GitHubUser, Issue, OrgDetail,
-    Package, PackageVersion, Pull, Release, Repo, RepoInvitation, RepoTraffic,
+    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,
+    GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
+    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowRun, gh_accept_org_invitation,
     gh_accept_repo_invitation, gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo,
-    gh_create_repo, gh_decline_repo_invitation, gh_ensure_repo_scope, gh_get_branches,
+    gh_create_pull, gh_create_release, gh_create_repo, gh_decline_org_invitation,
+    gh_decline_repo_invitation, gh_ensure_repo_scope, gh_get_branches,
     gh_get_collaborators, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
     gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
-    gh_get_traffic_referrers, gh_get_traffic_views, gh_list_issue_comments, gh_list_issues,
-    gh_list_package_versions, gh_list_packages, gh_list_pulls, gh_list_releases, gh_login,
-    gh_logout, gh_remove_collaborator, gh_update_repo, gh_update_topics,
+    gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_list_dependabot_alerts,
+    gh_list_deployments, gh_list_issue_comments, gh_list_issues, gh_list_org_invitations,
+    gh_list_package_versions, gh_list_packages, gh_list_pulls, gh_list_recent_commits,
+    gh_list_releases, gh_list_secret_scanning_alerts, gh_list_tags, gh_list_workflow_runs,
+    gh_login, gh_logout, gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
 };
 use crate::backend::on_tokio;
 use workspace::{
-    ModalView, Workspace,
+    ModalView, Toast, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::NotificationId,
 };
 
 actions!(helm_panel, [ToggleFocus]);
@@ -87,6 +92,15 @@ enum HelmScreen {
     Packages,
     Traffic,
     Invitations,
+    /// A public profile view for someone other than the signed-in user —
+    /// see [`Self::open_user_profile`]. `Profile` stays the signed-in user's
+    /// own screen.
+    UserProfile,
+    Commits,
+    WorkflowRuns,
+    Deployments,
+    Tags,
+    Security,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -186,6 +200,11 @@ pub struct HelmPanel {
     cloning: bool,
     clone_lines: Vec<String>,
     clone_error: Option<String>,
+    /// Set on a successful clone, to the path it landed at — drives the
+    /// `HelmModalKind::CloneRepo` modal's "Would you like to open that
+    /// workspace?" stage instead of opening it automatically. Reset whenever
+    /// [`Self::open_clone_modal`] starts a fresh attempt.
+    clone_succeeded_path: Option<String>,
     /// Parent directory the Clone action targets — `None` means "the current
     /// workspace root", the pre-picker default. Chosen via [`Self::pick_clone_dir`]
     /// and consumed by [`Self::handle_clone`].
@@ -226,10 +245,24 @@ pub struct HelmPanel {
     package_versions_error: Option<String>,
     expanded_package: Option<String>,
     traffic: Option<RepoTraffic>,
+    commits: Vec<CommitSummary>,
+    workflow_runs: Vec<WorkflowRun>,
+    deployments: Vec<Deployment>,
+    tags: Vec<Tag>,
+    dependabot_alerts: Vec<serde_json::Value>,
+    secret_scanning_alerts: Vec<serde_json::Value>,
 
     // Pending repo invitations shown on the Profile screen's Invitations
     // screen — `repo_invitation_count` above is just the badge for that row.
     invitations: Vec<RepoInvitation>,
+    /// Pending org invitations, shown on the same Invitations screen.
+    org_invitations: Vec<OrgInvitation>,
+
+    /// Another user's public profile, viewed via [`Self::open_user_profile`]
+    /// (e.g. clicking a collaborator) — cleared whenever `set_screen` lands
+    /// anywhere but `UserProfile`. Distinct from `user`, which is always the
+    /// signed-in account.
+    viewed_user: Option<GitHubUserDetail>,
 }
 
 #[derive(Clone)]
@@ -238,11 +271,25 @@ enum HelmModalKind {
     EditRepo(Repo),
     AddCollaborator,
     RemoveCollaborator(String),
+    /// Carries the repo's default branch, prefilled as the base.
+    CreatePull(String),
+    CreateRelease,
+    /// Carries the signed-in user's current profile, prefilled into the form.
+    EditProfile(GitHubUser),
+    /// No form fields of its own — reads `parent`'s `cloning`/`clone_lines`/
+    /// `clone_error`/`clone_succeeded_path` directly and walks through
+    /// picking a folder, showing progress, and offering to open the result,
+    /// rather than a single submit like every other kind.
+    CloneRepo,
 }
 
 struct HelmRepositoryModal {
     kind: HelmModalKind,
     parent: Entity<HelmPanel>,
+    /// Re-renders this modal whenever `parent` does — needed only for
+    /// `CloneRepo`, which reads `parent`'s clone-progress fields live rather
+    /// than owning its own form state. `None` for every other kind.
+    _clone_progress_sub: Option<Subscription>,
     focus_handle: FocusHandle,
     name: Entity<InputState>,
     description: Entity<InputState>,
@@ -250,11 +297,18 @@ struct HelmRepositoryModal {
     topics: Entity<InputState>,
     organization: Entity<InputState>,
     username: Entity<InputState>,
+    tag_name: Entity<InputState>,
+    head_branch: Entity<InputState>,
+    base_branch: Entity<InputState>,
+    company: Entity<InputState>,
+    location: Entity<InputState>,
     private: bool,
     has_issues: bool,
     has_wiki: bool,
     has_projects: bool,
     has_discussions: bool,
+    draft: bool,
+    prerelease: bool,
     permission: usize,
 }
 
@@ -272,6 +326,12 @@ impl HelmRepositoryModal {
                 repo.homepage.clone().unwrap_or_default(),
                 repo.topics.join(", "),
             ),
+            HelmModalKind::EditProfile(user) => (
+                user.name.clone().unwrap_or_default(),
+                user.bio.clone().unwrap_or_default(),
+                user.blog.clone().unwrap_or_default(),
+                String::new(),
+            ),
             _ => (String::new(), String::new(), String::new(), String::new()),
         };
         let (has_issues, has_wiki, has_projects, has_discussions) = match &kind {
@@ -283,10 +343,25 @@ impl HelmRepositoryModal {
             ),
             _ => (true, true, true, true),
         };
+        let (company_value, location_value) = match &kind {
+            HelmModalKind::EditProfile(user) => (
+                user.company.clone().unwrap_or_default(),
+                user.location.clone().unwrap_or_default(),
+            ),
+            _ => (String::new(), String::new()),
+        };
+        let base_branch_value = match &kind {
+            HelmModalKind::CreatePull(default_base) => default_base.clone(),
+            _ => String::new(),
+        };
+
+        let clone_progress_sub = matches!(kind, HelmModalKind::CloneRepo)
+            .then(|| cx.observe(&parent, |_, _, cx| cx.notify()));
 
         Self {
             kind,
             parent,
+            _clone_progress_sub: clone_progress_sub,
             focus_handle: cx.focus_handle(),
             name: cx.new(|cx| InputState::new(window, cx).default_value(name_value)),
             description: cx.new(|cx| InputState::new(window, cx).default_value(description_value)),
@@ -300,11 +375,18 @@ impl HelmRepositoryModal {
                 InputState::new(window, cx).placeholder("Organization (blank = your account)")
             }),
             username: cx.new(|cx| InputState::new(window, cx).placeholder("GitHub username")),
+            tag_name: cx.new(|cx| InputState::new(window, cx).placeholder("v1.0.0")),
+            head_branch: cx.new(|cx| InputState::new(window, cx).placeholder("feature-branch")),
+            base_branch: cx.new(|cx| InputState::new(window, cx).default_value(base_branch_value)),
+            company: cx.new(|cx| InputState::new(window, cx).default_value(company_value)),
+            location: cx.new(|cx| InputState::new(window, cx).default_value(location_value)),
             private: true,
             has_issues,
             has_wiki,
             has_projects,
             has_discussions,
+            draft: false,
+            prerelease: false,
             permission: 0,
         }
     }
@@ -315,6 +397,10 @@ impl HelmRepositoryModal {
             HelmModalKind::EditRepo(_) => "Edit repository",
             HelmModalKind::AddCollaborator => "Add collaborator",
             HelmModalKind::RemoveCollaborator(_) => "Remove collaborator?",
+            HelmModalKind::CreatePull(_) => "Create pull request",
+            HelmModalKind::CreateRelease => "Create release",
+            HelmModalKind::EditProfile(_) => "Edit profile",
+            HelmModalKind::CloneRepo => "Clone repository",
         }
     }
 }
@@ -336,6 +422,7 @@ impl Render for HelmRepositoryModal {
         let title = self.title();
         let kind = self.kind.clone();
         let confirm_kind = kind.clone();
+        let show_footer = !matches!(confirm_kind, HelmModalKind::CloneRepo);
 
         let content = match &kind {
             HelmModalKind::CreateRepo => v_flex()
@@ -416,6 +503,203 @@ impl Render for HelmRepositoryModal {
                     "{login} will lose access to this repository immediately."
                 )))
                 .into_any_element(),
+            HelmModalKind::CreatePull(_) => v_flex()
+                .gap_3()
+                .child(labeled_field("Title", Input::new(&self.name), muted))
+                .child(labeled_field(
+                    "Description",
+                    Input::new(&self.description),
+                    muted,
+                ))
+                .child(labeled_field(
+                    "Head branch",
+                    Input::new(&self.head_branch),
+                    muted,
+                ))
+                .child(labeled_field(
+                    "Base branch",
+                    Input::new(&self.base_branch),
+                    muted,
+                ))
+                .into_any_element(),
+            HelmModalKind::CreateRelease => v_flex()
+                .gap_3()
+                .child(labeled_field("Tag", Input::new(&self.tag_name), muted))
+                .child(labeled_field("Title", Input::new(&self.name), muted))
+                .child(labeled_field(
+                    "Description",
+                    Input::new(&self.description),
+                    muted,
+                ))
+                .child(
+                    Switch::new("helm-modal-draft")
+                        .label("Draft")
+                        .checked(self.draft)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.draft = *checked;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Switch::new("helm-modal-prerelease")
+                        .label("Pre-release")
+                        .checked(self.prerelease)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.prerelease = *checked;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+            HelmModalKind::EditProfile(_) => v_flex()
+                .gap_3()
+                .child(labeled_field("Name", Input::new(&self.name), muted))
+                .child(labeled_field("Bio", Input::new(&self.description), muted))
+                .child(labeled_field("Company", Input::new(&self.company), muted))
+                .child(labeled_field("Location", Input::new(&self.location), muted))
+                .child(labeled_field(
+                    "Blog / website",
+                    Input::new(&self.homepage),
+                    muted,
+                ))
+                .into_any_element(),
+            HelmModalKind::CloneRepo => {
+                let panel = parent.read(cx);
+                if let Some(succeeded_path) = panel.clone_succeeded_path.clone() {
+                    let repo_name = panel
+                        .selected_repo
+                        .as_ref()
+                        .map(|repo| repo.name.clone())
+                        .unwrap_or_default();
+                    v_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::CircleCheck)
+                                .size(px(32.))
+                                .text_color(cx.theme().success),
+                        )
+                        .child(
+                            div()
+                                .text_color(foreground)
+                                .child(format!("You have successfully cloned {repo_name}.")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child("Would you like to open that workspace?"),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("helm-clone-open-no")
+                                        .outline()
+                                        .label("No")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(DismissEvent);
+                                        })),
+                                )
+                                .child(Button::new("helm-clone-open-yes").primary().label("Yes").on_click({
+                                    let parent = parent.clone();
+                                    cx.listener(move |_, _, window, cx| {
+                                        parent.update(cx, |panel, cx| {
+                                            panel.handle_clone_open_workspace(
+                                                succeeded_path.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        cx.emit(DismissEvent);
+                                    })
+                                })),
+                        )
+                        .into_any_element()
+                } else if panel.cloning {
+                    let recent_lines: Vec<String> = panel
+                        .clone_lines
+                        .iter()
+                        .rev()
+                        .take(20)
+                        .rev()
+                        .cloned()
+                        .collect();
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(Spinner::new().small())
+                                .child(div().text_sm().text_color(muted).child("Cloning…")),
+                        )
+                        .children(recent_lines.into_iter().map(|line| {
+                            div()
+                                .font_family("Cascadia Mono")
+                                .text_xs()
+                                .text_color(muted)
+                                .child(line)
+                        }))
+                        .into_any_element()
+                } else if let Some(err) = panel.clone_error.clone() {
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_sm().text_color(cx.theme().danger).child(format!("✗ {err}")))
+                        .child(
+                            h_flex().justify_end().gap_2().child(
+                                Button::new("helm-clone-retry").outline().label("Retry").on_click({
+                                    let parent = parent.clone();
+                                    cx.listener(move |_, _, window, cx| {
+                                        parent.update(cx, |panel, cx| panel.handle_clone(window, cx));
+                                    })
+                                }),
+                            ),
+                        )
+                        .into_any_element()
+                } else {
+                    let target = panel.clone_target_path(cx).unwrap_or_default();
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(format!("Clones into {target}")),
+                                )
+                                .child(
+                                    Button::new("helm-clone-choose-dir")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Choose folder…")
+                                        .on_click({
+                                            let parent = parent.clone();
+                                            cx.listener(move |_, _, _, cx| {
+                                                parent.update(cx, |panel, cx| panel.pick_clone_dir(cx));
+                                            })
+                                        }),
+                                ),
+                        )
+                        .child(
+                            Button::new("helm-clone-start")
+                                .primary()
+                                .icon(IconName::Github)
+                                .label("Clone repository")
+                                .on_click({
+                                    let parent = parent.clone();
+                                    cx.listener(move |_, _, window, cx| {
+                                        parent.update(cx, |panel, cx| panel.handle_clone(window, cx));
+                                    })
+                                }),
+                        )
+                        .into_any_element()
+                }
+            }
         };
 
         let confirm = cx.listener(move |this, _, window, cx| {
@@ -440,6 +724,13 @@ impl Render for HelmRepositoryModal {
             let has_wiki = this.has_wiki;
             let has_projects = this.has_projects;
             let has_discussions = this.has_discussions;
+            let tag_name = this.tag_name.read(cx).value().to_string();
+            let head_branch = this.head_branch.read(cx).value().trim().to_string();
+            let base_branch = this.base_branch.read(cx).value().trim().to_string();
+            let company = this.company.read(cx).value().to_string();
+            let location = this.location.read(cx).value().to_string();
+            let draft = this.draft;
+            let prerelease = this.prerelease;
 
             match kind {
                 HelmModalKind::CreateRepo => {
@@ -483,6 +774,35 @@ impl Render for HelmRepositoryModal {
                         this.handle_remove_collaborator(login, window, cx);
                     });
                 }
+                HelmModalKind::CreatePull(_) => {
+                    if head_branch.is_empty() || base_branch.is_empty() || name.is_empty() {
+                        return;
+                    }
+                    parent.update(cx, |this, cx| {
+                        this.handle_create_pull(name, description, head_branch, base_branch, window, cx);
+                    });
+                }
+                HelmModalKind::CreateRelease => {
+                    if tag_name.is_empty() {
+                        return;
+                    }
+                    parent.update(cx, |this, cx| {
+                        this.handle_create_release(
+                            tag_name, name, description, draft, prerelease, window, cx,
+                        );
+                    });
+                }
+                HelmModalKind::EditProfile(_) => {
+                    parent.update(cx, |this, cx| {
+                        this.handle_update_profile(
+                            name, description, company, location, homepage, window, cx,
+                        );
+                    });
+                }
+                // The footer's generic Confirm button is hidden for this kind
+                // (see below) — its own content has its own buttons/handlers,
+                // each dismissing explicitly where appropriate.
+                HelmModalKind::CloneRepo => return,
             }
             cx.emit(DismissEvent);
         });
@@ -498,28 +818,34 @@ impl Render for HelmRepositoryModal {
             .rounded_lg()
             .child(div().font_semibold().text_color(foreground).child(title))
             .child(div().text_sm().text_color(muted).child(content))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        Button::new("helm-modal-cancel")
-                            .outline()
-                            .label("Cancel")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
-                    )
-                    .child(
-                        Button::new("helm-modal-confirm")
-                            .primary()
-                            .label(match confirm_kind {
-                                HelmModalKind::CreateRepo => "Create",
-                                HelmModalKind::EditRepo(_) => "Save",
-                                HelmModalKind::AddCollaborator => "Add",
-                                HelmModalKind::RemoveCollaborator(_) => "Remove",
-                            })
-                            .on_click(confirm),
-                    ),
-            )
+            .when(show_footer, |el| {
+                el.child(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("helm-modal-cancel")
+                                .outline()
+                                .label("Cancel")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                        )
+                        .child(
+                            Button::new("helm-modal-confirm")
+                                .primary()
+                                .label(match confirm_kind {
+                                    HelmModalKind::CreateRepo => "Create",
+                                    HelmModalKind::EditRepo(_) => "Save",
+                                    HelmModalKind::AddCollaborator => "Add",
+                                    HelmModalKind::RemoveCollaborator(_) => "Remove",
+                                    HelmModalKind::CreatePull(_) => "Create",
+                                    HelmModalKind::CreateRelease => "Create",
+                                    HelmModalKind::EditProfile(_) => "Save",
+                                    HelmModalKind::CloneRepo => "Clone",
+                                })
+                                .on_click(confirm),
+                        ),
+                )
+            })
     }
 }
 
@@ -575,6 +901,7 @@ impl HelmPanel {
                 cloning: false,
                 clone_lines: Vec::new(),
                 clone_error: None,
+                clone_succeeded_path: None,
                 clone_target_dir: None,
                 workspace,
                 branches: Vec::new(),
@@ -593,7 +920,15 @@ impl HelmPanel {
                 package_versions_error: None,
                 expanded_package: None,
                 traffic: None,
+                commits: Vec::new(),
+                workflow_runs: Vec::new(),
+                deployments: Vec::new(),
+                tags: Vec::new(),
+                dependabot_alerts: Vec::new(),
+                secret_scanning_alerts: Vec::new(),
                 invitations: Vec::new(),
+                org_invitations: Vec::new(),
+                viewed_user: None,
             };
             this.check_cli(cx);
             this
@@ -705,19 +1040,28 @@ impl HelmPanel {
         .detach();
     }
 
-    /// Loads the pending repo-invitation list for the Profile screen's
-    /// Invitations row (badge count + the Invitations screen itself).
-    /// Fire-and-forget: a failure just leaves the previous state in place.
+    /// Loads the pending repo- and org-invitation lists for the Profile
+    /// screen's Invitations row (badge count + the Invitations screen
+    /// itself). Fire-and-forget: a failure on either just leaves the
+    /// previous state for that list in place.
     fn load_repo_invitations(&mut self, cx: &mut Context<Self>) {
         let gh_state = self.gh_state.clone();
         cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_get_repo_invitations(&gh_state).await }).await;
+            let (repo_result, org_result) = on_tokio(async move {
+                let repo_result = gh_get_repo_invitations(&gh_state).await;
+                let org_result = gh_list_org_invitations(&gh_state).await;
+                (repo_result, org_result)
+            })
+            .await;
             this.update(cx, |this, cx| {
-                if let Ok(invitations) = result {
-                    this.repo_invitation_count = invitations.len();
+                if let Ok(invitations) = repo_result {
                     this.invitations = invitations;
-                    cx.notify();
                 }
+                if let Ok(org_invitations) = org_result {
+                    this.org_invitations = org_invitations;
+                }
+                this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
+                cx.notify();
             })
             .ok();
         })
@@ -765,7 +1109,7 @@ impl HelmPanel {
                             break;
                         }
                     }
-                    Ok(GhAuthEvent::Done(_)) => break,
+                    Ok(GhAuthEvent::Done) => break,
                     // `Lagged` means missed events, not a dead channel —
                     // resync and keep listening; only `Closed` ends this loop.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -891,6 +1235,11 @@ impl HelmPanel {
             HelmScreen::Releases,
             HelmScreen::Packages,
             HelmScreen::Traffic,
+            HelmScreen::Commits,
+            HelmScreen::WorkflowRuns,
+            HelmScreen::Deployments,
+            HelmScreen::Tags,
+            HelmScreen::Security,
         ];
         const REPO_DRIVEN: &[HelmScreen] = &[
             HelmScreen::RepoDetail,
@@ -903,6 +1252,11 @@ impl HelmPanel {
             HelmScreen::Releases,
             HelmScreen::Packages,
             HelmScreen::Traffic,
+            HelmScreen::Commits,
+            HelmScreen::WorkflowRuns,
+            HelmScreen::Deployments,
+            HelmScreen::Tags,
+            HelmScreen::Security,
         ];
         if !ORG_SCOPED.contains(&screen) {
             self.selected_org = None;
@@ -923,6 +1277,15 @@ impl HelmPanel {
             self.package_versions.clear();
             self.expanded_package = None;
             self.traffic = None;
+            self.commits.clear();
+            self.workflow_runs.clear();
+            self.deployments.clear();
+            self.tags.clear();
+            self.dependabot_alerts.clear();
+            self.secret_scanning_alerts.clear();
+        }
+        if screen != HelmScreen::UserProfile {
+            self.viewed_user = None;
         }
         // Refresh the invitations badge every time the Profile screen (or the
         // Invitations screen itself) is landed on, including via back/forward.
@@ -1037,37 +1400,74 @@ impl HelmPanel {
         .detach();
     }
 
-    /// Clones `self.selected_repo` into `{workspace_root}/{repo.name}` and,
-    /// on success, sets that as the new workspace root — the actual payoff
-    /// of having a real workspace-root concept now: cloning a repo from
-    /// Helm opens it. No-ops if no folder is open yet (see `render_repo_detail`,
-    /// which disables the Clone button in that case rather than calling this).
+    /// The exact path a clone of `self.selected_repo` would land at — the
+    /// current workspace's first worktree root (or the user-picked
+    /// `clone_target_dir`) joined with the repo's name. `None` when no
+    /// folder is open yet or no repo is selected.
+    fn clone_target_path(&self, cx: &App) -> Option<String> {
+        let repo = self.selected_repo.as_ref()?;
+        let parent = match self.clone_target_dir.clone() {
+            Some(dir) => dir,
+            None => self
+                .workspace
+                .upgrade()?
+                .read(cx)
+                .worktrees(cx)
+                .next()?
+                .read(cx)
+                .abs_path()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        Some(
+            std::path::Path::new(&parent)
+                .join(&repo.name)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// Opens the Clone-repository overlay, resetting any previous
+    /// attempt's progress/error/success state so it always starts fresh.
+    fn open_clone_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cloning = false;
+        self.clone_lines.clear();
+        self.clone_error = None;
+        self.clone_succeeded_path = None;
+        self.open_workspace_modal(HelmModalKind::CloneRepo, window, cx);
+    }
+
+    /// Opens `path` (a just-completed clone) as a new workspace window — the
+    /// Clone overlay's "Yes" button, called instead of doing this
+    /// automatically so the user can decline and clone elsewhere without a
+    /// second window popping up unasked.
+    fn handle_clone_open_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace
+                    .open_workspace_for_paths(
+                        workspace::OpenMode::NewWindow,
+                        vec![std::path::PathBuf::from(&path)],
+                        window,
+                        cx,
+                    )
+                    .detach_and_log_err(cx);
+            })
+            .ok();
+    }
+
+    /// Clones `self.selected_repo` into [`Self::clone_target_path`]. On
+    /// success, stores the landing path in `clone_succeeded_path` instead of
+    /// opening it automatically — see `HelmModalKind::CloneRepo`'s render,
+    /// which then offers to open it. No-ops if no folder is open yet (see
+    /// `render_repo_detail`, which disables the Clone button in that case).
     fn handle_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.selected_repo.clone() else {
             return;
         };
-        let Some(workspace_root) = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                workspace
-                    .worktrees(cx)
-                    .next()
-                    .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
-            })
-            .ok()
-            .flatten()
-        else {
+        let Some(target_path) = self.clone_target_path(cx) else {
             return;
         };
-
-        // A folder picked via `pick_clone_dir` overrides the workspace root
-        // as the clone's parent; `None` keeps the old
-        // `{workspace_root}/{repo.name}` default.
-        let parent = self.clone_target_dir.clone().unwrap_or(workspace_root);
-        let target_path = std::path::Path::new(&parent)
-            .join(&repo.name)
-            .to_string_lossy()
-            .into_owned();
 
         self.cloning = true;
         self.clone_lines.clear();
@@ -1088,7 +1488,7 @@ impl HelmPanel {
                 let line = match event {
                     Ok(CloneEvent::Line(line)) => line,
                     Ok(CloneEvent::NpmStart) => "Installing npm dependencies…".to_string(),
-                    Ok(CloneEvent::Done(_)) => break,
+                    Ok(CloneEvent::Done) => break,
                     // `Lagged` means missed events, not a dead channel —
                     // resync and keep listening; only `Closed` ends this loop.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1197,13 +1597,13 @@ impl HelmPanel {
         let gh_state = self.gh_state.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = on_tokio(async move { gh_create_repo(opts, &gh_state).await }).await;
-            this.update_in(cx, |this, window, cx| match result {
+            this.update_in(cx, |this, _window, cx| match result {
                 Ok(repo) => {
                     this.repos.push(repo.clone());
                     this.select_repo(repo, cx);
                 }
                 Err(e) => {
-                    window.push_notification(format!("Failed to create repository: {e}"), cx);
+                    this.notify(format!("Failed to create repository: {e}"), cx);
                 }
             })
             .ok();
@@ -1257,7 +1657,7 @@ impl HelmPanel {
                 }
             })
             .await;
-            this.update_in(cx, |this, window, cx| match result {
+            this.update_in(cx, |this, _window, cx| match result {
                 Ok(mut updated) => {
                     // `gh_update_repo`'s response reflects the PATCH body, not the
                     // just-applied topics PUT — fold the topics we sent back in so
@@ -1270,7 +1670,7 @@ impl HelmPanel {
                     cx.notify();
                 }
                 Err(e) => {
-                    window.push_notification(format!("Failed to update repository: {e}"), cx);
+                    this.notify(format!("Failed to update repository: {e}"), cx);
                 }
             })
             .ok();
@@ -1619,20 +2019,376 @@ impl HelmPanel {
         .detach();
     }
 
+    /// Loads `self.selected_repo`'s recent commits (Commits screen).
+    fn load_commits(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move {
+                gh_list_recent_commits(repo.owner.login, repo.name, &gh_state).await
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(commits) => {
+                        this.commits = commits;
+                        this.load_state = LoadState::Idle;
+                    }
+                    Err(e) => {
+                        this.load_state = LoadState::Error;
+                        this.error_msg = e;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads `self.selected_repo`'s recent Actions/CI workflow runs.
+    fn load_workflow_runs(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move {
+                gh_list_workflow_runs(repo.owner.login, repo.name, &gh_state).await
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(runs) => {
+                        this.workflow_runs = runs;
+                        this.load_state = LoadState::Idle;
+                    }
+                    Err(e) => {
+                        this.load_state = LoadState::Error;
+                        this.error_msg = e;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads `self.selected_repo`'s deployments.
+    fn load_deployments(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move {
+                gh_list_deployments(repo.owner.login, repo.name, &gh_state).await
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(deployments) => {
+                        this.deployments = deployments;
+                        this.load_state = LoadState::Idle;
+                    }
+                    Err(e) => {
+                        this.load_state = LoadState::Error;
+                        this.error_msg = e;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads `self.selected_repo`'s tags.
+    fn load_tags(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result =
+                on_tokio(async move { gh_list_tags(repo.owner.login, repo.name, &gh_state).await })
+                    .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(tags) => {
+                        this.tags = tags;
+                        this.load_state = LoadState::Idle;
+                    }
+                    Err(e) => {
+                        this.load_state = LoadState::Error;
+                        this.error_msg = e;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads `self.selected_repo`'s dependabot and secret-scanning alerts for
+    /// the Security screen — like `load_traffic`, each endpoint's failure is
+    /// independent (a repo can have one feature enabled and not the other).
+    fn load_security(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        let owner = repo.owner.login;
+        let name = repo.name;
+        cx.spawn(async move |this, cx| {
+            let (dependabot, secret_scanning) = on_tokio(async move {
+                let dependabot = gh_list_dependabot_alerts(owner.clone(), name.clone(), &gh_state)
+                    .await
+                    .unwrap_or_default();
+                let secret_scanning =
+                    gh_list_secret_scanning_alerts(owner, name, &gh_state)
+                        .await
+                        .unwrap_or_default();
+                (dependabot, secret_scanning)
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                this.dependabot_alerts = dependabot;
+                this.secret_scanning_alerts = secret_scanning;
+                this.load_state = LoadState::Idle;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// User clicked a username shown elsewhere in the panel (e.g. a
+    /// collaborator row) — opens their public profile.
+    fn open_user_profile(&mut self, username: String, cx: &mut Context<Self>) {
+        self.navigate_to(HelmScreen::UserProfile, cx);
+        self.load_user_profile(username, cx);
+    }
+
+    fn load_user_profile(&mut self, username: String, cx: &mut Context<Self>) {
+        self.load_state = LoadState::Loading;
+        self.error_msg.clear();
+        self.viewed_user = None;
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move { gh_get_user(username, &gh_state).await }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(user) => {
+                        this.viewed_user = Some(user);
+                        this.load_state = LoadState::Idle;
+                    }
+                    Err(e) => {
+                        this.load_state = LoadState::Error;
+                        this.error_msg = e;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the "Create pull request" modal, prefilling the base branch
+    /// with `self.selected_repo`'s default branch.
+    fn open_create_pull_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let default_base = self
+            .selected_repo
+            .as_ref()
+            .map(|r| r.default_branch.clone())
+            .unwrap_or_default();
+        self.open_workspace_modal(HelmModalKind::CreatePull(default_base), window, cx);
+    }
+
+    fn handle_create_pull(
+        &mut self,
+        title: String,
+        body: String,
+        head: String,
+        base: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        let gh_state = self.gh_state.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = on_tokio(async move {
+                gh_create_pull(
+                    repo.owner.login,
+                    repo.name,
+                    head,
+                    base,
+                    title,
+                    (!body.is_empty()).then_some(body),
+                    &gh_state,
+                )
+                .await
+            })
+            .await;
+            this.update_in(cx, |this, _window, cx| {
+                if let Err(e) = result {
+                    this.notify(format!("Failed to create pull request: {e}"), cx);
+                }
+                this.load_pulls(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the "Create release" modal.
+    fn open_create_release_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_workspace_modal(HelmModalKind::CreateRelease, window, cx);
+    }
+
+    fn handle_create_release(
+        &mut self,
+        tag_name: String,
+        title: String,
+        body: String,
+        draft: bool,
+        prerelease: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        let gh_state = self.gh_state.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = on_tokio(async move {
+                gh_create_release(
+                    repo.owner.login,
+                    repo.name,
+                    tag_name,
+                    (!title.is_empty()).then_some(title),
+                    (!body.is_empty()).then_some(body),
+                    Some(draft),
+                    Some(prerelease),
+                    &gh_state,
+                )
+                .await
+            })
+            .await;
+            this.update_in(cx, |this, _window, cx| {
+                if let Err(e) = result {
+                    this.notify(format!("Failed to create release: {e}"), cx);
+                }
+                this.load_releases(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the "Edit profile" modal, prefilled from `self.user`.
+    fn open_edit_profile_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(user) = self.user.clone() else {
+            return;
+        };
+        self.open_workspace_modal(HelmModalKind::EditProfile(user), window, cx);
+    }
+
+    /// Updates the signed-in user's profile. GitHub's `/user` PATCH endpoint
+    /// needs the `user` OAuth scope — already granted at login time
+    /// (`gh_login` requests `repo,read:org,user` up front, see cli.rs), so
+    /// unlike `gh_ensure_repo_scope` (an explicit, user-visible re-auth
+    /// screen for a scope that's genuinely sometimes missing) this doesn't
+    /// call `gh_ensure_user_scope` here: that runs `gh auth refresh`, an
+    /// interactive device-code re-auth, with no UI surfacing the
+    /// code/URL — it would silently hang Save waiting on a browser flow the
+    /// user was never shown.
+    fn handle_update_profile(
+        &mut self,
+        name: String,
+        bio: String,
+        company: String,
+        location: String,
+        blog: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gh_state = self.gh_state.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = on_tokio(async move {
+                let changes = json!({
+                    "name": name,
+                    "bio": bio,
+                    "company": company,
+                    "location": location,
+                    "blog": blog,
+                });
+                gh_update_user(changes, &gh_state).await
+            })
+            .await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(_) => {
+                    this.notify("Profile updated", cx);
+                    let gh_state = this.gh_state.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        let updated =
+                            on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
+                        this.update(cx, |this, cx| {
+                            if let Ok(user) = updated {
+                                this.user = Some(user);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                Err(e) => {
+                    this.notify(format!("Failed to update profile: {e}"), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Accepts a pending repo invitation and drops it from the list + badge.
     fn handle_accept_invitation(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let gh_state = self.gh_state.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result =
                 on_tokio(async move { gh_accept_repo_invitation(id, &gh_state).await }).await;
-            this.update_in(cx, |this, window, cx| match result {
+            this.update_in(cx, |this, _window, cx| match result {
                 Ok(()) => {
                     this.invitations.retain(|inv| inv.id != id);
                     this.repo_invitation_count = this.invitations.len();
-                    window.push_notification("Invitation accepted", cx);
+                    this.notify("Invitation accepted", cx);
                 }
                 Err(e) => {
-                    window.push_notification(format!("Failed to accept invitation: {e}"), cx);
+                    this.notify(format!("Failed to accept invitation: {e}"), cx);
                 }
             })
             .ok();
@@ -1646,14 +2402,71 @@ impl HelmPanel {
         cx.spawn_in(window, async move |this, cx| {
             let result =
                 on_tokio(async move { gh_decline_repo_invitation(id, &gh_state).await }).await;
-            this.update_in(cx, |this, window, cx| match result {
+            this.update_in(cx, |this, _window, cx| match result {
                 Ok(()) => {
                     this.invitations.retain(|inv| inv.id != id);
-                    this.repo_invitation_count = this.invitations.len();
-                    window.push_notification("Invitation declined", cx);
+                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
+                    this.notify("Invitation declined", cx);
                 }
                 Err(e) => {
-                    window.push_notification(format!("Failed to decline invitation: {e}"), cx);
+                    this.notify(format!("Failed to decline invitation: {e}"), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Accepts a pending org invitation and drops it from the list + badge.
+    fn handle_accept_org_invitation(
+        &mut self,
+        org: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gh_state = self.gh_state.clone();
+        let org_for_call = org.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result =
+                on_tokio(async move { gh_accept_org_invitation(org_for_call, &gh_state).await })
+                    .await;
+            this.update_in(cx, |this, _window, cx| match result {
+                Ok(()) => {
+                    this.org_invitations
+                        .retain(|inv| inv.organization.login != org);
+                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
+                    this.notify("Invitation accepted", cx);
+                }
+                Err(e) => {
+                    this.notify(format!("Failed to accept invitation: {e}"), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Declines a pending org invitation and drops it from the list + badge.
+    fn handle_decline_org_invitation(
+        &mut self,
+        org: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gh_state = self.gh_state.clone();
+        let org_for_call = org.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result =
+                on_tokio(async move { gh_decline_org_invitation(org_for_call, &gh_state).await })
+                    .await;
+            this.update_in(cx, |this, _window, cx| match result {
+                Ok(()) => {
+                    this.org_invitations.retain(|inv| inv.organization.login != org);
+                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
+                    this.notify("Invitation declined", cx);
+                }
+                Err(e) => {
+                    this.notify(format!("Failed to decline invitation: {e}"), cx);
                 }
             })
             .ok();
@@ -1681,9 +2494,9 @@ impl HelmPanel {
                 gh_add_collaborator(repo.owner.login, repo.name, login, permission, &gh_state).await
             })
             .await;
-            this.update_in(cx, |this, window, cx| {
+            this.update_in(cx, |this, _window, cx| {
                 if let Err(e) = result {
-                    window.push_notification(format!("Failed to update collaborator: {e}"), cx);
+                    this.notify(format!("Failed to update collaborator: {e}"), cx);
                 }
                 this.load_collaborators(cx);
             })
@@ -1709,9 +2522,9 @@ impl HelmPanel {
                 gh_remove_collaborator(repo.owner.login, repo.name, login, &gh_state).await
             })
             .await;
-            this.update_in(cx, |this, window, cx| {
+            this.update_in(cx, |this, _window, cx| {
                 if let Err(e) = result {
-                    window.push_notification(format!("Failed to remove collaborator: {e}"), cx);
+                    this.notify(format!("Failed to remove collaborator: {e}"), cx);
                 }
                 this.load_collaborators(cx);
             })
@@ -1892,10 +2705,16 @@ impl HelmPanel {
                                     .text_color(muted_foreground),
                             )
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| match id {
+                    .on_click(cx.listener(move |this, _, window, cx| match id {
                         "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
                         "repos" => this.open_repo_list(cx),
                         "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
+                        "edit-profile" => this.open_edit_profile_dialog(window, cx),
+                        // No per-account security API is wired up (Dependabot
+                        // /secret-scanning alerts, elsewhere in this panel,
+                        // are repo-scoped, not account-scoped) — opens
+                        // GitHub's own settings page instead of a dead click.
+                        "account-security" => cx.open_url("https://github.com/settings/security"),
                         _ => {}
                     }))
             })))
@@ -1917,12 +2736,13 @@ impl HelmPanel {
         // `selected_org` being set but `org_detail` still loading just
         // hides the header for a moment, rather than flashing stale user
         // identity.
-        let (avatar_url, name, login) = if self.selected_org.is_some() {
+        let (avatar_url, name, login, description) = if self.selected_org.is_some() {
             let org = self.org_detail.as_ref()?;
             (
                 org.avatar_url.clone(),
                 org.name.clone().unwrap_or_else(|| org.login.clone()),
                 org.login.clone(),
+                org.description.clone(),
             )
         } else {
             let user = self.user.as_ref()?;
@@ -1930,6 +2750,7 @@ impl HelmPanel {
                 user.avatar_url.clone(),
                 user.name.clone().unwrap_or_else(|| user.login.clone()),
                 user.login.clone(),
+                user.bio.clone(),
             )
         };
 
@@ -1958,6 +2779,17 @@ impl HelmPanel {
                                         .text_xs()
                                         .text_color(muted_foreground)
                                         .child(format!("@{login}")),
+                                )
+                                .when_some(
+                                    description.filter(|bio| !bio.trim().is_empty()),
+                                    |el, bio| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted_foreground)
+                                                .child(bio),
+                                        )
+                                    },
                                 ),
                         ),
                 )
@@ -2673,7 +3505,6 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
-        let danger = cx.theme().danger;
 
         let Some(repo) = self.selected_repo.clone() else {
             return v_flex()
@@ -2808,87 +3639,19 @@ impl HelmPanel {
             .ok()
             .flatten();
 
-        let clone_section = if self.cloning {
-            let recent_lines: &[String] = if self.clone_lines.len() > 20 {
-                &self.clone_lines[self.clone_lines.len() - 20..]
-            } else {
-                &self.clone_lines[..]
-            };
+        let clone_section = if workspace_root.is_some() {
             v_flex()
                 .gap_2()
                 .px_3()
                 .py_2()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Cloning…"),
-                        ),
-                )
-                .children(recent_lines.iter().map(|line| {
-                    div()
-                        .font_family("Cascadia Mono")
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(line.clone())
-                }))
-                .into_any_element()
-        } else if let Some(err) = self.clone_error.clone() {
-            v_flex()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .child(div().text_sm().text_color(danger).child(format!("✗ {err}")))
-                .child(
-                    Button::new("helm-repo-clone-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, window, cx| this.handle_clone(window, cx))),
-                )
-                .into_any_element()
-        } else if let Some(root) = workspace_root {
-            let parent = self
-                .clone_target_dir
-                .clone()
-                .unwrap_or_else(|| root.to_string_lossy().into_owned());
-            let target = std::path::Path::new(&parent)
-                .join(&repo.name)
-                .to_string_lossy()
-                .into_owned();
-            v_flex()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(format!("Clones into {target}")),
-                        )
-                        .child(
-                            Button::new("helm-repo-choose-dir")
-                                .ghost()
-                                .xsmall()
-                                .label("Choose folder…")
-                                .on_click(cx.listener(|this, _, _, cx| this.pick_clone_dir(cx))),
-                        ),
-                )
                 .child(
                     Button::new("helm-repo-clone")
                         .primary()
                         .icon(IconName::Github)
                         .label("Clone repository")
-                        .on_click(cx.listener(|this, _, window, cx| this.handle_clone(window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_clone_modal(window, cx)
+                        })),
                 )
                 .into_any_element()
         } else {
@@ -2996,6 +3759,46 @@ impl HelmPanel {
                         this.load_traffic(cx);
                     },
                 )),
+            )
+            .child(
+                nav_row("helm-repo-commits", IconName::Git, "Commits").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.navigate_to(HelmScreen::Commits, cx);
+                        this.load_commits(cx);
+                    },
+                )),
+            )
+            .child(
+                nav_row("helm-repo-actions", IconName::SquareTerminal, "Actions").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.navigate_to(HelmScreen::WorkflowRuns, cx);
+                        this.load_workflow_runs(cx);
+                    }),
+                ),
+            )
+            .child(
+                nav_row("helm-repo-deployments", IconName::Globe, "Deployments").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.navigate_to(HelmScreen::Deployments, cx);
+                        this.load_deployments(cx);
+                    }),
+                ),
+            )
+            .child(
+                nav_row("helm-repo-tags", IconName::Asterisk, "Tags").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.navigate_to(HelmScreen::Tags, cx);
+                        this.load_tags(cx);
+                    },
+                )),
+            )
+            .child(
+                nav_row("helm-repo-security", IconName::TriangleAlert, "Security").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.navigate_to(HelmScreen::Security, cx);
+                        this.load_security(cx);
+                    }),
+                ),
             )
             .into_any_element()
     }
@@ -3138,7 +3941,10 @@ impl HelmPanel {
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self.workspace.upgrade() else {
-            window.push_notification("Helm is not attached to a workspace.", cx);
+            // No workspace to open a modal *in*, so there's nowhere to show
+            // a toast either — this is a "should never happen" guard, not a
+            // user-facing error state.
+            log::warn!("helm_panel: open_workspace_modal called with no attached workspace");
             return;
         };
         let parent = cx.entity();
@@ -3147,6 +3953,22 @@ impl HelmPanel {
                 HelmRepositoryModal::new(kind, parent, window, cx)
             });
         });
+    }
+
+    /// Shows `message` as a toast on the workspace this panel is attached
+    /// to. `gpui_component`'s own `window.push_notification` (this crate's
+    /// earlier approach) requires the window to be wrapped in a
+    /// `gpui_component::Root`, which the main Zed workspace window never is
+    /// — calling it here panics with "window first layer should be a
+    /// gpui_component::Root". `workspace::Toast` is the mechanism Zed's own
+    /// windows actually support.
+    fn notify(&self, message: impl Into<std::borrow::Cow<'static, str>>, cx: &mut App) {
+        let message = message.into();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(Toast::new(NotificationId::unique::<HelmPanel>(), message), cx);
+            })
+            .ok();
     }
 
     /// The branches list — read-only, mirrors `render_repo_list`'s
@@ -3432,6 +4254,9 @@ impl HelmPanel {
                                 )
                         }
                     })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_user_profile(login.clone(), cx);
+                    }))
             })))
             .into_any_element()
     }
@@ -3663,33 +4488,49 @@ impl HelmPanel {
 
         let filter_row = h_flex()
             .items_center()
+            .justify_between()
             .gap_1()
             .px_3()
             .py_2()
-            .child(self.state_filter_button(
-                "helm-pulls-open",
-                "Open",
-                "open",
-                self.pulls_filter == "open",
-                HelmScreen::Pulls,
-                cx,
-            ))
-            .child(self.state_filter_button(
-                "helm-pulls-closed",
-                "Closed",
-                "closed",
-                self.pulls_filter == "closed",
-                HelmScreen::Pulls,
-                cx,
-            ))
-            .child(self.state_filter_button(
-                "helm-pulls-all",
-                "All",
-                "all",
-                self.pulls_filter == "all",
-                HelmScreen::Pulls,
-                cx,
-            ));
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(self.state_filter_button(
+                        "helm-pulls-open",
+                        "Open",
+                        "open",
+                        self.pulls_filter == "open",
+                        HelmScreen::Pulls,
+                        cx,
+                    ))
+                    .child(self.state_filter_button(
+                        "helm-pulls-closed",
+                        "Closed",
+                        "closed",
+                        self.pulls_filter == "closed",
+                        HelmScreen::Pulls,
+                        cx,
+                    ))
+                    .child(self.state_filter_button(
+                        "helm-pulls-all",
+                        "All",
+                        "all",
+                        self.pulls_filter == "all",
+                        HelmScreen::Pulls,
+                        cx,
+                    )),
+            )
+            .child(
+                Button::new("pulls-create")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .label("New pull request")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_create_pull_dialog(window, cx)
+                    })),
+            );
 
         if self.load_state == LoadState::Loading {
             return v_flex()
@@ -4142,22 +4983,50 @@ impl HelmPanel {
         let foreground = cx.theme().foreground;
         let warning = cx.theme().warning;
 
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(foreground)
+                    .child("Releases"),
+            )
+            .child(
+                Button::new("releases-create")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .label("New release")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_create_release_dialog(window, cx)
+                    })),
+            );
+
         if self.load_state == LoadState::Loading {
             return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
+                .child(header)
+                .child(div().h_px().w_full().bg(cx.theme().border))
                 .child(
-                    h_flex()
-                        .gap_2()
+                    v_flex()
+                        .flex_1()
                         .items_center()
-                        .child(Spinner::new().small())
+                        .justify_center()
+                        .p_4()
                         .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading releases…"),
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(Spinner::new().small())
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted_foreground)
+                                        .child("Loading releases…"),
+                                ),
                         ),
                 )
                 .into_any_element();
@@ -4165,41 +5034,52 @@ impl HelmPanel {
 
         if self.load_state == LoadState::Error {
             return v_flex()
-                .gap_3()
-                .p_4()
+                .child(header)
+                .child(div().h_px().w_full().bg(cx.theme().border))
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load releases"),
-                )
-                .child(
-                    Button::new("releases-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_releases(cx))),
+                    v_flex()
+                        .gap_3()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_foreground)
+                                .child("Failed to load releases"),
+                        )
+                        .child(
+                            Button::new("releases-retry")
+                                .outline()
+                                .label("Retry")
+                                .on_click(cx.listener(|this, _, _, cx| this.load_releases(cx))),
+                        ),
                 )
                 .into_any_element();
         }
 
         if self.releases.is_empty() {
             return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
+                .child(header)
+                .child(div().h_px().w_full().bg(cx.theme().border))
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No releases yet"),
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_foreground)
+                                .child("No releases yet"),
+                        ),
                 )
                 .into_any_element();
         }
 
         v_flex()
-            .py_1()
-            .children(self.releases.iter().map(|release| {
+            .child(header)
+            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(v_flex().py_1().children(self.releases.iter().map(|release| {
                 let tag = release.tag_name.clone();
                 let title = release
                     .name
@@ -4282,7 +5162,7 @@ impl HelmPanel {
                             .text_color(muted_foreground)
                     })
                     .on_click(move |_, _, cx| cx.open_url(&url))
-            }))
+            })))
             .into_any_element()
     }
 
@@ -4696,13 +5576,504 @@ impl HelmPanel {
         col.into_any_element()
     }
 
+    /// Shared loading/error/empty states for the read-only repo-activity
+    /// lists below (Commits/Actions/Deployments/Tags) — same shape as
+    /// `render_invitations`/`render_branches`, factored out since there are
+    /// four of them.
+    fn activity_list_states(
+        &self,
+        loading_label: &'static str,
+        error_label: &'static str,
+        empty_label: &'static str,
+        is_empty: bool,
+        retry: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let muted_foreground = cx.theme().muted_foreground;
+
+        if self.load_state == LoadState::Loading {
+            return Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Spinner::new().small())
+                            .child(div().text_sm().text_color(muted_foreground).child(loading_label)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if self.load_state == LoadState::Error {
+            return Some(
+                v_flex()
+                    .gap_3()
+                    .p_4()
+                    .child(div().text_sm().text_color(muted_foreground).child(error_label))
+                    .child(
+                        Button::new("activity-retry")
+                            .outline()
+                            .label("Retry")
+                            .on_click(cx.listener(move |this, _, _, cx| retry(this, cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if is_empty {
+            return Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .child(div().text_sm().text_color(muted_foreground).child(empty_label))
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
+    /// The Commits screen — recent commits with GitHub author avatars.
+    fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(el) = self.activity_list_states(
+            "Loading commits…",
+            "Failed to load commits",
+            "No commits found",
+            self.commits.is_empty(),
+            |this, cx| this.load_commits(cx),
+            cx,
+        ) {
+            return el;
+        }
+
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+
+        v_flex()
+            .py_1()
+            .children(self.commits.iter().map(|commit| {
+                let short_sha: String = commit.sha.chars().take(7).collect();
+                let author = commit
+                    .author
+                    .as_ref()
+                    .map(|a| a.login.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let avatar_url = commit
+                    .author
+                    .as_ref()
+                    .map(|a| a.avatar_url.clone())
+                    .unwrap_or_default();
+
+                ListItem::new(format!("helm-commit-{}", commit.sha))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Avatar::new()
+                                    .src(avatar_url)
+                                    .name(author.clone())
+                                    .with_size(px(20.)),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_family("Cascadia Mono")
+                                    .text_color(foreground)
+                                    .child(short_sha),
+                            )
+                            .child(div().text_xs().text_color(muted_foreground).child(author)),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    /// The Actions screen — recent CI workflow runs with status/conclusion.
+    fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(el) = self.activity_list_states(
+            "Loading workflow runs…",
+            "Failed to load workflow runs",
+            "No workflow runs found",
+            self.workflow_runs.is_empty(),
+            |this, cx| this.load_workflow_runs(cx),
+            cx,
+        ) {
+            return el;
+        }
+
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+        let success = cx.theme().success;
+        let danger = cx.theme().danger;
+
+        v_flex()
+            .py_1()
+            .children(self.workflow_runs.iter().map(|run| {
+                let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
+                let color = match status_label.as_str() {
+                    "success" => success,
+                    "failure" | "cancelled" | "timed_out" => danger,
+                    _ => muted_foreground,
+                };
+                let url = run.html_url.clone();
+
+                ListItem::new(format!("helm-run-{}", run.id))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(foreground)
+                                    .child(run.name.clone()),
+                            )
+                            .child(div().text_xs().text_color(muted_foreground).child(format!(
+                                "#{} · {}",
+                                run.run_number,
+                                run.head_branch.clone().unwrap_or_default()
+                            ))),
+                    )
+                    .suffix(move |_, _| {
+                        div().text_xs().text_color(color).child(status_label.clone())
+                    })
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    /// The Deployments screen.
+    fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(el) = self.activity_list_states(
+            "Loading deployments…",
+            "Failed to load deployments",
+            "No deployments found",
+            self.deployments.is_empty(),
+            |this, cx| this.load_deployments(cx),
+            cx,
+        ) {
+            return el;
+        }
+
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+
+        v_flex()
+            .py_1()
+            .children(self.deployments.iter().map(|dep| {
+                let short_sha: String = dep.sha.chars().take(7).collect();
+                ListItem::new(format!("helm-deployment-{}", dep.id))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(foreground)
+                                    .child(dep.environment.clone()),
+                            )
+                            .child(div().text_xs().text_color(muted_foreground).child(format!(
+                                "{} · {short_sha}",
+                                dep.r#ref
+                            ))),
+                    )
+                    .suffix({
+                        let status = dep.status.clone();
+                        move |_, _| div().text_xs().text_color(muted_foreground).child(status.clone())
+                    })
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    /// The Tags screen.
+    fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(el) = self.activity_list_states(
+            "Loading tags…",
+            "Failed to load tags",
+            "No tags found",
+            self.tags.is_empty(),
+            |this, cx| this.load_tags(cx),
+            cx,
+        ) {
+            return el;
+        }
+
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+
+        v_flex()
+            .py_1()
+            .children(self.tags.iter().map(|tag| {
+                let short_sha: String = tag.commit.sha.chars().take(7).collect();
+                ListItem::new(format!("helm-tag-{}", tag.name))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family("Cascadia Mono")
+                            .text_color(foreground)
+                            .child(tag.name.clone()),
+                    )
+                    .suffix(move |_, _| {
+                        div().text_xs().text_color(muted_foreground).child(short_sha.clone())
+                    })
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    /// The Security screen — dependabot and secret-scanning alerts, in two
+    /// sections. Both endpoints return raw JSON (no dedicated repo feature
+    /// flag check is done here — a 404/disabled response just yields an
+    /// empty list, same as `load_security`'s `unwrap_or_default`).
+    fn render_security(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted_foreground = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
+        let border = cx.theme().border;
+
+        if self.load_state == LoadState::Loading {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Spinner::new().small())
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_foreground)
+                                .child("Loading security alerts…"),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let section_label = |title: &str| {
+            div()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(muted_foreground)
+                .child(title.to_string())
+        };
+
+        let dependabot_rows = self.dependabot_alerts.iter().enumerate().map(|(i, alert)| {
+            let package = alert
+                .pointer("/dependency/package/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown package")
+                .to_string();
+            let severity = alert
+                .pointer("/security_advisory/severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let state = alert
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            ListItem::new(format!("helm-dependabot-{i}"))
+                .child(div().text_sm().text_color(foreground).child(package))
+                .suffix(move |_, _| {
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("{severity} · {state}"))
+                })
+        });
+
+        let secret_rows = self.secret_scanning_alerts.iter().enumerate().map(|(i, alert)| {
+            let secret_type = alert
+                .get("secret_type_display_name")
+                .or_else(|| alert.get("secret_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown secret")
+                .to_string();
+            let state = alert
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            ListItem::new(format!("helm-secret-scanning-{i}"))
+                .child(div().text_sm().text_color(foreground).child(secret_type))
+                .suffix(move |_, _| div().text_xs().text_color(muted_foreground).child(state.clone()))
+        });
+
+        v_flex()
+            .child(section_label("Dependabot alerts"))
+            .child(if self.dependabot_alerts.is_empty() {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(muted_foreground)
+                    .child("No open Dependabot alerts")
+                    .into_any_element()
+            } else {
+                v_flex().children(dependabot_rows).into_any_element()
+            })
+            .child(div().h_px().w_full().bg(border))
+            .child(section_label("Secret scanning alerts"))
+            .child(if self.secret_scanning_alerts.is_empty() {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(muted_foreground)
+                    .child("No open secret scanning alerts")
+                    .into_any_element()
+            } else {
+                v_flex().children(secret_rows).into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// A public profile view for someone other than the signed-in user,
+    /// reached via [`Self::open_user_profile`] (e.g. clicking a
+    /// collaborator). Read-only — editing is only available on `Profile`,
+    /// the signed-in user's own screen.
+    fn render_user_profile(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted_foreground = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
+        let border = cx.theme().border;
+
+        if self.load_state == LoadState::Loading {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Spinner::new().small())
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_foreground)
+                                .child("Loading profile…"),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let Some(user) = self.viewed_user.clone() else {
+            return v_flex()
+                .gap_3()
+                .p_4()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted_foreground)
+                        .child("Failed to load profile"),
+                )
+                .into_any_element();
+        };
+
+        let url = user.html_url.clone();
+
+        v_flex()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        Avatar::new()
+                            .src(user.avatar_url.clone())
+                            .name(user.login.clone())
+                            .with_size(px(40.)),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_0()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_color(foreground)
+                                    .child(user.name.clone().unwrap_or_else(|| user.login.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child(format!("@{}", user.login)),
+                            ),
+                    )
+                    .child(
+                        Button::new("helm-user-profile-open-browser")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open in Browser")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+            )
+            .child(div().h_px().w_full().bg(border))
+            .when_some(user.bio.clone(), |col, bio| {
+                col.child(div().p_3().text_sm().text_color(foreground).child(bio))
+            })
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_4()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(muted_foreground)
+                    .child(format!("Repos {}", fmt_num(user.public_repos)))
+                    .child(format!("Followers {}", fmt_num(user.followers)))
+                    .child(format!("Following {}", fmt_num(user.following))),
+            )
+            .when_some(user.company.clone(), |col, company| {
+                col.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("Company: {company}")),
+                )
+            })
+            .when_some(user.location.clone(), |col, location| {
+                col.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("Location: {location}")),
+                )
+            })
+            .into_any_element()
+    }
+
     /// The Invitations screen — pending repo invitations with Accept/Decline
     /// actions that round-trip against the GitHub API.
     fn render_invitations(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
 
-        if self.invitations.is_empty() {
+        if self.invitations.is_empty() && self.org_invitations.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -4719,8 +6090,84 @@ impl HelmPanel {
 
         let view = cx.entity();
 
+        let org_rows = self.org_invitations.iter().map(|inv| {
+            let org_login = inv.organization.login.clone();
+            let role = inv.role.clone();
+            let org_accept = org_login.clone();
+            let org_decline = org_login.clone();
+            let view_accept = view.clone();
+            let view_decline = view.clone();
+
+            ListItem::new(format!("helm-org-invitation-{}", inv.organization.login))
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(foreground)
+                                .child(inv.organization.login.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(format!("Organization · role: {role}")),
+                        ),
+                )
+                .suffix({
+                    move |_, _| {
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("helm-org-invitation-accept-{org_login}"))
+                                    .primary()
+                                    .xsmall()
+                                    .label("Accept")
+                                    .on_click({
+                                        let view = view_accept.clone();
+                                        let org = org_accept.clone();
+                                        move |_, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.handle_accept_org_invitation(
+                                                    org.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new(format!("helm-org-invitation-decline-{org_decline}"))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip("Decline invitation")
+                                    .on_click({
+                                        let view = view_decline.clone();
+                                        let org = org_decline.clone();
+                                        move |_, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.handle_decline_org_invitation(
+                                                    org.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            )
+                    }
+                })
+        });
+
         v_flex()
             .py_1()
+            .children(org_rows)
             .children(self.invitations.iter().map(|inv| {
                 let full_name = inv.repository.full_name.clone();
                 let private = inv.repository.private;
@@ -4921,6 +6368,19 @@ impl HelmPanel {
     }
 }
 
+/// A small label above an `Input` — for the modal forms whose fields (unlike
+/// `CreateRepo`'s) have no distinguishing placeholder text of their own.
+fn labeled_field(
+    label: &'static str,
+    input: Input,
+    muted: gpui::Hsla,
+) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(div().text_xs().text_color(muted).child(label))
+        .child(input)
+}
+
 /// Mirrors the old TS `visLabel`: archived beats internal beats
 /// private/public.
 fn repo_vis_label(repo: &Repo) -> &'static str {
@@ -5094,6 +6554,14 @@ impl Render for HelmPanel {
                         HelmScreen::Packages => self.render_packages(cx).into_any_element(),
                         HelmScreen::Traffic => self.render_traffic(cx).into_any_element(),
                         HelmScreen::Invitations => self.render_invitations(cx).into_any_element(),
+                        HelmScreen::UserProfile => self.render_user_profile(cx).into_any_element(),
+                        HelmScreen::Commits => self.render_commits(cx).into_any_element(),
+                        HelmScreen::WorkflowRuns => {
+                            self.render_workflow_runs(cx).into_any_element()
+                        }
+                        HelmScreen::Deployments => self.render_deployments(cx).into_any_element(),
+                        HelmScreen::Tags => self.render_tags(cx).into_any_element(),
+                        HelmScreen::Security => self.render_security(cx).into_any_element(),
                     }),
             )
     }
