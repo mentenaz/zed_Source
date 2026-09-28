@@ -16042,6 +16042,8 @@ dependencies = [
  "gpui",
  "gpui-component",
  "http_client",
+ "language",
+ "project",
  "python_backend",
  "python_manager_panel",
  "script_runner_panel",

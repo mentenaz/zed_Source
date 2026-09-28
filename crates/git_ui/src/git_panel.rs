@@ -7180,7 +7180,7 @@ impl GitPanel {
                             avatar_url
                                 .map(|url| GpuiAvatar::new().src(url).name(author_name.clone()))
                                 .unwrap_or_else(|| GpuiAvatar::new().name(author_name.clone()))
-                                .with_size(px(24.)),
+                                .with_size(px(48.)),
                         )
                         .child(
                             Label::new(commit_count.to_string())

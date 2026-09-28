@@ -4193,7 +4193,7 @@ impl HelmPanel {
                                 Avatar::new()
                                     .src(collab.avatar_url.clone())
                                     .name(login.clone())
-                                    .with_size(px(24.)),
+                                    .with_size(px(48.)),
                             )
                             .child(div().text_color(foreground).child(login.clone())),
                     )

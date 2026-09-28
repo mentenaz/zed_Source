@@ -55,6 +55,7 @@ use gpui::{
     Pixels, Render, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, div,
     prelude::FluentBuilder as _, px, svg,
 };
+use language::{LanguageName, Toolchain};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -513,10 +514,39 @@ impl PythonPanel {
         self.reload_project_data(cx);
     }
 
+    /// Looks up whatever interpreter the user has explicitly picked for
+    /// `scan_root` via Zed's own toolchain selector (the status-bar
+    /// interpreter picker, backed by `pet_core` — aware of conda/poetry/
+    /// pipenv/pyenv/system installs, not just a bare `.venv` check). `None`
+    /// when there's no workspace, the path isn't inside any worktree, or no
+    /// toolchain has been resolved/selected for it yet — `reload_project_data`
+    /// falls back to this panel's own simpler venv/PATH guess in that case.
+    /// This exists so the panel's package scan never disagrees with what the
+    /// language server and integrated terminal are actually running.
+    fn active_toolchain_task(
+        &self,
+        scan_root: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<Option<Toolchain>>> {
+        let workspace = self.workspace.upgrade()?;
+        workspace.update(cx, |workspace, cx| {
+            let project = workspace.project().clone();
+            let project_path = project
+                .read(cx)
+                .project_path_for_absolute_path(Path::new(scan_root), cx)?;
+            Some(project.read(cx).active_toolchain(
+                project_path,
+                LanguageName::new_static("Python"),
+                cx,
+            ))
+        })
+    }
+
     /// Re-derives everything scoped to `active_project_dir()`: the resolved
-    /// interpreter (project venv, else global `python`/`python3`), Python/
-    /// pip versions, framework/entry points, installed + outdated packages,
-    /// and the missing-deps diff. One background task, mirroring
+    /// interpreter (Zed's own selected toolchain when there is one, else
+    /// this panel's own project venv, else global `python`/`python3`),
+    /// Python/pip versions, framework/entry points, installed + outdated
+    /// packages, and the missing-deps diff. One background task, mirroring
     /// `python_manager_panel::schedule_load`'s consolidated shape rather
     /// than the several separately-racing tasks this panel used to run.
     fn reload_project_data(&mut self, cx: &mut Context<Self>) {
@@ -532,14 +562,22 @@ impl PythonPanel {
         cx.notify();
 
         let scan_root = self.active_project_dir();
+        let toolchain_task = self.active_toolchain_task(&scan_root, cx);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let toolchain_exe = match toolchain_task {
+                Some(task) => task.await.map(|toolchain| toolchain.path.to_string()),
+                None => None,
+            };
+
             let scan_root_for_task = scan_root.clone();
             let result = cx
                 .background_spawn(async move {
                     let scan = scan_python_project(&scan_root_for_task).ok();
                     let venv_exe = scan.as_ref().and_then(|s| s.venvs.first().cloned());
 
-                    let (exe, using_venv) = if let Some(venv) = venv_exe {
+                    let (exe, using_venv) = if let Some(exe) = toolchain_exe {
+                        (Some(exe), true)
+                    } else if let Some(venv) = venv_exe {
                         (Some(venv), true)
                     } else {
                         let mut found = None;
