@@ -1178,6 +1178,11 @@ pub struct Window {
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+    /// Stack of accumulated [`Style::scale`] factors for the elements currently
+    /// being laid out or painted. Each entry is the product of every enclosing
+    /// element's scale, so the product of this stack is the factor that applies
+    /// to the element currently in scope. Used by `with_element_scale`.
+    element_scale_stack: SmallVec<[f32; 8]>,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
@@ -2038,6 +2043,7 @@ impl Window {
             text_style_stack: Vec::new(),
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
+            element_scale_stack: SmallVec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
@@ -4049,6 +4055,76 @@ impl Window {
         result
     }
 
+    /// The accumulated [`Style::scale`] factor that applies to the element
+    /// currently being laid out or painted.
+    ///
+    /// This is the product of every enclosing element's `scale`, and is `1.0`
+    /// when no ancestor is scaled. Layout lengths, text size, corner radii,
+    /// border widths, box shadows, and image sizes are all multiplied by this
+    /// factor. It is independent of [`Window::scale_factor`], which converts
+    /// logical pixels to device pixels.
+    ///
+    /// Custom elements that paint outside of the layout system can use this to
+    /// scale their own geometry to match the surrounding UI:
+    ///
+    /// ```no_run
+    /// # use gpui::{div, px, prelude::*, EntityExt, IntoElement};
+    /// # use gpui::{App, Bounds, Pixels, Window};
+    /// # fn draw_extra_geometry(window: &mut Window, bounds: Bounds<Pixels>) {
+    /// let scale = window.element_scale();
+    /// let radius = window.scale_length(px(4.0));
+    /// window.paint_quad(gpui::quad(
+    ///     bounds,
+    ///     gpui::black(),
+    ///     (radius, radius, radius, radius),
+    /// ));
+    /// # }
+    /// # fn build() -> impl IntoElement {
+    /// div().scale(2.0)
+    /// # }
+    /// ```
+    pub fn element_scale(&self) -> f32 {
+        self.element_scale_stack.last().copied().unwrap_or(1.0)
+    }
+
+    /// Pushes an accumulated [`Style::scale`] factor for the duration of `f`.
+    ///
+    /// Elements call this with `parent_scale * own_scale` so that descendants
+    /// observe the factor that applies to them. Callers should normally prefer
+    /// the [`Styled::scale`] builder, which handles the accumulation for you.
+    ///
+    /// This method should only be called during the request_layout, prepaint, or
+    /// paint phases of element drawing.
+    #[inline]
+    pub fn with_element_scale<R>(&mut self, scale: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+
+        if scale == 1.0 {
+            return f(self);
+        }
+
+        self.element_scale_stack.push(scale);
+        let result = f(self);
+        self.element_scale_stack.pop();
+        result
+    }
+
+    /// Multiplies a logical-pixel length by the current [`Style::scale`] factor,
+    /// rounding the result to a whole logical pixel.
+    ///
+    /// Use this when turning a style length into a concrete paint-time length
+    /// that is not already routed through layout, such as corner radii or box
+    /// shadow offsets.
+    #[inline]
+    pub fn scale_length(&self, length: Pixels) -> f32 {
+        let scale = self.element_scale();
+        if scale == 1.0 {
+            length.0
+        } else {
+            length.0 * scale
+        }
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the
@@ -5036,11 +5112,13 @@ impl Window {
         cx.layout_id_buffer.extend(children);
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
+        let element_scale = self.element_scale();
 
         self.layout_engine.as_mut().unwrap().request_layout(
             style,
             rem_size,
             scale_factor,
+            element_scale,
             &cx.layout_id_buffer,
         )
     }
@@ -5062,10 +5140,11 @@ impl Window {
 
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
+        let element_scale = self.element_scale();
         self.layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout(style, rem_size, scale_factor, measure)
+            .request_measured_layout(style, rem_size, scale_factor, element_scale, measure)
     }
 
     /// Compute the layout for the given id within the given available space.
@@ -7703,10 +7782,294 @@ mod tests {
         Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
         Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
-        TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
-        canvas, div, hsla, point, px, size,
+        TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowHandle,
+        WindowOptions, canvas, div, hsla, point, px, relative, size, SharedString,
     };
 
+    /// A root view that rebuilds its element tree on every frame, so tests can
+    /// drive `Style::scale` without declaring a bespoke view per case.
+    struct ScaleTestRoot<F: 'static> {
+        build: F,
+    }
+
+    impl<F, E> Render for ScaleTestRoot<F>
+    where
+        F: Fn() -> E + 'static,
+        E: IntoElement,
+    {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            (self.build)()
+        }
+    }
+
+    fn open_scale_test_window<E, F>(cx: &mut TestAppContext, build: F) -> WindowHandle<ScaleTestRoot<F>>
+    where
+        E: IntoElement,
+        F: Fn() -> E + 'static,
+    {
+        cx.open_window(size(px(1000.), px(1000.)), move |_, _| ScaleTestRoot { build })
+    }
+
+    fn scale_debug_bounds<F>(
+        cx: &mut TestAppContext,
+        window: &WindowHandle<ScaleTestRoot<F>>,
+        selector: &'static str,
+    ) -> Bounds<Pixels> {
+        window
+            .update(cx, |_, window, _| {
+                window
+                    .rendered_frame
+                    .debug_bounds
+                    .get(selector)
+                    .copied()
+                    .unwrap_or_else(|| panic!("no debug bounds recorded for {selector:?}"))
+            })
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn test_scale_grows_the_elements_own_box(cx: &mut TestAppContext) {
+        let window = open_scale_test_window(cx, || {
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "scaled".to_string())
+                    .w(px(50.))
+                    .h(px(20.)),
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            scale_debug_bounds(cx, &window, "scaled").size,
+            size(px(50.), px(20.)),
+            "baseline: an unscaled 50x20 box"
+        );
+
+        let window = open_scale_test_window(cx, || {
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "scaled".to_string())
+                    .scale(2.0)
+                    .w(px(50.))
+                    .h(px(20.)),
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            scale_debug_bounds(cx, &window, "scaled").size,
+            size(px(100.), px(40.)),
+            "a scaled element's own box should grow by the scale factor"
+        );
+    }
+
+    #[gpui::test]
+    fn test_scale_accumulates_through_nesting(cx: &mut TestAppContext) {
+        let window = open_scale_test_window(cx, || {
+            div().size_full().child(
+                div()
+                    .scale(2.0)
+                    .child(div().scale(3.0).child(
+                        div()
+                            .debug_selector(|| "deep".to_string())
+                            .w(px(10.))
+                            .h(px(10.)),
+                    )),
+            )
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            scale_debug_bounds(cx, &window, "deep").size,
+            size(px(60.), px(60.)),
+            "scale factors should multiply down the tree (2 * 3 = 6)"
+        );
+    }
+
+    #[gpui::test]
+    fn test_scale_applies_to_insets_and_padding(cx: &mut TestAppContext) {
+        let window = open_scale_test_window(cx, || {
+            div().size_full().child(
+                div()
+                    .scale(2.0)
+                    .absolute()
+                    .top(px(10.))
+                    .left(px(20.))
+                    .p(px(5.))
+                    .w(px(100.))
+                    .h(px(40.))
+                    .child(
+                        div()
+                            .debug_selector(|| "child".to_string())
+                            .w(px(10.))
+                            .h(px(10.)),
+                    ),
+            )
+        });
+        cx.run_until_parked();
+
+        let child = scale_debug_bounds(cx, &window, "child");
+        assert_eq!(
+            child.origin,
+            point(px(50.), px(30.)),
+            "insets (20, 10) and padding (5) should all scale: x = (20 + 5) * 2, y = (10 + 5) * 2"
+        );
+        assert_eq!(
+            child.size,
+            size(px(20.), px(20.)),
+            "the child's own box should scale"
+        );
+    }
+
+    #[gpui::test]
+    fn test_scale_leaves_relative_units_alone(cx: &mut TestAppContext) {
+        // `relative(0.5)` is a fraction, not a length. It must resolve against
+        // the already-scaled parent rather than being multiplied itself,
+        // otherwise the child would overflow its parent.
+        let window = open_scale_test_window(cx, || {
+            div().size_full().child(
+                div()
+                    .scale(2.0)
+                    .w(px(200.))
+                    .h(px(100.))
+                    .child(
+                        div()
+                            .debug_selector(|| "half".to_string())
+                            .w(relative(0.5))
+                            .h(relative(0.5)),
+                    ),
+            )
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            scale_debug_bounds(cx, &window, "half").size,
+            size(px(200.), px(100.)),
+            "a 50% child of a 200x100 box at 2x should be 200x100, not 100x50"
+        );
+    }
+
+    #[gpui::test]
+    fn test_scale_grows_text(cx: &mut TestAppContext) {
+        // The scaled wrapper declares half the width so that the text box ends
+        // up 200px wide in both trees (100 * 2 == 200). Any difference in the
+        // recorded height is therefore due to the font size and line height
+        // being scaled, not to a different wrap width.
+        const TEXT: &str = "the quick brown fox jumps over the lazy dog";
+
+        let window = open_scale_test_window(cx, || {
+            div().w(px(200.)).child(
+                div()
+                    .debug_selector(|| "unscaled".to_string())
+                    .child(SharedString::from(TEXT)),
+            )
+        });
+        cx.run_until_parked();
+        let unscaled = scale_debug_bounds(cx, &window, "unscaled");
+
+        let window = open_scale_test_window(cx, || {
+            div().scale(2.0).w(px(100.)).child(
+                div()
+                    .debug_selector(|| "scaled".to_string())
+                    .child(SharedString::from(TEXT)),
+            )
+        });
+        cx.run_until_parked();
+        let scaled = scale_debug_bounds(cx, &window, "scaled");
+
+        assert_eq!(
+            unscaled.size.width, scaled.size.width,
+            "the two text boxes should have the same rendered width: unscaled={:?} scaled={:?}",
+            unscaled.size.width,
+            scaled.size.width
+        );
+        assert!(
+            scaled.size.height > unscaled.size.height,
+            "text at 2x should wrap into more lines and be taller: {:?} vs {:?}",
+            scaled.size.height,
+            unscaled.size.height
+        );
+    }
+
+    #[gpui::test]
+    fn test_scaled_subtree_hit_testing_matches_visual_bounds(cx: &mut TestAppContext) {
+        // The point of scaling during layout rather than at paint time is that
+        // hitboxes land where the pixels are. A mouse move over the visual
+        // bottom-right corner of a 2x box must reach the element.
+        let hovered_at = Rc::new(RefCell::new(None));
+        let window = open_scale_test_window(cx, {
+            let hovered_at = hovered_at.clone();
+            move || {
+                div().size_full().child(
+                    div()
+                        .id("target")
+                        .scale(2.0)
+                        .mt(px(10.))
+                        .w(px(100.))
+                        .h(px(50.))
+                        .debug_selector(|| "target".to_string())
+                        .on_hover({
+                            let hovered_at = hovered_at.clone();
+                            move |hovered, _, _| {
+                                if *hovered {
+                                    *hovered_at.borrow_mut() = Some(());
+                                }
+                            }
+                        }),
+                )
+            }
+        });
+        cx.run_until_parked();
+
+        let bounds = scale_debug_bounds(cx, &window, "target");
+        assert_eq!(bounds.size, size(px(200.), px(100.)));
+
+        let corner = point(bounds.right() - px(1.), bounds.bottom() - px(1.));
+        window
+            .update(cx, |_, window, cx| {
+                window.simulate_mouse_move(corner, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            hovered_at.borrow().is_some(),
+            "a mouse move at the visual bottom-right of a scaled element should hover it"
+        );
+    }
+
+    #[gpui::test]
+    fn test_element_scale_reflects_enclosing_scales(cx: &mut TestAppContext) {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let _window = open_scale_test_window(cx, {
+            let observed = observed.clone();
+            move || {
+                let outside = {
+                    let observed = observed.clone();
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            observed.borrow_mut().push(window.element_scale());
+                        },
+                    )
+                };
+                let nested = {
+                    let observed = observed.clone();
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            observed.borrow_mut().push(window.element_scale());
+                        },
+                    )
+                };
+                div()
+                    .size_full()
+                    .child(div().child(outside))
+                    .child(div().scale(3.0).child(div().scale(0.5).child(nested)))
+            }
+        });
+        cx.run_until_parked();
+
+        assert_eq!(*observed.borrow(), vec![1.0, 1.5]);
+    }
     /// Visibility transitions reach observers exactly once each, with the new
     /// state already stored on the window, and never wake the platform for a
     /// frame: the platform requests one itself when it resumes presenting.

@@ -61,6 +61,31 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Scales this element and all of its descendants by `factor`.
+    ///
+    /// This is a layout scale (like the CSS `zoom` property) rather than a paint
+    /// transform: the element's own box grows by `factor`, and because layout
+    /// runs in the scaled space, hitboxes, mouse coordinates, and text shaping
+    /// stay correct without any coordinate conversion. Factors accumulate down
+    /// the element tree.
+    ///
+    /// See [`Style::scale`] for the full set of affected properties.
+    ///
+    /// ```
+    /// # use gpui::{div, px};
+    /// div()
+    ///     .scale(2.0)
+    ///     .w(px(50.0)) // occupies 100 logical pixels
+    ///     .h(px(20.0)) // occupies 40 logical pixels
+    ///     .child(div().text("text is 2x as large"))
+    ///     .child(div().absolute().left(px(10.0))) // inset is 20 logical pixels
+    /// # ;
+    /// ```
+    fn scale(mut self, factor: f32) -> Self {
+        self.style().scale = Some(factor);
+        self
+    }
+
     /// Set the space to be reserved for rendering the scrollbar.
     ///
     /// This will only affect the layout of the element when overflow for this element is set to

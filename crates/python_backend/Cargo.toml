@@ -1,0 +1,20 @@
+[package]
+name = "python_backend"
+description = "Python runtime detection, project scanning, and package management — no UI, no app-state dependency."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/python_backend.rs"
+doctest = false
+
+[dependencies]
+gpui_util.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry.workspace = true

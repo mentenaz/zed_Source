@@ -1,0 +1,24 @@
+[package]
+name = "helm_panel"
+description = "GitHub Helm panel with repository browsing and cloning."
+license = "GPL-3.0-or-later"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/helm_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+log.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+reqwest_client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync"] }
+ui.workspace = true
+workspace.workspace = true

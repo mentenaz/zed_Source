@@ -12,10 +12,20 @@ use project::{LspStore, lsp_store::LocalLspAdapterDelegate};
 use settings::{LSP_SETTINGS_SCHEMA_URL_PREFIX, Settings as _, SettingsLocation};
 use util::schemars::{AllowTrailingCommas, DefaultDenyUnknownFields};
 
+/// Re-exported so `languages` (which already depends on this crate) can apply
+/// the body-companion schema associations without taking a dependency on
+/// `workflow_engine` — a heavyweight edge (reqwest, tokio) for two path
+/// helpers, when the crate that owns schema associations is right here.
+pub use workflow_engine::schema::{
+    HTTP_BODY_DIR_SUFFIX, HTTP_BODY_FILE_SUFFIX, HTTP_BODY_SCHEMA_SUFFIX, http_body_sidecar_path,
+    is_http_body_companion,
+};
+
 const SCHEMA_URI_PREFIX: &str = "zed://schemas/";
 
 const TSCONFIG_SCHEMA: &str = include_str!("schemas/tsconfig.json");
 const PACKAGE_JSON_SCHEMA: &str = include_str!("schemas/package.json");
+const FLOW_SCHEMA: &str = include_str!("schemas/flow.schema.json");
 
 static TASKS_SCHEMA: LazyLock<String> = LazyLock::new(|| {
     serde_json::to_string(&task::TaskTemplates::generate_json_schema())
@@ -175,6 +185,17 @@ fn resolve_static_schema(path: &str) -> Option<String> {
     match schema_name {
         "tsconfig" => Some(TSCONFIG_SCHEMA.to_string()),
         "package_json" => Some(PACKAGE_JSON_SCHEMA.to_string()),
+        "flow" => Some(FLOW_SCHEMA.to_string()),
+        // Generated rather than `include_str!`'d, so it can't drift from the
+        // ActionDef registry it describes. Falls back to "any JSON" only if
+        // the registry ever stops declaring a `Json` body input, which keeps
+        // the association valid (an unresolvable `url` would make the server
+        // log a schema-resolution failure for every body the user opens).
+        HTTP_BODY_SCHEMA_NAME => Some(
+            workflow_engine::registry::body_json_schema("http")
+                .unwrap_or_else(|| serde_json::json!({}))
+                .to_string(),
+        ),
         "tasks" => Some(TASKS_SCHEMA.clone()),
         "snippets" => Some(SNIPPETS_SCHEMA.clone()),
         "jsonc" => Some(JSONC_SCHEMA.clone()),
@@ -407,6 +428,19 @@ async fn resolve_dynamic_schema(
 
 const JSONC_LANGUAGE_NAME: &str = "JSONC";
 
+/// Schema name (after [`SCHEMA_URI_PREFIX`]) for the registry-derived schema
+/// applied to HTTP request-body companions.
+pub const HTTP_BODY_SCHEMA_NAME: &str = "flow_http_body";
+
+/// Glob matching every HTTP request-body companion across every flow in every
+/// worktree, so one association covers all of them.
+///
+/// The leading `**/` is what makes this work for a nested action: a body's
+/// path includes its container scope (`<flow>.flow-http/<scope>/<id>.body.json`),
+/// so a single-level `*.flow-http/*.body.json` would miss every body inside a
+/// `Foreach`/`If`/`Try` body.
+pub const HTTP_BODY_GLOB: &str = "**/*.flow-http/**/*.body.json";
+
 pub fn all_schema_file_associations(
     languages: &Arc<LanguageRegistry>,
     path: Option<SettingsLocation<'_>>,
@@ -474,6 +508,14 @@ pub fn all_schema_file_associations(
         {
             "fileMatch": ["package.json"],
             "url": format!("{SCHEMA_URI_PREFIX}package_json")
+        },
+        {
+            "fileMatch": ["*.flow.json"],
+            "url": format!("{SCHEMA_URI_PREFIX}flow")
+        },
+        {
+            "fileMatch": [HTTP_BODY_GLOB],
+            "url": format!("{SCHEMA_URI_PREFIX}{HTTP_BODY_SCHEMA_NAME}")
         },
         {
             "fileMatch": &jsonc_globs,

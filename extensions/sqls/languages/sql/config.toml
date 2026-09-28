@@ -1,0 +1,11 @@
+name = "SQL"
+grammar = "sql"
+path_suffixes = ["sql"]
+line_comments = ["-- "]
+block_comment = { start = "/* ", prefix = "* ", end = "*/", tab_size = 1 }
+brackets = [
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "'", end = "'", close = true, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false },
+    { start = "BEGIN", end = "END", close = true, newline = true },
+]

@@ -1,0 +1,32 @@
+[package]
+name = "database_panel"
+description = "Database panel UI — connection navigation, schema tree, and (later) SQL workbench and schema graph, built on gpui_component."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/database_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+database_backend.workspace = true
+db.workspace = true
+editor.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui_flow.workspace = true
+gpui_tokio.workspace = true
+language.workspace = true
+log.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zed_credentials_provider.workspace = true
+
+[dev-dependencies]
+db = { workspace = true, features = ["test-support"] }

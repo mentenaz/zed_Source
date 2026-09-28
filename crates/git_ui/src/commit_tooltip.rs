@@ -150,24 +150,42 @@ impl<'a> CommitAvatar<'a> {
     }
 
     pub fn avatar(&'a self, window: &mut Window, cx: &mut App) -> Option<Avatar> {
-        // Bail early if the email isn't available yet. Without it,
-        // the GitHub provider skips the fast CDN path and falls back
-        // to an unauthenticated per-commit API call that is slow and
-        // rate-limited. Worse, a failed lookup gets permanently
-        // cached under the key (sha, host) — so even when the email
-        // arrives on a later render, the cached None shadows the
-        // fast path forever.
-        self.author_email.as_ref()?;
-
-        let remote = self
-            .remote
-            .filter(|remote| remote.host_supports_avatars())?;
-        let avatar_url =
-            CommitAvatarAsset::new(remote.clone(), self.sha.clone(), self.author_email.clone());
-
-        let url = window.use_asset::<CommitAvatarAsset>(&avatar_url, cx)??;
+        let url = resolve_commit_avatar_url(
+            self.sha.clone(),
+            self.author_email.clone(),
+            self.remote,
+            window,
+            cx,
+        )?;
         Some(Avatar::new(url.to_string()))
     }
+}
+
+/// Resolves the CDN avatar URL for a commit's author, via the repository's
+/// git-hosting provider (e.g. GitHub), without requiring authentication.
+///
+/// Shared by [`CommitAvatar`] (per-commit, in blame/history tooltips) and the
+/// Git panel's Details tab (per-unique-author, deduped across a commit window).
+pub(crate) fn resolve_commit_avatar_url(
+    sha: SharedString,
+    author_email: Option<SharedString>,
+    remote: Option<&GitRemote>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<SharedString> {
+    // Bail early if the email isn't available yet. Without it,
+    // the GitHub provider skips the fast CDN path and falls back
+    // to an unauthenticated per-commit API call that is slow and
+    // rate-limited. Worse, a failed lookup gets permanently
+    // cached under the key (sha, host) — so even when the email
+    // arrives on a later render, the cached None shadows the
+    // fast path forever.
+    author_email.as_ref()?;
+
+    let remote = remote.filter(|remote| remote.host_supports_avatars())?;
+    let avatar_asset = CommitAvatarAsset::new(remote.clone(), sha, author_email);
+
+    window.use_asset::<CommitAvatarAsset>(&avatar_asset, cx)?
 }
 
 #[derive(Clone, Debug)]

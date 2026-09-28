@@ -1,0 +1,195 @@
+{
+  "id": "order-processing",
+  "name": "Order Processing",
+  "actions": {
+    "waitForApi": {
+      "type": "WaitForPort",
+      "label": "Wait For API",
+      "inputs": { "port": 4000, "timeout_ms": 30000 },
+      "runAfter": {}
+    },
+    "setRegion": {
+      "type": "SetEnv",
+      "label": "Set Region",
+      "inputs": { "key": "FORGE_REGION", "value": "eu-west" },
+      "runAfter": {}
+    },
+    "fetchOrder": {
+      "type": "http",
+      "label": "Fetch Order",
+      "inputs": { "method": "GET", "url": "https://api.forge.dev/v1/order" },
+      "runAfter": { "waitForApi": ["Succeeded"] }
+    },
+    "fetchCustomer": {
+      "type": "http",
+      "label": "Fetch Customer",
+      "inputs": { "method": "GET", "url": "https://api.forge.dev/v1/customer" },
+      "runAfter": { "waitForApi": ["Succeeded"] }
+    },
+
+    "validate": {
+      "type": "script",
+      "label": "Validate Order",
+      "inputs": {
+        "source": {
+          "kind": "inline",
+          "runtime": "python",
+          "code": "import json,sys\ndata = json.load(sys.stdin)\nprint(json.dumps({\"valid\": data.get(\"total\", 0) > 0}))\n"
+        }
+      },
+      "runAfter": { "fetchOrder": ["Succeeded"], "fetchCustomer": ["Succeeded"] }
+    },
+
+    "handleError": {
+      "type": "sendEmail",
+      "label": "Email Ops Team",
+      "inputs": {
+        "to": "ops@forge.dev",
+        "subject": "Order validation failed",
+        "body": "{\"var\": \"validate.outputs.error\"}"
+      },
+      "runAfter": { "validate": ["Failed"] }
+    },
+
+    "foreach": {
+      "type": "Foreach",
+      "label": "Foreach Line Item",
+      "foreach": { "var": "fetchOrder.outputs.items" },
+      "runAfter": { "validate": ["Succeeded"] },
+      "actions": {
+        "normalize": {
+          "type": "transform",
+          "label": "Normalize",
+          "inputs": { "strategy": "normalize" },
+          "runAfter": {}
+        },
+        "tryCharge": {
+          "type": "Try",
+          "label": "Try Charge Line Item",
+          "runAfter": { "normalize": ["Succeeded"] },
+          "actions": {
+            "chargeItem": {
+              "type": "http",
+              "label": "Charge Line Item",
+              "inputs": {
+                "method": "POST",
+                "url": "https://api.forge.dev/v1/charge",
+                "body": { "var": "normalize.outputs.result" }
+              },
+              "runAfter": {}
+            }
+          },
+          "catch": {
+            "actions": {
+              "logChargeFailure": {
+                "type": "log",
+                "label": "Log Charge Failure",
+                "inputs": { "level": "error", "message": { "var": "tryCharge.outputs.error.message" } },
+                "runAfter": {}
+              },
+              "notifyChargeFailure": {
+                "type": "notify",
+                "label": "Notify Ops (Charge Failed)",
+                "inputs": { "channel": "ops", "message": "Line item charge failed — see log" },
+                "runAfter": { "logChargeFailure": ["Succeeded"] }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "until": {
+      "type": "Until",
+      "label": "Until Confirmed",
+      "until": { "==": [{ "var": "checkDone.outputs.confirmed" }, true] },
+      "limit": { "count": 3, "timeout": "PT30S" },
+      "runAfter": { "foreach": ["Succeeded"] },
+      "actions": {
+        "pollStatus": {
+          "type": "http",
+          "label": "Poll Status",
+          "inputs": { "method": "GET", "url": "https://api.forge.dev/v1/order/status" },
+          "runAfter": {}
+        },
+        "backoff": {
+          "type": "delay",
+          "label": "Backoff",
+          "inputs": { "ms": 500 },
+          "runAfter": { "pollStatus": ["Succeeded"] }
+        },
+        "checkDone": {
+          "type": "transform",
+          "label": "Check Confirmed",
+          "inputs": { "strategy": "extract", "field": "confirmed" },
+          "runAfter": { "backoff": ["Succeeded"] }
+        }
+      }
+    },
+
+    "ifVip": {
+      "type": "If",
+      "label": "If VIP Customer",
+      "expression": { "==": [{ "var": "fetchCustomer.outputs.tier" }, "vip"] },
+      "runAfter": { "until": ["Succeeded"] },
+      "actions": {
+        "applyDiscount": {
+          "type": "transform",
+          "label": "Apply VIP Discount",
+          "inputs": { "strategy": "discount", "pct": 10 },
+          "runAfter": {}
+        },
+        "notifyVip": {
+          "type": "notify",
+          "label": "Notify VIP",
+          "inputs": { "channel": "vip-desk", "message": "VIP order processed" },
+          "runAfter": { "applyDiscount": ["Succeeded"] }
+        },
+        "logVip": {
+          "type": "log",
+          "label": "Log VIP Applied",
+          "inputs": { "level": "info", "message": "VIP discount applied" },
+          "runAfter": { "notifyVip": ["Succeeded"] }
+        }
+      },
+      "else": {
+        "actions": {
+          "standardPricing": {
+            "type": "transform",
+            "label": "Standard Pricing",
+            "inputs": { "strategy": "standard" },
+            "runAfter": {}
+          },
+          "applyTax": {
+            "type": "transform",
+            "label": "Apply Tax",
+            "inputs": { "strategy": "tax" },
+            "runAfter": { "standardPricing": ["Succeeded"] }
+          },
+          "logStandard": {
+            "type": "log",
+            "label": "Log Standard Applied",
+            "inputs": { "level": "info", "message": "Standard pricing applied" },
+            "runAfter": { "applyTax": ["Succeeded"] }
+          }
+        }
+      }
+    },
+
+    "notifyDone": {
+      "type": "notify",
+      "label": "Notify Customer",
+      "inputs": { "channel": "customer", "message": "Your order has been processed" },
+      "runAfter": { "ifVip": ["Succeeded"] }
+    },
+    "logFinal": {
+      "type": "log",
+      "label": "Log Completion",
+      "inputs": { "level": "info", "message": "Order processing complete" },
+      "runAfter": { "ifVip": ["Succeeded"] }
+    }
+  },
+  "outputs": {
+    "totaal": { "var": "fetchOrder.outputs.total" }
+  }
+}

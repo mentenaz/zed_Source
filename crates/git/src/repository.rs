@@ -1130,6 +1130,18 @@ pub trait GitRepository: Send + Sync {
         commit_limit: usize,
     ) -> BoxFuture<'_, Result<Vec<FileHistoryChangedFileSets>>>;
 
+    /// Returns author/timestamp data for the `max_commits` most recent commits,
+    /// newest first. Used for repo-wide insights (activity graph, collaborator
+    /// list) rather than any single commit's full details.
+    fn recent_commit_stats(&self, max_commits: usize) -> BoxFuture<'_, Result<Vec<CommitData>>>;
+
+    /// Counts how often each file appears across the `max_commits` most recent
+    /// commits, returned sorted by count descending.
+    fn file_change_frequency(
+        &self,
+        max_commits: usize,
+    ) -> BoxFuture<'_, Result<Vec<(RepoPath, usize)>>>;
+
     fn commit_data_reader(&self) -> Result<CommitDataReader>;
 
     fn update_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>>;
@@ -3567,6 +3579,71 @@ impl GitRepository for RealGitRepository {
         .boxed()
     }
 
+    fn recent_commit_stats(&self, max_commits: usize) -> BoxFuture<'_, Result<Vec<CommitData>>> {
+        let git = self.git_binary();
+
+        async move {
+            if max_commits == 0 {
+                return Ok(Vec::new());
+            }
+
+            let max_count_arg = format!("--max-count={max_commits}");
+            let args = [
+                "log",
+                max_count_arg.as_str(),
+                "--format=%x1e%H%x1f%an%x1f%ae%x1f%at",
+            ]
+            .map(OsString::from);
+
+            let output = git.build_command(&args).output().await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git log failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(parse_recent_commit_stats_output(&stdout))
+        }
+        .boxed()
+    }
+
+    fn file_change_frequency(
+        &self,
+        max_commits: usize,
+    ) -> BoxFuture<'_, Result<Vec<(RepoPath, usize)>>> {
+        let git = self.git_binary();
+
+        async move {
+            if max_commits == 0 {
+                return Ok(Vec::new());
+            }
+
+            let max_count_arg = format!("--max-count={max_commits}");
+            let args = [
+                "log",
+                max_count_arg.as_str(),
+                "--full-diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--format=%x1e%H",
+            ]
+            .map(OsString::from);
+
+            let output = git.build_command(&args).output().await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git log failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(parse_file_change_frequency_output(&stdout))
+        }
+        .boxed()
+    }
+
     fn commit_data_reader(&self) -> Result<CommitDataReader> {
         let git_binary = self.git_binary();
 
@@ -3712,6 +3789,57 @@ fn parse_file_history_changed_files_output(
     }
 
     histories
+}
+
+fn parse_recent_commit_stats_output(output: &str) -> Vec<CommitData> {
+    output
+        .split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim();
+            if record.is_empty() {
+                return None;
+            }
+            let mut fields = record.split('\x1f');
+            let sha = Oid::from_str(fields.next()?.trim()).ok()?;
+            let author_name = fields.next()?.trim().to_string();
+            let author_email = fields.next()?.trim().to_string();
+            let commit_timestamp: i64 = fields.next()?.trim().parse().ok()?;
+
+            Some(CommitData {
+                sha,
+                parents: SmallVec::new(),
+                author_name: author_name.into(),
+                author_email: author_email.into(),
+                commit_timestamp,
+                subject: SharedString::default(),
+                message: SharedString::default(),
+            })
+        })
+        .collect()
+}
+
+fn parse_file_change_frequency_output(output: &str) -> Vec<(RepoPath, usize)> {
+    let mut counts: HashMap<RepoPath, usize> = HashMap::default();
+
+    for record in output.split('\x1e') {
+        let mut fields = record.split('\0');
+        // First field is the `%H` commit sha emitted by `--format=%x1e%H`; the
+        // remaining NUL-separated fields are the commit's changed file paths.
+        fields.next();
+        for field in fields {
+            let path = field.trim_start_matches('\n');
+            if path.is_empty() {
+                continue;
+            }
+            if let Ok(path) = RepoPath::new(path) {
+                *counts.entry(path).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_by(|(_, a), (_, b)| b.cmp(a));
+    counts
 }
 
 fn parse_initial_graph_output<'a>(

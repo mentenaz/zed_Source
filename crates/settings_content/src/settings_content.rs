@@ -2,6 +2,7 @@ mod action;
 mod agent;
 mod editor;
 mod extension;
+pub mod flows;
 mod fallible_options;
 mod language;
 mod language_model;
@@ -18,6 +19,7 @@ pub use agent::*;
 use anyhow::Context;
 pub use editor::*;
 pub use extension::*;
+pub use flows::*;
 pub use fallible_options::*;
 pub use language::*;
 pub use language_model::*;
@@ -195,6 +197,9 @@ pub struct SettingsContent {
 
     /// Settings related to the file finder.
     pub file_finder: Option<FileFinderSettingsContent>,
+
+    /// Settings for the workflow designer and dashboard.
+    pub flows: Option<FlowsSettingsContent>,
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
@@ -402,7 +407,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, command_palette, file_finder, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
+        call_hierarchy, command_palette, file_finder, flows, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
         agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,

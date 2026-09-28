@@ -1,0 +1,17 @@
+[package]
+name = "zed_sqls"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/sqls.rs"
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+zed_extension_api = "0.7.0"

@@ -1,0 +1,27 @@
+[package]
+name = "dashboard_panel"
+description = "Cross-ecosystem dashboard tab — runtime versions, outdated/vulnerable package rollup, git status, and the embedded Cockpit system charts."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/dashboard_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+cockpit_panel.workspace = true
+dotnet_backend.workspace = true
+dotnet_panel.workspace = true
+git.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+node_panel.workspace = true
+npm_backend.workspace = true
+project.workspace = true
+python_backend.workspace = true
+python_panel.workspace = true
+ui.workspace = true
+workspace.workspace = true

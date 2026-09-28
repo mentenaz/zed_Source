@@ -1,0 +1,25 @@
+[package]
+name = "python_manager_panel"
+description = "Python (PyPI) package manager panel — installed/outdated/vulnerabilities lists, exact-name PyPI lookup, install/uninstall/update."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/python_manager_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+http_client.workspace = true
+project.workspace = true
+python_backend.workspace = true
+script_runner_panel.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+urlencoding.workspace = true
+workspace.workspace = true
