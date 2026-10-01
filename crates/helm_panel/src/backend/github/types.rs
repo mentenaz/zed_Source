@@ -463,6 +463,31 @@ pub struct WorkflowRun {
     pub updated_at: String,
 }
 
+/// One step within a `WorkflowJob`, from the "List jobs for a workflow run"
+/// endpoint's `steps[]` — this is the actual "which step is it on right
+/// now" detail the plain run-list endpoint (`WorkflowRun` above) doesn't
+/// carry at all.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub number: u64,
+}
+
+/// One job within a workflow run (`GET .../actions/runs/{id}/jobs`) — e.g.
+/// `build_windows`/`build_linux`/`build_macos` for `build_installers.yml`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowJob {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub html_url: String,
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+}
+
 /// A line of `gh auth login`/`gh auth refresh` output, or its final result.
 /// Replaces the Tauri `gh-auth-line`/`gh-auth-done` window events: panels
 /// subscribe via `GhState::auth_tx.subscribe()` while a login is in flight.

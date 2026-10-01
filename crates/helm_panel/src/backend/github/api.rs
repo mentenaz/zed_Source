@@ -11,7 +11,7 @@ use super::types::{
     Branch, Collaborator, Comment, CommitSummary, Deployment, GhState, GitHubUser,
     GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull, Release,
     Repo, RepoInvitation, Tag, TrafficClones, TrafficPath, TrafficReferrer, TrafficViews,
-    WorkflowRun,
+    WorkflowJob, WorkflowRun,
 };
 
 async fn gh_api_fetch<T: DeserializeOwned>(
@@ -227,6 +227,51 @@ pub async fn gh_list_workflow_runs(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
     Ok(runs)
+}
+
+/// A single run's own current status/conclusion — used to refresh the
+/// header of the run-detail screen on each poll tick, since `html_url` etc.
+/// never change but `status`/`conclusion` do while it's running.
+pub async fn gh_get_workflow_run(
+    owner: String,
+    repo: String,
+    run_id: u64,
+    state: &GhState,
+) -> Result<WorkflowRun, String> {
+    gh_api_fetch(
+        state,
+        &format!("/repos/{}/{}/actions/runs/{}", owner, repo, run_id),
+        "GET",
+        None,
+    )
+    .await
+}
+
+/// Per-job (and per-step within each job) status for a run — the detail
+/// `gh_list_workflow_runs`/`WorkflowRun` doesn't carry at all. This is what
+/// actually answers "what is it doing right now": each step's own
+/// status/conclusion, not just the run as a whole.
+pub async fn gh_get_workflow_run_jobs(
+    owner: String,
+    repo: String,
+    run_id: u64,
+    state: &GhState,
+) -> Result<Vec<WorkflowJob>, String> {
+    let resp: serde_json::Value = gh_api_fetch(
+        state,
+        &format!(
+            "/repos/{}/{}/actions/runs/{}/jobs?per_page=100",
+            owner, repo, run_id
+        ),
+        "GET",
+        None,
+    )
+    .await?;
+    let jobs = resp
+        .get("jobs")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    Ok(jobs)
 }
 
 pub async fn gh_list_deployments(
