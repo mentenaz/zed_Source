@@ -129,7 +129,11 @@ jobs:
     # rather than "windows-latest", which will eventually move to 2025 and
     # break this silently.
     runs-on: windows-2022
-    timeout-minutes: 120
+    # 120 wasn't enough on a cold cache (dev-v5: "No cache found", cancelled
+    # at exactly 2h0m mid-compile) — rust-cache misses happen whenever the
+    # cache key (keyed off Cargo.lock et al.) changes enough since the last
+    # run, so budget for a from-scratch build, not just a warm-cache one.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -164,7 +168,9 @@ jobs:
     # GitHub's hosted Arm64 Linux runners (public repos, no extra cost) —
     # falls back to the regular x64 image otherwise.
     runs-on: ${{ needs.prepare.outputs.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
-    timeout-minutes: 120
+    # See build_windows's identical comment — 120 wasn't enough on a cold
+    # rust-cache miss (dev-v5 was cancelled at exactly 2h0m mid-compile).
+    timeout-minutes: 180
     env:
       CC: clang
       CXX: clang++
