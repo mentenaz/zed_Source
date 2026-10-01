@@ -1,0 +1,17 @@
+# Sourcery (AI PR review bot, installed as a GitHub App — not vendored into
+# this repo) has a hard cap on how much diff it will review per PR
+# (currently 150,000 diff characters). Excluding generated/vendored/config
+# files here keeps large-but-uninteresting diffs (a lockfile bump, a keymap
+# JSON reformat) from eating into that budget on PRs that also touch real
+# source — it doesn't raise the cap itself, so a PR broad enough across
+# actual source files can still exceed it; splitting the PR is the only
+# real fix for that case.
+ignore:
+  - Cargo.lock
+  - "**/*.lock"
+  - "assets/keymaps/*.json"
+  - "script/update_top_ranking_issues/**"
+  - "**/node_modules/**"
+  - "**/target/**"
+  - "**/*.min.js"
+  - "**/*.svg"

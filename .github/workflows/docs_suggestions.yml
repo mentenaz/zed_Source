@@ -52,12 +52,18 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    # FACTORY_API_KEY only exists in zed-industries' own org secrets — same
+    # guard release.yml's jobs use, so this is inert on a fork instead of
+    # failing on every merge to main (the pre-existing checks below only
+    # excluded *external* fork PRs targeting this repo, not this repo
+    # itself being a fork without the secret).
     if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.merged == true &&
-       github.event.pull_request.base.ref == 'main' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'batch')
+      (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'batch'))
 
     steps:
       - name: Checkout repository
@@ -285,14 +291,16 @@ jobs:
     concurrency:
       group: docs-suggestions-${{ github.event.pull_request.number || inputs.pr_number || 'manual' }}
       cancel-in-progress: true
+    # Same FACTORY_API_KEY-availability guard as batch-suggestions above.
     if: |
-      (github.event_name == 'pull_request' &&
-       contains(fromJSON('["opened","synchronize"]'), github.event.action) &&
-       startsWith(github.event.pull_request.base.ref, 'v0.') &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(fromJSON('["MEMBER","OWNER"]'),
-                github.event.pull_request.author_association)) ||
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'immediate')
+      (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') &&
+      ((github.event_name == 'pull_request' &&
+        contains(fromJSON('["opened","synchronize"]'), github.event.action) &&
+        startsWith(github.event.pull_request.base.ref, 'v0.') &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["MEMBER","OWNER"]'),
+                 github.event.pull_request.author_association)) ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'immediate'))
 
     steps:
       - name: Checkout repository
