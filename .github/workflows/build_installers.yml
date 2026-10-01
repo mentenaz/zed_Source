@@ -352,6 +352,10 @@ jobs:
       - name: Publish to a GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks out the repo (it only needs the downloaded
+          # artifacts), so `gh` has no .git dir to infer the repo from —
+          # "failed to run git: fatal: not a git repository" without this.
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           ARCH: ${{ needs.prepare.outputs.architecture }}
         run: |
