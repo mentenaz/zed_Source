@@ -838,6 +838,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
                 .log_err();
             let node_panel = node_panel.await.context("failed to load panel").log_err();
             let python_panel = python_panel.await.context("failed to load panel").log_err();
+            let flows_panel = flows_panel.await.context("failed to load panel").log_err();
 
             if let Some(script_runner_panel) = &script_runner_panel {
                 let weak_script_runner = script_runner_panel.downgrade();
@@ -853,6 +854,28 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
                 }
             }
 
+            // `node_panel`'s "task chain" quick action opens the Flows
+            // panel's Add Task Chain wizard anchored on the selected
+            // project — same "both loaded, then wire, then dock" ordering
+            // as the Script Runner wiring above, and for the same reason
+            // (the target panel needs to exist, as a weak handle, before
+            // `node_panel` can reach it).
+            if let Some(flows_panel) = &flows_panel
+                && let Some(node_panel) = &node_panel
+            {
+                let weak_flows_panel = flows_panel.downgrade();
+                node_panel.update(&mut script_runner_wiring_cx, |panel, _cx| {
+                    panel.set_flows_panel(weak_flows_panel);
+                });
+            }
+
+            if let Some(panel) = flows_panel {
+                script_runner_wiring_workspace_handle
+                    .update_in(&mut script_runner_wiring_cx, |workspace, window, cx| {
+                        workspace.add_panel(panel, window, cx);
+                    })
+                    .log_err();
+            }
             if let Some(panel) = script_runner_panel {
                 script_runner_wiring_workspace_handle
                     .update_in(&mut script_runner_wiring_cx, |workspace, window, cx| {
@@ -889,7 +912,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             script_runner_dependent_panels,
             add_panel_when_ready(processes_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(dotnet_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(flows_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 

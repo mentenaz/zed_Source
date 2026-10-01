@@ -55,6 +55,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::chart::{BarChart, LineChart};
+use gpui_component::plot::shape::BarAlignment;
 use gpui_component::{Sizable as _, Theme as GpuiComponentTheme, avatar::Avatar as GpuiAvatar};
 use itertools::Itertools;
 use language::{Buffer, BufferEvent, File};
@@ -569,6 +570,32 @@ enum GitPanelTab {
 }
 
 const DETAILS_COMMIT_WINDOW: usize = 200;
+
+/// Vertical space per bar in the "Most Changed Files" chart.
+const TOP_FILE_ROW_HEIGHT: f32 = 22.;
+
+/// Longest file name drawn on that chart's band axis, in characters. Longer names
+/// are elided in the middle; the tooltip still carries the full path.
+///
+/// The axis reserves the width of the widest label, so this also bounds how much
+/// of a narrow panel one long file name can take away from the bars themselves.
+const MAX_TOP_FILE_LABEL_LEN: usize = 24;
+
+/// Shorten `text` to at most `max_len` characters by replacing its middle with an
+/// ellipsis, keeping both ends (for a file name, the prefix and the extension).
+fn elide_middle(text: &str, max_len: usize) -> SharedString {
+    let len = text.chars().count();
+    if len <= max_len || max_len < 3 {
+        return SharedString::from(text.to_string());
+    }
+    let keep = max_len - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = text.chars().take(head).collect();
+    out.push('\u{2026}');
+    out.extend(text.chars().skip(len - tail));
+    SharedString::from(out)
+}
 
 #[derive(Debug, Clone)]
 enum DetailsData {
@@ -7192,25 +7219,44 @@ impl GitPanel {
         file_changes: &[(RepoPath, usize)],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let data: Vec<(SharedString, f64)> = file_changes
+        // Bars run horizontally so each file name gets a row of its own on the band
+        // axis. Crammed under vertical bars, file names of any realistic length just
+        // overlap into an unreadable smear.
+        //
+        // The band value is the full repo-relative path (unique per bar, and the
+        // tooltip title), while the axis shows the elided file name.
+        let data: Vec<(SharedString, SharedString, f64)> = file_changes
             .iter()
             .take(10)
             .map(|(path, count)| {
                 let name = path.file_name().unwrap_or_else(|| path.as_unix_str());
-                (SharedString::from(name.to_string()), *count as f64)
+                (
+                    SharedString::from(path.as_unix_str().to_string()),
+                    elide_middle(name, MAX_TOP_FILE_LABEL_LEN),
+                    *count as f64,
+                )
             })
             .collect();
 
+        // One row per file, so the chart grows with the data instead of squeezing
+        // ten bars into a fixed box.
+        let height = px(data.len() as f32 * TOP_FILE_ROW_HEIGHT);
+
         self.render_details_section("Most Changed Files", cx).child(
-            div().h(px(200.)).child(
+            div().h(height).child(
                 BarChart::new(data)
                     .id("details-top-files-chart")
                     .name("Changes")
-                    .band(|(name, _)| name.clone())
-                    .value(|(_, count)| *count)
+                    .alignment(BarAlignment::Left)
+                    .band(|(path, _, _)| path.clone())
+                    .band_label(|(_, name, _)| name.clone())
+                    .value(|(_, _, count)| *count)
+                    // The exact count at each bar's tip, so the chart needs no
+                    // value axis or grid of its own.
+                    .label(|(_, _, count)| format!("{count}"))
                     .label_axis(true)
-                    .value_axis(true)
-                    .grid(true),
+                    .value_axis(false)
+                    .grid(false),
             ),
         )
     }
@@ -10097,6 +10143,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn test_elide_middle() {
+        // Short enough to stay verbatim.
+        assert_eq!(elide_middle("main.rs", 24), "main.rs");
+        assert_eq!(elide_middle("abcdefgh", 8), "abcdefgh");
+
+        // Elided to exactly `max_len`, keeping the extension at the tail.
+        let elided = elide_middle("some_really_long_module_name.rs", 16);
+        assert_eq!(elided.chars().count(), 16);
+        assert_eq!(elided, "some_rea\u{2026}name.rs");
+
+        // Char boundaries, not byte boundaries.
+        assert_eq!(elide_middle("ééééée", 5), "éé\u{2026}ée");
+    }
 
     fn init_test(cx: &mut gpui::TestAppContext) {
         zlog::init_test();

@@ -547,6 +547,11 @@ impl BreakpointList {
             .map(|session| SupportedBreakpointProperties::from(session.read(cx).capabilities()))
             .unwrap_or_else(SupportedBreakpointProperties::all);
         let strip_mode = self.strip_mode;
+        let session_ignoring = self
+            .session
+            .as_ref()
+            .map(|session| session.read(cx).ignore_breakpoints())
+            .unwrap_or(false);
 
         uniform_list(
             "breakpoint-list",
@@ -563,6 +568,7 @@ impl BreakpointList {
                                 ix,
                                 Some(ix) == selected_ix,
                                 focus_handle.clone(),
+                                session_ignoring,
                             )
                             .into_any_element()
                     })
@@ -575,9 +581,15 @@ impl BreakpointList {
         .flex_1()
     }
 
-    pub(crate) fn render_control_strip(&self) -> AnyElement {
+    pub(crate) fn render_control_strip(&self, cx: &App) -> AnyElement {
         let selection_kind = self.selection_kind();
         let focus_handle = self.focus_handle.clone();
+        let session_ignoring = self
+            .session
+            .as_ref()
+            .map(|session| session.read(cx).ignore_breakpoints())
+            .unwrap_or(false);
+        let session = self.session.clone();
 
         let remove_breakpoint_tooltip = selection_kind.map(|(kind, _)| match kind {
             SelectedBreakpointKind::Source => "Remove breakpoint from a breakpoint list",
@@ -654,6 +666,39 @@ impl BreakpointList {
                             window.dispatch_action(UnsetBreakpoint.boxed_clone(), cx)
                         }
                     }),
+            )
+            .child(
+                IconButton::new(
+                    "toggle-ignore-breakpoints-breakpoint-list",
+                    IconName::DebugIgnoreBreakpoints,
+                )
+                .icon_size(IconSize::Small)
+                .toggle_state(session_ignoring)
+                .disabled(session.is_none())
+                .tooltip({
+                    let focus_handle = self.focus_handle.clone();
+                    move |_window, cx| {
+                        Tooltip::with_meta_in(
+                            if session_ignoring {
+                                "Stop Ignoring Breakpoints"
+                            } else {
+                                "Ignore All Breakpoints"
+                            },
+                            Some(&crate::ToggleIgnoreBreakpoints),
+                            "Temporarily suppress every breakpoint without removing them",
+                            &focus_handle,
+                            cx,
+                        )
+                    }
+                })
+                .on_click(move |_, window, cx| {
+                    if let Some(session) = session.as_ref() {
+                        session.update(cx, |session, cx| {
+                            session.toggle_ignore_breakpoints(cx).detach();
+                        });
+                    }
+                    let _ = window;
+                }),
             )
             .into_any_element()
     }
@@ -826,11 +871,17 @@ impl LineBreakpoint {
         is_selected: bool,
         focus_handle: FocusHandle,
         weak: WeakEntity<BreakpointList>,
+        session_ignoring: bool,
     ) -> ListItem {
         let icon_name = if self.breakpoint.state.is_enabled() {
             IconName::DebugBreakpoint
         } else {
             IconName::DebugDisabledBreakpoint
+        };
+        let icon_color = if session_ignoring {
+            Color::Muted
+        } else {
+            Color::Debugger
         };
         let path = self.breakpoint.path.clone();
         let row = self.breakpoint.row;
@@ -843,7 +894,7 @@ impl LineBreakpoint {
             )))
             .child(
                 Icon::new(icon_name)
-                    .color(Color::Debugger)
+                    .color(icon_color)
                     .size(IconSize::XSmall),
             )
             .tooltip({
@@ -973,8 +1024,9 @@ impl DataBreakpoint {
         is_selected: bool,
         focus_handle: FocusHandle,
         list: WeakEntity<BreakpointList>,
+        session_ignoring: bool,
     ) -> ListItem {
-        let color = if self.0.is_enabled {
+        let color = if self.0.is_enabled && !session_ignoring {
             Color::Debugger
         } else {
             Color::Muted
@@ -1066,8 +1118,9 @@ impl ExceptionBreakpoint {
         is_selected: bool,
         focus_handle: FocusHandle,
         list: WeakEntity<BreakpointList>,
+        session_ignoring: bool,
     ) -> ListItem {
-        let color = if self.is_enabled {
+        let color = if self.is_enabled && !session_ignoring {
             Color::Debugger
         } else {
             Color::Muted
@@ -1183,6 +1236,7 @@ impl BreakpointEntry {
         ix: usize,
         is_selected: bool,
         focus_handle: FocusHandle,
+        session_ignoring: bool,
     ) -> ListItem {
         match &mut self.kind {
             BreakpointEntryKind::LineBreakpoint(line_breakpoint) => line_breakpoint.render(
@@ -1192,6 +1246,7 @@ impl BreakpointEntry {
                 is_selected,
                 focus_handle,
                 self.weak.clone(),
+                session_ignoring,
             ),
             BreakpointEntryKind::ExceptionBreakpoint(exception_breakpoint) => exception_breakpoint
                 .render(
@@ -1201,6 +1256,7 @@ impl BreakpointEntry {
                     is_selected,
                     focus_handle,
                     self.weak.clone(),
+                    session_ignoring,
                 ),
             BreakpointEntryKind::DataBreakpoint(data_breakpoint) => data_breakpoint.render(
                 props.for_data_breakpoints(),
@@ -1209,6 +1265,7 @@ impl BreakpointEntry {
                 is_selected,
                 focus_handle,
                 self.weak.clone(),
+                session_ignoring,
             ),
         }
     }

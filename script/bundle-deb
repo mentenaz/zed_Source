@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+
+# Packages the .tar.gz script/bundle-linux already built into a .deb.
+# script/bundle-linux must be run first, for the same architecture — this
+# repackages its output, it doesn't build anything itself.
+#
+# Unofficial: Zed Industries doesn't ship a .deb anywhere in this repo (just
+# the tarball this reads, and separately script/bundle-flatpak). This is an
+# additive convenience, not something upstream's release pipeline produces.
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: ${0##*/} [x86_64|aarch64]" >&2
+  echo "Build a .deb from the tarball script/bundle-linux already produced for that architecture." >&2
+}
+
+arch="${1:-$(uname -m)}"
+case "$arch" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+case "$arch" in
+  x86_64) deb_arch=amd64 ;;
+  aarch64) deb_arch=arm64 ;;
+  *)
+    echo "error: unsupported architecture '${arch}' (expected x86_64 or aarch64)" >&2
+    usage
+    exit 1
+    ;;
+esac
+
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+  echo "error: dpkg-deb not found — this script only runs on Debian-family systems (or their CI images)." >&2
+  exit 1
+fi
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+version=$(script/get-crate-version zed)
+
+# Same channel-suffix convention as bundle-linux/bundle-mac's own $suffix —
+# "zed" for stable, "zed-dev"/"zed-nightly"/"zed-preview" otherwise, so a
+# dev build's .deb can never collide with (or accidentally upgrade) a real
+# stable install.
+suffix=""
+if [[ "$channel" != "stable" ]]; then
+  suffix="-${channel}"
+fi
+pkg_name="zed${suffix}"
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+tarball="${target_dir}/release/zed-linux-${arch}.tar.gz"
+if [[ ! -f "$tarball" ]]; then
+  echo "error: ${tarball} not found — run script/bundle-linux first (same architecture)." >&2
+  exit 1
+fi
+
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+
+extract_dir="${work_dir}/extract"
+mkdir -p "$extract_dir"
+tar -xzf "$tarball" -C "$extract_dir"
+
+app_dir=$(find "$extract_dir" -maxdepth 1 -name '*.app' | head -n1)
+if [[ -z "$app_dir" ]]; then
+  echo "error: no *.app directory found inside ${tarball}" >&2
+  exit 1
+fi
+
+# /usr/lib/<pkg>/{bin,libexec,lib} as siblings, exactly as bundle-linux laid
+# them out inside the .app — bin/zed locates libexec/zed-editor by a path
+# relative to itself, which is the whole reason the tarball is relocatable
+# to begin with. Installing them as siblings elsewhere preserves that.
+pkg_root="${work_dir}/pkg"
+install_dir="${pkg_root}/usr/lib/${pkg_name}"
+mkdir -p \
+  "$install_dir" \
+  "${pkg_root}/usr/bin" \
+  "${pkg_root}/usr/share/applications" \
+  "${pkg_root}/usr/share/doc/${pkg_name}" \
+  "${pkg_root}/DEBIAN"
+
+cp -a "${app_dir}/bin" "${app_dir}/libexec" "${app_dir}/lib" "$install_dir/"
+ln -s "/usr/lib/${pkg_name}/bin/zed" "${pkg_root}/usr/bin/zed"
+
+# The bundled .desktop's Exec/TryExec/Icon are the bare command/icon names
+# (envsubst'd from $APP_CLI/$APP_ICON in bundle-linux, not absolute paths),
+# so it works as-is once /usr/bin/zed and the icon below are both in the
+# usual system search paths.
+desktop_file=$(find "${app_dir}/share/applications" -name '*.desktop' | head -n1)
+if [[ -z "$desktop_file" ]]; then
+  echo "error: no .desktop file found inside ${tarball}" >&2
+  exit 1
+fi
+cp "$desktop_file" "${pkg_root}/usr/share/applications/"
+
+if [[ -d "${app_dir}/share/icons" ]]; then
+  mkdir -p "${pkg_root}/usr/share/icons"
+  cp -a "${app_dir}/share/icons/." "${pkg_root}/usr/share/icons/"
+fi
+
+# Not a policy-compliant machine-readable debian/copyright — just the same
+# licenses.md bundle-linux already generates and ships in the tarball,
+# placed where dpkg expects a copyright file to exist at all.
+cp "${app_dir}/licenses.md" "${pkg_root}/usr/share/doc/${pkg_name}/copyright"
+
+find "$install_dir/bin" "$install_dir/libexec" -type f -exec chmod 0755 {} +
+
+# Refresh the desktop/icon caches on install so the app shows up in menus
+# without a logout — best-effort, since a minimal system may have neither
+# tool installed.
+for hook in postinst postrm; do
+  cat > "${pkg_root}/DEBIAN/${hook}" <<'EOF'
+#!/bin/sh
+set -e
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true
+EOF
+  chmod 0755 "${pkg_root}/DEBIAN/${hook}"
+done
+
+installed_size_kb=$(du -sk "$pkg_root" | cut -f1)
+
+# No Depends: bundle-linux already vendors most of the shared libraries Zed
+# needs (see its own find_libs — deliberately excluding the GLib/GTK family,
+# which must resolve against the *system's* copies or dlopen'd host
+# libraries break). Declaring exact versions for those without actually
+# testing across distros would be more likely to wrongly block a working
+# install than to catch a real problem, so this leaves it undeclared: if
+# something's missing, it'll fail at runtime, the same as running the
+# tarball directly.
+cat > "${pkg_root}/DEBIAN/control" <<EOF
+Package: ${pkg_name}
+Version: ${version}
+Section: editors
+Priority: optional
+Architecture: ${deb_arch}
+Installed-Size: ${installed_size_kb}
+Maintainer: Unofficial build <noreply@example.invalid>
+Description: Zed code editor (unofficial .deb, ${channel} channel)
+ High-performance, multiplayer code editor. Repackaged from the same
+ relocatable tarball script/bundle-linux produces for this fork — not an
+ official Zed Industries package, and not published or supported by them.
+EOF
+
+deb_path="${target_dir}/release/${pkg_name}_${version}_${deb_arch}.deb"
+rm -f "$deb_path"
+dpkg-deb --build --root-owner-group "$pkg_root" "$deb_path"
+
+echo "Built ${deb_path}"

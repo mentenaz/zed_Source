@@ -12596,6 +12596,7 @@ name = "node_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flows_panel",
  "gpui",
  "gpui-component",
  "indexmap 2.14.0",

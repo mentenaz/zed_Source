@@ -395,6 +395,15 @@ pub trait DebugAdapter: 'static + Send + Sync {
     fn prefer_thread_name(&self) -> bool {
         false
     }
+
+    /// Lowercased substrings an OS process's executable name must contain
+    /// (matching any one of them) to be offered as an Attach target for this
+    /// adapter. `None` means "don't filter" (show every process, previous
+    /// behavior) — adapters that can't name their runtime this way should
+    /// leave this unset rather than guess.
+    fn attach_process_name_filter(&self) -> Option<Vec<&'static str>> {
+        None
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

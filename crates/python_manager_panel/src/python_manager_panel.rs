@@ -36,8 +36,8 @@ use std::collections::HashMap;
 use futures::io::AsyncReadExt as _;
 use futures::stream::{self, StreamExt as _};
 use gpui::{
-    App, AppContext, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    App, AppContext, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    InteractiveElement as _, IntoElement, ParentElement as _, PromptLevel, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions,
     div, px,
 };
@@ -61,7 +61,24 @@ use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 mod details;
 mod pages;
 
-actions!(python_manager, [OpenPythonManager]);
+actions!(
+    python_manager,
+    [
+        OpenPythonManager,
+        /// Moves the selection down one row in whichever package list page
+        /// (Installed/Updates/Vulnerabilities) currently has focus.
+        SelectNextPackage,
+        /// Moves the selection up one row, same scope as `SelectNextPackage`.
+        SelectPrevPackage,
+        /// Opens (Installed/Updates) or toggles (Vulnerabilities) the
+        /// selected row — the keyboard equivalent of clicking it.
+        OpenSelectedPackage,
+        /// Runs the selected row's primary action for the page it's on:
+        /// Uninstall (Installed), Update (Updates), or Fix (Vulnerabilities,
+        /// only when the advisory offers one).
+        ActSelectedPackage
+    ]
+);
 
 /// Max concurrent PyPI requests during a vulnerability scan — one HTTP
 /// round-trip per installed package (there's no bulk endpoint, unlike `npm
@@ -108,6 +125,20 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    // The three package-list pages (Installed/Updates/Vulnerabilities) had
+    // no keyboard path at all before this — a row could only be opened or
+    // acted on with the mouse. Scoped to `PythonPackageList` (each list
+    // container sets that key context), matching how
+    // `gpui_component::table::data_table` scopes its own row-navigation
+    // bindings to `DataTable`, and identically to
+    // `npm_manager_panel`/`nuget_manager_panel`'s own `PACKAGE_LIST_CONTEXT`.
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNextPackage, Some("PythonPackageList")),
+        KeyBinding::new("up", SelectPrevPackage, Some("PythonPackageList")),
+        KeyBinding::new("enter", OpenSelectedPackage, Some("PythonPackageList")),
+        KeyBinding::new("space", ActSelectedPackage, Some("PythonPackageList")),
+    ]);
 }
 
 /// The workspace's first worktree's absolute path — same resolution
@@ -188,6 +219,30 @@ pub struct PythonManagerPanel {
     details: Option<PyPiPackageInfo>,
     details_loading: bool,
     show_readme: bool,
+
+    // ── Keyboard row navigation ──────────────────────────────────────
+    //
+    // No separate page-view entities exist here (unlike
+    // `npm_manager_panel`/`nuget_manager_panel`'s `PageViews`) — `pages.rs`
+    // rebuilds every `SettingPage` fresh from this struct on each render, so
+    // the cursor + its list's `FocusHandle` live directly on the panel,
+    // one pair per list that needs it. `FocusHandle`s must be created once
+    // in `new` (not per render) or focus tracking breaks.
+    /// Row `up`/`down`/`enter`/`space` act on, within `installed`.
+    installed_cursor: Option<usize>,
+    installed_list_focus: FocusHandle,
+    /// Row `up`/`down`/`enter`/`space` act on, within `outdated`.
+    outdated_cursor: Option<usize>,
+    outdated_list_focus: FocusHandle,
+    /// Row `up`/`down`/`enter`/`space` act on, within the flattened,
+    /// name-sorted `(package, vulnerability)` list `pages::flatten_vulns`
+    /// also builds for rendering — kept as an index into that same order so
+    /// the two never drift apart. Enter toggles the row's own
+    /// expand/collapse (mirrors a click on the header, not "open details" —
+    /// there is no separate details view from this list); Space runs Fix
+    /// when the advisory lists one, a no-op otherwise.
+    vuln_cursor: Option<usize>,
+    vuln_list_focus: FocusHandle,
 }
 
 impl PythonManagerPanel {
@@ -235,6 +290,12 @@ impl PythonManagerPanel {
             details: None,
             details_loading: false,
             show_readme: false,
+            installed_cursor: None,
+            installed_list_focus: cx.focus_handle(),
+            outdated_cursor: None,
+            outdated_list_focus: cx.focus_handle(),
+            vuln_cursor: None,
+            vuln_list_focus: cx.focus_handle(),
         };
 
         let mut panel = panel;
@@ -512,14 +573,37 @@ impl PythonManagerPanel {
         self.kick_run(&format!("install {name}"), cmd, window, cx);
     }
 
+    /// Confirms before uninstalling — irreversible from here (no undo, and
+    /// pip doesn't remember what version was removed), and previously a
+    /// single un-gated click. Uses GPUI's own `window.prompt`, matching
+    /// Zed's own `project_panel::remove`'s delete-file confirmation rather
+    /// than a `gpui_component` modal/dialog — see `database_panel`'s
+    /// `delete_connection` for the same reasoning, applied identically here.
     fn uninstall_pkg(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let exe = self.pip_bin();
-        self.kick_run(
-            &format!("uninstall {name}"),
-            format!("{exe} -m pip uninstall -y {name}"),
-            window,
+        let name = name.to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Uninstall {name}?"),
+            Some("This removes the package from the active interpreter and cannot be undone."),
+            &["Uninstall", "Cancel"],
             cx,
         );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                let exe = this.pip_bin();
+                this.kick_run(
+                    &format!("uninstall {name}"),
+                    format!("{exe} -m pip uninstall -y {name}"),
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn update_all_outdated(&mut self, window: &mut Window, cx: &mut Context<Self>) {

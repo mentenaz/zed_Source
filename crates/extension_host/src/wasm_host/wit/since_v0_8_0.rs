@@ -230,6 +230,8 @@ impl From<AttachRequest> for task::AttachRequest {
     fn from(value: AttachRequest) -> Self {
         Self {
             process_id: value.process_id,
+            // Not part of the extension WIT ABI yet.
+            port: None,
         }
     }
 }

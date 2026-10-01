@@ -1339,6 +1339,14 @@ impl DesignerPanel {
             return;
         }
         self.state.update(cx, |state, cx| {
+            // The canvas's own Delete/Backspace key already pushes undo
+            // before removing selected nodes — this button is the other
+            // path to the same destructive operation and was missing it,
+            // making a misclick here unrecoverable where the keyboard path
+            // wasn't. No confirmation dialog either (see the doc comment
+            // above), so undo is the only safety net; it has to actually be
+            // there.
+            state.push_undo();
             let mut doomed = vec![node_id.clone()];
             let mut frontier = vec![node_id];
             while let Some(id) = frontier.pop() {

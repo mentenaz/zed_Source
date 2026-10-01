@@ -609,7 +609,29 @@ impl FlowState {
 
         let zoom_x = container_width / content_width;
         let zoom_y = container_height / content_height;
-        let zoom = zoom_x.min(zoom_y).clamp(self.min_zoom, self.max_zoom);
+        let ideal_zoom = zoom_x.min(zoom_y);
+
+        // `min_zoom` exists to keep interactive zoom/pan usable (don't let a
+        // scroll-wheel zoom out past the point controls become unusable) —
+        // it isn't meant to cap how far a "fit everything" request can go.
+        // A graph taller or wider than `min_zoom` allows for (a tall
+        // top-to-bottom workflow, a wide schema) used to get its computed
+        // zoom clamped back up here, silently breaking the fit: content
+        // past the container's edge was cut off instead of shown. Callers
+        // used to have to know to pre-raise `min_zoom` by hand before
+        // calling this (see `gpui_flow`'s own kitchen-sink example); widen
+        // it here instead so `fit_view` always actually fits, and later
+        // manual zoom-out can reach the same level without snapping back.
+        //
+        // Only ever widens the floor, never narrows it — a graph that
+        // already fit within the existing `min_zoom` computes an
+        // `ideal_zoom` at or above it and this is a no-op, so nothing that
+        // worked before changes.
+        const ABSOLUTE_MIN_ZOOM: f32 = 0.05;
+        if ideal_zoom < self.min_zoom {
+            self.min_zoom = ideal_zoom.max(ABSOLUTE_MIN_ZOOM);
+        }
+        let zoom = ideal_zoom.clamp(self.min_zoom, self.max_zoom);
 
         self.viewport.zoom = zoom;
         self.viewport.x = (container_width - content_width * zoom) / 2.0 - (min_x - padding) * zoom;
@@ -664,6 +686,45 @@ impl FlowState {
             if edge.selectable {
                 edge.selected = true;
             }
+        }
+    }
+
+    /// Moves the single-node selection to the next (`forward: true`) or
+    /// previous node in `self.nodes`' order — creation order, the same order
+    /// `undo`/`redo` already treat as canonical, rather than a spatial
+    /// left-to-right/top-to-bottom order that would need recomputing on
+    /// every layout change. Wraps at both ends; selects the first eligible
+    /// node when none was selected yet.
+    ///
+    /// Skips hidden and non-`selectable` nodes (the same guard `select_all`
+    /// uses) and clears every other node's selection, matching a plain
+    /// (non-multi) click. A container's children are included, not just
+    /// top-level nodes — unlike [`Self::fit_view`], which only needs a
+    /// container's own footprint, this is for reaching a specific node to
+    /// inspect or edit, and a nested action is as valid a target as any
+    /// other.
+    pub fn select_next_node(&mut self, forward: bool) {
+        let eligible: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.hidden && n.selectable)
+            .map(|(i, _)| i)
+            .collect();
+        if eligible.is_empty() {
+            return;
+        }
+
+        let current = self.nodes.iter().position(|n| n.selected);
+        let next_pos = match current.and_then(|cur_ix| eligible.iter().position(|&i| i == cur_ix)) {
+            Some(pos) if forward => (pos + 1) % eligible.len(),
+            Some(pos) => (pos + eligible.len() - 1) % eligible.len(),
+            None => 0,
+        };
+        let next_ix = eligible[next_pos];
+
+        for (i, node) in self.nodes.iter_mut().enumerate() {
+            node.selected = i == next_ix;
         }
     }
 
@@ -1009,5 +1070,148 @@ mod tests {
             "child's absolute y should sit below the 56-unit header (got {})",
             abs.y
         );
+    }
+
+    #[test]
+    fn fit_view_widens_min_zoom_instead_of_clipping() {
+        // A tall, narrow layout — three nodes stacked well past what the
+        // default `min_zoom` (0.8) allows to fit into a normal-sized
+        // container. Before this fix, `fit_view`'s clamp against the old,
+        // narrower `min_zoom` would win, leaving the bottom node's footprint
+        // past the visible viewport instead of actually fitting it.
+        let mut state = FlowState::new(
+            vec![
+                FlowNode::new("a", 0.0, 0.0).size(200.0, 100.0),
+                FlowNode::new("b", 0.0, 400.0).size(200.0, 100.0),
+                FlowNode::new("c", 0.0, 800.0).size(200.0, 100.0),
+            ],
+            vec![],
+        );
+        assert_eq!(state.min_zoom, 0.8, "test assumes the documented default");
+
+        state.fit_view(60.0, 900.0, 600.0);
+
+        // Content spans y in [0, 900] plus 60 padding on each side = 1020,
+        // so fitting it into a 600-tall container needs zoom ≈ 0.588 — below
+        // the original 0.8 floor.
+        assert!(
+            state.viewport.zoom < 0.8,
+            "fit_view should have zoomed out past the interactive floor to fit everything, got {}",
+            state.viewport.zoom
+        );
+        assert!(
+            (state.min_zoom - state.viewport.zoom).abs() < f32::EPSILON,
+            "min_zoom should widen to match the zoom fit_view actually used, so a later \
+             manual zoom-out can return to it (min_zoom={}, viewport.zoom={})",
+            state.min_zoom,
+            state.viewport.zoom
+        );
+
+        // Every node's footprint must land fully inside the container at the
+        // zoom `fit_view` settled on — the actual "nothing gets clipped"
+        // guarantee, checked directly rather than just inferred from zoom.
+        let zoom = state.viewport.zoom;
+        for id in ["a", "b", "c"] {
+            let node = state.get_node(&id.into()).unwrap();
+            let (w, h) = state.node_footprint(node);
+            let screen_x = state.viewport.x + node.position.x * zoom;
+            let screen_y = state.viewport.y + node.position.y * zoom;
+            assert!(
+                screen_x >= 0.0 && screen_x + w * zoom <= 900.0,
+                "node {id} horizontally clipped: [{screen_x}, {}] outside [0, 900]",
+                screen_x + w * zoom
+            );
+            assert!(
+                screen_y >= 0.0 && screen_y + h * zoom <= 600.0,
+                "node {id} vertically clipped: [{screen_y}, {}] outside [0, 600]",
+                screen_y + h * zoom
+            );
+        }
+    }
+
+    #[test]
+    fn fit_view_leaves_min_zoom_untouched_when_content_already_fits() {
+        // A single small node fits comfortably within the default min/max
+        // zoom range, so fit_view must not perturb `min_zoom` at all — the
+        // widening only ever kicks in when it's actually needed.
+        let mut state = FlowState::new(vec![FlowNode::new("a", 0.0, 0.0).size(100.0, 60.0)], vec![]);
+        state.fit_view(60.0, 900.0, 600.0);
+
+        assert_eq!(
+            state.min_zoom, 0.8,
+            "min_zoom should be unchanged when the ideal zoom is already within range"
+        );
+        assert!(
+            state.viewport.zoom >= 0.8 && state.viewport.zoom <= 2.5,
+            "zoom should land within the default range, got {}",
+            state.viewport.zoom
+        );
+    }
+
+    #[test]
+    fn select_next_node_cycles_in_creation_order_and_wraps() {
+        let mut state = FlowState::new(
+            vec![
+                FlowNode::new("a", 0.0, 0.0),
+                FlowNode::new("b", 0.0, 0.0),
+                FlowNode::new("c", 0.0, 0.0),
+            ],
+            vec![],
+        );
+
+        // Nothing selected yet: lands on the first node.
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("a"));
+
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("b"));
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("c"));
+        // Wraps forward past the last node.
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("a"));
+
+        // And backward past the first.
+        state.select_next_node(false);
+        assert_eq!(selected_id(&state), Some("c"));
+
+        // Selecting the next node clears the previous one's flag — single
+        // selection, matching a plain (non-multi) click.
+        let selected_count = state.nodes.iter().filter(|n| n.selected).count();
+        assert_eq!(selected_count, 1);
+    }
+
+    #[test]
+    fn select_next_node_skips_hidden_and_unselectable() {
+        let mut state = FlowState::new(
+            vec![
+                FlowNode::new("a", 0.0, 0.0),
+                {
+                    let mut hidden = FlowNode::new("b-hidden", 0.0, 0.0);
+                    hidden.hidden = true;
+                    hidden
+                },
+                {
+                    let mut unselectable = FlowNode::new("c-unselectable", 0.0, 0.0);
+                    unselectable.selectable = false;
+                    unselectable
+                },
+                FlowNode::new("d", 0.0, 0.0),
+            ],
+            vec![],
+        );
+
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("a"));
+        // Skips both "b-hidden" and "c-unselectable" in one step.
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("d"));
+        // Wraps straight back to "a", still skipping both.
+        state.select_next_node(true);
+        assert_eq!(selected_id(&state), Some("a"));
+    }
+
+    fn selected_id(state: &FlowState) -> Option<&str> {
+        state.nodes.iter().find(|n| n.selected).map(|n| n.id.as_ref())
     }
 }

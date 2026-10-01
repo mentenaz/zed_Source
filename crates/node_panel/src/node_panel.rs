@@ -30,6 +30,7 @@
 //! alongside this panel — see that crate's own doc comment.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -60,6 +61,7 @@ use npm_backend::{
     NpmAuditVuln, NpmInstalledPkg, NpmOutdatedPkg, UpdateKind, classify_update,
     detect_package_manager, list_audit_vulns, list_installed, list_outdated,
 };
+use flows_panel::FlowsPanel;
 use script_runner_panel::ScriptRunnerPanel;
 use serde::Deserialize;
 use sysinfo::System;
@@ -179,6 +181,11 @@ pub struct NodePanel {
     /// Handed in by `zed::zed::initialize_panels` once both this panel and
     /// the Script Runner panel are loaded — see `set_script_runner`.
     script_runner: Option<WeakEntity<ScriptRunnerPanel>>,
+
+    /// Where the "task chain" quick action opens its wizard. Handed in by
+    /// `zed::zed::initialize_panels` once both this panel and the Flows
+    /// panel are loaded — see `set_flows_panel`.
+    flows_panel: Option<WeakEntity<FlowsPanel>>,
 
     node_ver: Option<String>,
     npm_ver: Option<String>,
@@ -400,6 +407,7 @@ impl NodePanel {
                 focus_handle: cx.focus_handle(),
                 workspace: workspace.clone(),
                 script_runner: None,
+                flows_panel: None,
                 node_ver: None,
                 npm_ver: None,
                 not_found: false,
@@ -501,6 +509,45 @@ impl NodePanel {
     /// note.
     pub fn set_script_runner(&mut self, script_runner: WeakEntity<ScriptRunnerPanel>) {
         self.script_runner = Some(script_runner);
+    }
+
+    /// Called once by `zed::zed::initialize_panels` after both this panel
+    /// and the Flows panel have loaded, so the "task chain" quick action has
+    /// somewhere to open its wizard — see `open_task_chain_wizard`.
+    pub fn set_flows_panel(&mut self, flows_panel: WeakEntity<FlowsPanel>) {
+        self.flows_panel = Some(flows_panel);
+    }
+
+    /// "task chain" quick action — reveals the Flows panel and opens its
+    /// Add Task Chain wizard anchored on the selected project (or the scan
+    /// root, if nothing's selected), matching `dispatch_script`'s "reveal
+    /// the target dock panel via `cx.defer`, not directly" approach for the
+    /// exact same reentrant-lease reason (see that method's doc comment).
+    fn open_task_chain_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flows_panel) = self.flows_panel.as_ref().and_then(|w| w.upgrade()) else {
+            return;
+        };
+
+        let workspace = self.workspace.clone();
+        let window_handle = window.window_handle();
+        cx.defer(move |app| {
+            let _ = app.update_window(window_handle, |_, window, cx| {
+                if let Some(workspace) = workspace.upgrade() {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.reveal_panel::<FlowsPanel>(window, cx);
+                    });
+                }
+            });
+        });
+
+        let project_root = self
+            .selected_project
+            .clone()
+            .unwrap_or_else(|| self.cwd.clone());
+        let anchor = (!project_root.is_empty()).then(|| PathBuf::from(project_root));
+        flows_panel.update(cx, |panel, cx| {
+            panel.open_task_chain_wizard_anchored(anchor, window, cx);
+        });
     }
 
     /// Sends `command` to the Script Runner panel, matching the Forge
@@ -2177,6 +2224,23 @@ impl NodePanel {
                     })),
             );
         }
+
+        // "task chain" — opens the Flows panel's Add Task Chain wizard,
+        // anchored on the selected project, matching Forge's node_panel
+        // quick-actions row (`__task_chain__`, node_panel.rs:1555-1559
+        // there). Disabled with no Flows panel wired up yet (see
+        // `set_flows_panel`) rather than silently no-op on click.
+        row = row.child(
+            Button::new("quick-action-task-chain")
+                .secondary()
+                .xsmall()
+                .label("Task Chain")
+                .tooltip("Add this project to a task chain")
+                .disabled(self.flows_panel.is_none())
+                .on_click(cx.listener(|this, _e, window, cx| {
+                    this.open_task_chain_wizard(window, cx);
+                })),
+        );
 
         // `open_npm_manager` (dropped in the original Ⱨubbard port) re-added:
         // opens the Node Package Manager workspace tab rooted on the current

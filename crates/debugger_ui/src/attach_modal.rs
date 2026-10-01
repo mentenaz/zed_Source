@@ -1,4 +1,5 @@
 use dap::{DapRegistry, DebugRequest};
+use editor::Editor;
 use futures::channel::oneshot;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{AppContext, DismissEvent, Entity, EventEmitter, Focusable, Render, Task, TaskExt};
@@ -37,6 +38,7 @@ pub(crate) struct AttachModalDelegate {
     pub(crate) intent: ModalIntent,
     workspace: WeakEntity<Workspace>,
     candidates: Arc<[Candidate]>,
+    port_input: Entity<Editor>,
 }
 
 impl AttachModalDelegate {
@@ -44,6 +46,7 @@ impl AttachModalDelegate {
         workspace: WeakEntity<Workspace>,
         intent: ModalIntent,
         candidates: Arc<[Candidate]>,
+        port_input: Entity<Editor>,
     ) -> Self {
         Self {
             workspace,
@@ -52,6 +55,7 @@ impl AttachModalDelegate {
             selected_index: 0,
             matches: Vec::default(),
             placeholder_text: Arc::from("Select the process you want to attach the debugger to"),
+            port_input,
         }
     }
 }
@@ -59,6 +63,8 @@ impl AttachModalDelegate {
 pub struct AttachModal {
     _subscription: Subscription,
     pub(crate) picker: Entity<Picker<AttachModalDelegate>>,
+    port_input: Entity<Editor>,
+    show_port_input: bool,
 }
 
 impl AttachModal {
@@ -70,7 +76,11 @@ impl AttachModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let processes_task = get_processes_for_project(&project, cx);
+        let adapter_name = match &intent {
+            ModalIntent::AttachToProcess(definition) => Some(definition.adapter.clone()),
+            ModalIntent::ResolveProcessId(_) => None,
+        };
+        let processes_task = get_processes_for_project(&project, adapter_name, cx);
 
         let modal = Self::with_processes(workspace, Arc::new([]), modal, intent, window, cx);
 
@@ -97,19 +107,31 @@ impl AttachModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let show_port_input = matches!(intent, ModalIntent::AttachToProcess(_));
+        let port_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text(
+                "Port (optional) — fill in if your app prints its own debug/inspector port",
+                window,
+                cx,
+            );
+            editor
+        });
         let picker = cx.new(|cx| {
             Picker::uniform_list(
-                AttachModalDelegate::new(workspace, intent, processes),
+                AttachModalDelegate::new(workspace, intent, processes, port_input.clone()),
                 window,
                 cx,
             )
             .when(!modal, |picker| picker.embedded())
         });
         Self {
+            show_port_input,
             _subscription: cx.subscribe(&picker, |_, _, _, cx| {
                 cx.emit(DismissEvent);
             }),
             picker,
+            port_input,
         }
     }
 }
@@ -119,6 +141,16 @@ impl Render for AttachModal {
         v_flex()
             .key_context("AttachModal")
             .track_focus(&self.focus_handle(cx))
+            .when(self.show_port_input, |this| {
+                this.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(self.port_input.clone()),
+                )
+            })
             .child(self.picker.clone())
     }
 }
@@ -241,9 +273,12 @@ impl PickerDelegate for AttachModalDelegate {
                     return cx.emit(DismissEvent);
                 };
 
+                let port = self.port_input.read(cx).text(cx).trim().parse::<u16>().ok();
+
                 match &mut definition.request {
                     DebugRequest::Attach(config) => {
                         config.process_id = Some(candidate.pid);
+                        config.port = port;
                     }
                     DebugRequest::Launch(_) => {
                         debug_panic!("Debugger attach modal used on launch debug config");
@@ -360,7 +395,27 @@ impl PickerDelegate for AttachModalDelegate {
     }
 }
 
-fn get_processes_for_project(project: &Entity<Project>, cx: &mut App) -> Task<Arc<[Candidate]>> {
+fn matches_attach_name_filter(candidate: &Candidate, filter: Option<&[&'static str]>) -> bool {
+    match filter {
+        None => true,
+        Some(filters) => {
+            let name_lower = candidate.name.to_lowercase();
+            filters.iter().any(|needle| name_lower.contains(needle))
+        }
+    }
+}
+
+fn get_processes_for_project(
+    project: &Entity<Project>,
+    adapter_name: Option<SharedString>,
+    cx: &mut App,
+) -> Task<Arc<[Candidate]>> {
+    let name_filter = adapter_name.and_then(|name| {
+        cx.global::<DapRegistry>()
+            .adapter(&name)
+            .and_then(|adapter| adapter.attach_process_name_filter())
+    });
+
     let project = project.read(cx);
 
     if let Some(remote_client) = project.remote_client() {
@@ -383,6 +438,7 @@ fn get_processes_for_project(project: &Entity<Project>, cx: &mut App) -> Task<Ar
                     name: p.name.into(),
                     command: p.command,
                 })
+                .filter(|candidate| matches_attach_name_filter(candidate, name_filter.as_deref()))
                 .collect();
 
             processes.sort_by_key(|k| k.name.clone());
@@ -409,6 +465,7 @@ fn get_processes_for_project(project: &Entity<Project>, cx: &mut App) -> Task<Ar
                         .collect::<Vec<_>>(),
                 }
             })
+            .filter(|candidate| matches_attach_name_filter(candidate, name_filter.as_deref()))
             .collect();
         processes.sort_by_key(|k| k.name.clone());
         let processes = processes.into_iter().collect();

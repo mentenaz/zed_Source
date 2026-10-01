@@ -6,7 +6,7 @@ use gpui::AsyncApp;
 use serde_json::Value;
 use std::{path::PathBuf, sync::OnceLock};
 use task::DebugRequest;
-use util::{ResultExt, maybe, shell::ShellKind};
+use util::{ResultExt, maybe, shell::Shell, shell_builder::ShellBuilder};
 
 use crate::*;
 
@@ -67,12 +67,24 @@ impl JsDebugAdapter {
                     .get("type")
                     .filter(|value| value == &"node-terminal")?;
                 let command = configuration.get("command")?.as_str()?.to_owned();
-                let mut args = ShellKind::Posix.split(&command)?.into_iter();
-                let program = args.next()?;
+                // Wrap the whole command string as one real shell invocation
+                // (`cmd /C "..."` / `sh -c "..."`) instead of naively
+                // whitespace-splitting it into program+args — the latter
+                // treats shell operators (`&&`, `||`, pipes, ...) as literal
+                // argument tokens to the first program, breaking any chained
+                // command (`gulp clean && gulp build && gulp dev` would run
+                // `gulp` with `&&`/`gulp`/`build`/... as its literal args).
+                // Running it as a real shell lets each step in the chain
+                // spawn as its own genuine child process, which js-debug's
+                // `console: externalTerminal` auto-attach then picks up in
+                // turn as the shell works through the chain.
+                let (program, args) =
+                    ShellBuilder::new(&Shell::System, cfg!(target_os = "windows"))
+                        .build(Some(command), &[]);
                 configuration.insert("runtimeExecutable".to_owned(), program.into());
                 configuration.insert(
                     "runtimeArgs".to_owned(),
-                    args.map(Value::from).collect::<Vec<_>>().into(),
+                    args.into_iter().map(Value::from).collect::<Vec<_>>().into(),
                 );
                 configuration.insert("console".to_owned(), "externalTerminal".into());
                 Some(())
@@ -110,9 +122,12 @@ impl JsDebugAdapter {
                 .entry("cwd")
                 .or_insert(delegate.worktree_root_path().to_string_lossy().into());
 
-            configuration
-                .entry("console")
-                .or_insert("externalTerminal".into());
+            let is_attach = configuration.get("request").and_then(Value::as_str) == Some("attach");
+            if !is_attach {
+                configuration
+                    .entry("console")
+                    .or_insert("externalTerminal".into());
+            }
 
             configuration.entry("sourceMaps").or_insert(true.into());
             configuration
@@ -187,6 +202,10 @@ impl DebugAdapter for JsDebugAdapter {
         DebugAdapterName(Self::ADAPTER_NAME.into())
     }
 
+    fn attach_process_name_filter(&self) -> Option<Vec<&'static str>> {
+        Some(vec!["node", "deno", "bun"])
+    }
+
     async fn config_from_zed_format(&self, zed_scenario: ZedDebugConfig) -> Result<DebugScenario> {
         let mut args = json!({
             "type": "pwa-node",
@@ -200,6 +219,9 @@ impl DebugAdapter for JsDebugAdapter {
         match &zed_scenario.request {
             DebugRequest::Attach(attach) => {
                 map.insert("processId".into(), attach.process_id.into());
+                if let Some(port) = attach.port {
+                    map.insert("port".into(), port.into());
+                }
             }
             DebugRequest::Launch(launch) => {
                 if launch.program.starts_with("http://") {

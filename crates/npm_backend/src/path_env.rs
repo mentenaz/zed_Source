@@ -113,6 +113,18 @@ fn node_runtime_dir() -> Option<String> {
 /// The PATH value to hand a spawned package manager: merged registry path,
 /// with the active Node runtime dir prepended so `npm run` children and the
 /// CLI's shell scripts can find `node`.
+///
+/// `merged_path`/`node_runtime_dir` are Windows-only concerns (registry
+/// reads, `NVM_HOME`), but this function itself runs on every platform —
+/// it's also the one that prepends `node_modules/.bin`, which matters
+/// everywhere lifecycle scripts run. The join separator has to match, or a
+/// PATH built with the wrong one is a single garbled entry on whichever OS
+/// disagrees: `;` on Windows, `:` everywhere else.
+#[cfg(target_os = "windows")]
+const PATH_SEP: &str = ";";
+#[cfg(not(target_os = "windows"))]
+const PATH_SEP: &str = ":";
+
 pub fn path_with_node(project_root: &str) -> String {
     let base = merged_path().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
     let mut parts = Vec::new();
@@ -125,7 +137,27 @@ pub fn path_with_node(project_root: &str) -> String {
     if local_bin.exists() {
         parts.push(local_bin.to_string_lossy().into_owned());
     }
-    let joined = parts.join(";");
+    let joined = parts.join(PATH_SEP);
     log::debug!("npm_backend: enriched PATH = {joined}");
     joined
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_with_node_uses_platform_separator() {
+        let joined = path_with_node(".");
+        #[cfg(target_os = "windows")]
+        assert!(
+            !joined.contains(':') || joined.chars().nth(1) == Some(':'),
+            "PATH entries must be `;`-joined on Windows, got: {joined}"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            !joined.contains(';'),
+            "PATH entries must be `:`-joined on non-Windows, got: {joined}"
+        );
+    }
 }

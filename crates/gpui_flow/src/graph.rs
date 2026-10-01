@@ -1785,6 +1785,24 @@ impl Render for FlowGraph {
                         return;
                     }
 
+                    // Tab / Shift+Tab: cycle the single-node selection —
+                    // there was previously no way to reach a node at all
+                    // without clicking it first, which also meant no way to
+                    // reach the inspector for a node currently off-screen.
+                    // Does not scroll the newly selected node into view
+                    // (unlike `fit_view`, this handler doesn't have the
+                    // container's real size to center against) — the
+                    // selection can still land somewhere the viewport
+                    // doesn't show.
+                    if key == "tab" && graph_focused {
+                        let forward = !event.keystroke.modifiers.shift;
+                        state_for_key.update(cx, |state, _| {
+                            state.select_next_node(forward);
+                        });
+                        cx.notify(entity_id);
+                        return;
+                    }
+
                     if (key == "backspace" || key == "delete") && graph_focused {
                         state_for_key.update(cx, |state, _| {
                             state.push_undo();

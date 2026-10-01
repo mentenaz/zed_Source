@@ -711,6 +711,19 @@
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
       "ctrl-?": "agent::ToggleFocus",
+      // The ported panels' own toggle/open actions had no default binding at
+      // all (only reachable via the command palette) — these give each one
+      // a keyboard path to open, matching the pattern above.
+      "ctrl-k h": "helm_panel::ToggleFocus",
+      "ctrl-k x": "processes_panel::ToggleFocus",
+      "ctrl-k d": "database_panel::ToggleFocus",
+      "ctrl-k j": "npm_manager::OpenNpmManager",
+      "ctrl-k y": "python_manager::OpenPythonManager",
+      "ctrl-k g": "nuget_manager::OpenNuGetManager",
+      "ctrl-k o": "node_panel::ToggleFocus",
+      "ctrl-k i": "python_panel::ToggleFocus",
+      "ctrl-k f": "flows_panel::ToggleFocus",
+      "ctrl-k k": "script_runner_panel::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
       "ctrl-k n": "encoding_selector::Toggle",

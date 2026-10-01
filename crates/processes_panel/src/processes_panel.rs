@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _,
     Pixels, Render, Styled as _, Subscription, Task, TextAlign, WeakEntity, Window, actions, div,
     prelude::FluentBuilder as _,
 };
@@ -483,7 +483,16 @@ actions!(
     processes_panel,
     [
         /// Toggles focus on the Processes panel.
-        ToggleFocus
+        ToggleFocus,
+        /// Arms the kill confirmation for the table's selected row — the
+        /// keyboard equivalent of that row's Kill button, so a row reached
+        /// by arrow-key navigation (`gpui_component`'s `DataTable` already
+        /// supports that) can also be acted on without a mouse.
+        KillSelected,
+        /// Adopts or releases the table's selected row, whichever its
+        /// current state calls for — the keyboard equivalent of that row's
+        /// Adopt/Release button.
+        ToggleAdoptSelected
     ]
 );
 
@@ -496,6 +505,19 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    // `KillSelected`/`ToggleAdoptSelected` need to fire only while the
+    // process table itself has focus (not, say, the search box above it),
+    // so they're scoped to `DataTable` — the same key-context
+    // `gpui_component::table::data_table` already binds `up`/`down`
+    // row-navigation to (see that module's own `init`). Bound here rather
+    // than as JSON keymap entries because they're plain unmodified keys,
+    // matching how the row-navigation bindings themselves are registered.
+    cx.bind_keys([
+        KeyBinding::new("delete", KillSelected, Some("DataTable")),
+        KeyBinding::new("backspace", KillSelected, Some("DataTable")),
+        KeyBinding::new("a", ToggleAdoptSelected, Some("DataTable")),
+    ]);
 }
 
 pub struct ProcessesPanel {
@@ -629,6 +651,58 @@ impl ProcessesPanel {
             .find(|e| e.pid == pid)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| format!("PID {pid}"))
+    }
+
+    /// The row the table's own arrow-key navigation currently has selected,
+    /// cloned out so callers don't hold a borrow of `self.table` across a
+    /// later `self.table.update(...)`.
+    fn selected_entry(&self, cx: &Context<Self>) -> Option<ProcessEntry> {
+        let table = self.table.read(cx);
+        let row_ix = table.selected_row()?;
+        table.delegate().entries.get(row_ix).cloned()
+    }
+
+    /// Keyboard path to the row's Kill button: arms the same confirmation
+    /// banner `on_kill` does, keyed off the table's selected row instead of
+    /// a per-row action payload.
+    fn on_kill_selected(
+        &mut self,
+        _: &KillSelected,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.selected_entry(cx) else {
+            return;
+        };
+        self.pending_kill = Some((entry.pid, entry.name));
+        cx.notify();
+    }
+
+    /// Keyboard path to the row's Adopt/Release button — mirrors
+    /// `render_row`'s own `source == "Managed"` branch so the same key
+    /// does the right thing regardless of the selected row's current state.
+    fn on_toggle_adopt_selected(
+        &mut self,
+        _: &ToggleAdoptSelected,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.selected_entry(cx) else {
+            return;
+        };
+        let result = if entry.source == "Managed" {
+            release_process(&self.adopted, entry.pid)
+        } else {
+            adopt_process(&self.adopted, entry.pid, entry.name.clone(), "processes".to_string())
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_now(window, cx);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to update process {}: {e}", entry.pid)),
+        }
+        cx.notify();
     }
 
     fn on_refresh_click(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -819,6 +893,8 @@ impl Render for ProcessesPanel {
             .on_action(cx.listener(Self::on_adopt))
             .on_action(cx.listener(Self::on_release))
             .on_action(cx.listener(Self::on_kill))
+            .on_action(cx.listener(Self::on_kill_selected))
+            .on_action(cx.listener(Self::on_toggle_adopt_selected))
             .child(
                 PanelHeader::new("Processes")
                     .icon(Icon::new(IconName::Cpu).text_color(cx.theme().foreground)),
