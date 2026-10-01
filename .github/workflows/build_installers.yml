@@ -244,6 +244,17 @@ jobs:
     # bundle_mac_x86_64 job does the same from the same runner type).
     runs-on: macos-14
     timeout-minutes: 120
+    # Pin an older Xcode than the runner image's default (15.4). Apple's
+    # 15.3/15.4 libc++ headers tightened the C++20 `contiguous_iterator`
+    # concept check, and cxx-rs's `rust::Slice<T>::iterator` (used throughout
+    # webrtc-sys/livekit, built at -std=c++20) doesn't satisfy it — every
+    # webrtc-sys .cpp file fails with "implicit instantiation of undefined
+    # template std::__pointer_traits_element_type<rust::Slice<...>::iterator>".
+    # 15.0.1 predates that libc++ change and builds webrtc-sys fine; bump
+    # this once the pinned livekit-rust-sdks rev (see root Cargo.toml) picks
+    # up an upstream cxx-rs fix.
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_15.0.1.app/Contents/Developer
     steps:
       - name: Checkout
         uses: actions/checkout@v4
