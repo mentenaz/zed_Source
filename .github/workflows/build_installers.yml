@@ -103,7 +103,13 @@ jobs:
             echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
             echo "build_linux=true" >> "$GITHUB_OUTPUT"
-            echo "build_macos=true" >> "$GITHUB_OUTPUT"
+            # Disabled on tag push: webrtc-sys fails to build against every
+            # Xcode on the macos-14 runner we've tried so far (15.4's libc++
+            # tightened a C++20 concept check that cxx-rs's generated
+            # rust::Slice<T>::iterator doesn't satisfy; pinning back to
+            # 15.0.1 didn't avoid it either). Still available manually via
+            # workflow_dispatch's build_macos input if you want to retry.
+            echo "build_macos=false" >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
             echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
@@ -244,13 +250,17 @@ jobs:
     # bundle_mac_x86_64 job does the same from the same runner type).
     runs-on: macos-14
     timeout-minutes: 120
-    # Pin an older Xcode than the runner image's default (15.4). Apple's
-    # 15.3/15.4 libc++ headers tightened the C++20 `contiguous_iterator`
-    # concept check, and cxx-rs's `rust::Slice<T>::iterator` (used throughout
-    # webrtc-sys/livekit, built at -std=c++20) doesn't satisfy it — every
-    # webrtc-sys .cpp file fails with "implicit instantiation of undefined
-    # template std::__pointer_traits_element_type<rust::Slice<...>::iterator>".
-    # 15.0.1 predates that libc++ change and builds webrtc-sys fine; bump
+    # Disabled by default on tag push (see prepare's build_macos output) —
+    # webrtc-sys fails to build with "implicit instantiation of undefined
+    # template std::__pointer_traits_element_type<rust::Slice<...>::iterator>"
+    # (cxx-rs's generated rust::Slice<T>::iterator doesn't satisfy the C++20
+    # `contiguous_iterator` concept libc++ checks for, at -std=c++20 per
+    # webrtc-sys's own build.rs). Pinning DEVELOPER_DIR to Xcode 15.0.1
+    # below did NOT fix it — still fails the same way — so this is left
+    # pinned only as a documented starting point for whoever revisits this;
+    # it is not a working fix. Likely needs an upstream cxx-rs/livekit-rust-sdks
+    # fix, or building webrtc-sys at -std=c++17 instead (requires patching
+    # the vendored build.rs via a Cargo [patch] fork, not done here). Bump
     # this once the pinned livekit-rust-sdks rev (see root Cargo.toml) picks
     # up an upstream cxx-rs fix.
     env:
