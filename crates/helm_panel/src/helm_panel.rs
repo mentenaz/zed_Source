@@ -25,18 +25,20 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     list::ListItem,
     menu::{DropdownMenu as _, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement as _,
     spinner::Spinner,
     switch::Switch,
     text::markdown,
     v_flex,
 };
+use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
 use crate::backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,
     GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
-    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun, WorkflowStep,
+    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
     gh_accept_org_invitation, gh_accept_repo_invitation, gh_add_collaborator, gh_auth_status,
     gh_check_cli, gh_clone_repo, gh_create_pull, gh_create_release, gh_create_repo,
     gh_decline_org_invitation, gh_decline_repo_invitation, gh_ensure_repo_scope, gh_get_branches,
@@ -130,10 +132,9 @@ enum HelmScreen {
     /// own screen.
     UserProfile,
     Commits,
+    /// Master-detail: the run list (left) and the selected run's live
+    /// jobs-as-a-flow-graph (right) — see [`HelmPanel::select_workflow_run`].
     WorkflowRuns,
-    /// A single workflow run's own jobs/steps, live — reached from
-    /// `WorkflowRuns` by opening a row. See [`HelmPanel::open_workflow_run_detail`].
-    WorkflowRunDetail,
     Deployments,
     Tags,
     Security,
@@ -314,20 +315,33 @@ pub struct HelmPanel {
     workflow_runs: Vec<WorkflowRun>,
     workflow_runs_list_cursor: Option<usize>,
     workflow_runs_list_focus: FocusHandle,
-    /// The run drilled into from `WorkflowRuns` — its `status`/`conclusion`
-    /// are refreshed on every poll tick (see `workflow_run_poll`), not just
-    /// set once, so the header on `WorkflowRunDetail` stays live too.
+    /// The run selected from the `WorkflowRuns` list (master-detail: left
+    /// pane is the list, right pane is this run's live job graph) — its
+    /// `status`/`conclusion` are refreshed on every poll tick (see
+    /// `workflow_run_poll`), not just set once, so the detail pane's header
+    /// stays live too.
     selected_workflow_run: Option<WorkflowRun>,
-    /// Jobs (each with its own steps) for `selected_workflow_run`.
+    /// Jobs (each with its own steps) for `selected_workflow_run` — the
+    /// source of truth `sync_workflow_run_flow_nodes` renders into
+    /// `workflow_run_flow_state`'s nodes on every poll tick.
     workflow_run_jobs: Vec<WorkflowJob>,
-    workflow_run_jobs_cursor: Option<usize>,
-    workflow_run_jobs_focus: FocusHandle,
+    /// The `gpui_flow` canvas showing `workflow_run_jobs` as nodes, one per
+    /// job, each with an `accent_border` colored by that job's status
+    /// (`FlowNode::accent_border`'s documented purpose is exactly this: "a
+    /// running/succeeded/failed node in a workflow executor sets a raw
+    /// color; this crate just draws it" — see `workflow_status_color`).
+    /// Created once per selected run (not per poll tick) so pan/zoom
+    /// survive a status update; `sync_workflow_run_flow_nodes` only mutates
+    /// existing nodes' colors and appends new ones as jobs appear.
+    workflow_run_flow_state: Option<Entity<FlowState>>,
+    workflow_run_graph: Option<Entity<FlowGraph>>,
+    workflow_run_controls: Option<Entity<Controls>>,
     /// The active polling loop for `selected_workflow_run`/`workflow_run_jobs`
     /// — re-fetches both every few seconds for as long as the run's status
     /// isn't "completed". Replacing or clearing this field cancels whatever
     /// loop was running (a `Task` cancels on drop), which `set_screen` does
-    /// on leaving `WorkflowRunDetail` so this doesn't keep polling GitHub
-    /// forever in the background after the user's moved on.
+    /// on leaving `WorkflowRuns` so this doesn't keep polling GitHub forever
+    /// in the background after the user's moved on.
     workflow_run_poll: Option<Task<()>>,
     deployments: Vec<Deployment>,
     deployments_list_cursor: Option<usize>,
@@ -1041,8 +1055,9 @@ impl HelmPanel {
                 workflow_runs_list_focus: cx.focus_handle(),
                 selected_workflow_run: None,
                 workflow_run_jobs: Vec::new(),
-                workflow_run_jobs_cursor: None,
-                workflow_run_jobs_focus: cx.focus_handle(),
+                workflow_run_flow_state: None,
+                workflow_run_graph: None,
+                workflow_run_controls: None,
                 workflow_run_poll: None,
                 deployments: Vec::new(),
                 deployments_list_cursor: None,
@@ -1369,7 +1384,6 @@ impl HelmPanel {
             HelmScreen::Traffic,
             HelmScreen::Commits,
             HelmScreen::WorkflowRuns,
-            HelmScreen::WorkflowRunDetail,
             HelmScreen::Deployments,
             HelmScreen::Tags,
             HelmScreen::Security,
@@ -1387,7 +1401,6 @@ impl HelmPanel {
             HelmScreen::Traffic,
             HelmScreen::Commits,
             HelmScreen::WorkflowRuns,
-            HelmScreen::WorkflowRunDetail,
             HelmScreen::Deployments,
             HelmScreen::Tags,
             HelmScreen::Security,
@@ -1413,6 +1426,11 @@ impl HelmPanel {
             self.traffic = None;
             self.commits.clear();
             self.workflow_runs.clear();
+            self.selected_workflow_run = None;
+            self.workflow_run_jobs.clear();
+            self.workflow_run_flow_state = None;
+            self.workflow_run_graph = None;
+            self.workflow_run_controls = None;
             self.deployments.clear();
             self.tags.clear();
             self.dependabot_alerts.clear();
@@ -1422,11 +1440,11 @@ impl HelmPanel {
         // around — it's an active background loop hitting the GitHub API
         // every few seconds for as long as the run hasn't finished (which
         // for something like a full installer build can be an hour-plus).
-        // Dropping the `Task` here cancels it; narrower than `REPO_DRIVEN`
-        // above so switching to a *sibling* repo-driven screen (back to
-        // `WorkflowRuns`, say) stops it too, not just leaving the repo
-        // entirely.
-        if screen != HelmScreen::WorkflowRunDetail {
+        // Dropping the `Task` here cancels it, so leaving `WorkflowRuns`
+        // (where the run's own detail pane lives, master-detail) stops it —
+        // not just the `REPO_DRIVEN` clear above, which only fires on
+        // leaving the repo entirely, not switching to a sibling screen.
+        if screen != HelmScreen::WorkflowRuns {
             self.workflow_run_poll = None;
         }
         if screen != HelmScreen::UserProfile {
@@ -2236,25 +2254,35 @@ impl HelmPanel {
         .detach();
     }
 
-    /// User opened a row on `WorkflowRuns`: switches to the live
-    /// job/step-detail screen instead of just opening the run's GitHub page
-    /// in a browser (still available there via its own "Open in browser"
-    /// button, for when the in-app view genuinely isn't enough).
-    fn open_workflow_run_detail(&mut self, run: WorkflowRun, cx: &mut Context<Self>) {
+    /// User opened a row on `WorkflowRuns`: (re)creates the flow canvas for
+    /// this run — fresh pan/zoom each time, since it's a different run, not
+    /// a status update on the same one — and starts polling its jobs. Stays
+    /// on the `WorkflowRuns` screen throughout (master-detail), unlike
+    /// opening a repo/issue/etc. elsewhere in Helm, which navigates away.
+    fn select_workflow_run(&mut self, run: WorkflowRun, cx: &mut Context<Self>) {
         self.selected_workflow_run = Some(run);
         self.workflow_run_jobs.clear();
-        self.workflow_run_jobs_cursor = None;
-        self.navigate_to(HelmScreen::WorkflowRunDetail, cx);
+        let state = cx.new(|_| FlowState::new(Vec::new(), Vec::new()));
+        self.workflow_run_graph = Some(cx.new(|cx| {
+            FlowGraph::new(state.clone(), cx)
+                .bg_color(hex(cx.theme().sidebar))
+                .grid_color(hex(cx.theme().sidebar_border))
+                .node_bg_color(hex(cx.theme().popover))
+                .node_border_color(hex(cx.theme().border))
+        }));
+        self.workflow_run_controls = Some(cx.new(|_| Controls::new(state.clone())));
+        self.workflow_run_flow_state = Some(state);
         self.poll_workflow_run_jobs(cx);
     }
 
-    /// Fetches `selected_workflow_run`'s own status plus its jobs/steps, then
-    /// — as long as the run hasn't finished — waits 8s and does it again.
-    /// The loop lives in `workflow_run_poll`; replacing or clearing that
-    /// field (see `set_screen`) cancels it, since a `Task` is dropped rather
-    /// than detached here. 8s matches the grain the GitHub Actions web UI
-    /// itself polls at — fast enough to feel live, far short of the REST
-    /// rate limit even for an hour-long build.
+    /// Fetches `selected_workflow_run`'s own status plus its jobs/steps,
+    /// applies them to the flow canvas, then — as long as the run hasn't
+    /// finished — waits 8s and does it again. The loop lives in
+    /// `workflow_run_poll`; replacing or clearing that field (see
+    /// `set_screen`/`select_workflow_run`) cancels it, since a `Task` is
+    /// dropped rather than detached here. 8s matches the grain the GitHub
+    /// Actions web UI itself polls at — fast enough to feel live, far short
+    /// of the REST rate limit even for an hour-long build.
     fn poll_workflow_run_jobs(&mut self, cx: &mut Context<Self>) {
         let Some(repo) = self.selected_repo.clone() else {
             return;
@@ -2297,6 +2325,7 @@ impl HelmPanel {
                         }
                         if let Ok(jobs) = jobs_result {
                             this.workflow_run_jobs = jobs;
+                            this.sync_workflow_run_flow_nodes(cx);
                         }
                         cx.notify();
                     })
@@ -2309,6 +2338,51 @@ impl HelmPanel {
                 cx.background_executor().timer(Duration::from_secs(8)).await;
             }
         }));
+    }
+
+    /// Pushes `workflow_run_jobs`' current status onto
+    /// `workflow_run_flow_state`'s nodes — one node per job, laid out
+    /// left-to-right in whatever order the API returned them (the jobs
+    /// endpoint doesn't expose each job's `needs:` dependencies, only the
+    /// workflow YAML does, so this can't draw real dependency edges; a flat
+    /// row of status-colored boxes is what's achievable generically, for
+    /// any workflow). Mutates existing nodes in place and appends new ones
+    /// as jobs appear, rather than rebuilding the whole node list, so a
+    /// user's pan/zoom isn't reset on every 8s poll tick — only fits the
+    /// view the first time real jobs appear.
+    fn sync_workflow_run_flow_nodes(&mut self, cx: &mut Context<Self>) {
+        let Some(flow_state) = self.workflow_run_flow_state.clone() else {
+            return;
+        };
+        let jobs = self.workflow_run_jobs.clone();
+        let colors: Vec<u32> = jobs
+            .iter()
+            .map(|job| hex(self.workflow_status_color(cx, &job.status, &job.conclusion)))
+            .collect();
+
+        flow_state.update(cx, |state, cx| {
+            let was_empty = state.nodes.is_empty();
+            for (ix, job) in jobs.iter().enumerate() {
+                let id: NodeId = job.id.to_string().into();
+                let color = colors[ix];
+                if let Some(node) = state.nodes.iter_mut().find(|n| n.id == id) {
+                    node.accent_border = Some(color);
+                } else {
+                    let x = ix as f32 * 220.0;
+                    state.nodes.push(
+                        FlowNode::new(id, x, 0.0)
+                            .label(job.name.clone())
+                            .size(180.0, 70.0)
+                            .accent_border(color),
+                    );
+                }
+            }
+            state.rebuild_lookup();
+            if was_empty && !state.nodes.is_empty() {
+                state.fit_view(60.0, 900.0, 400.0);
+            }
+            cx.notify();
+        });
     }
 
     /// Loads `self.selected_repo`'s deployments.
@@ -6219,7 +6293,27 @@ impl HelmPanel {
     }
 
     /// The Actions screen — recent CI workflow runs with status/conclusion.
+    /// Master-detail: the run list (left, unchanged) and the selected run's
+    /// live job graph (right, `render_workflow_run_graph`) — same
+    /// `h_resizable`/`resizable_panel` split `database_panel`'s workbench
+    /// tab uses for its own tree+editor layout, rather than full-screen
+    /// navigation into a separate `HelmScreen`.
     fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_resizable("helm-workflow-runs-split")
+            .child(
+                resizable_panel()
+                    .size(gpui::px(320.))
+                    .size_range(gpui::px(220.)..gpui::px(480.))
+                    .flex_none()
+                    .child(self.render_workflow_runs_list(cx)),
+            )
+            .child(resizable_panel().child(self.render_workflow_run_graph(cx)))
+            .into_any_element()
+    }
+
+    /// The left pane of `render_workflow_runs` — unchanged from before this
+    /// was split into master-detail, just extracted into its own method.
+    fn render_workflow_runs_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(el) = self.activity_list_states(
             "Loading workflow runs…",
             "Failed to load workflow runs",
@@ -6261,7 +6355,7 @@ impl HelmPanel {
                 else {
                     return;
                 };
-                this.open_workflow_run_detail(run.clone(), cx);
+                this.select_workflow_run(run.clone(), cx);
             }))
             .py_1()
             .children(self.workflow_runs.iter().enumerate().map(|(ix, run)| {
@@ -6297,7 +6391,7 @@ impl HelmPanel {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.workflow_runs_list_cursor = Some(ix);
-                        this.open_workflow_run_detail(run_for_click.clone(), cx);
+                        this.select_workflow_run(run_for_click.clone(), cx);
                     }))
                     .into_any_element()
             }))
@@ -6305,11 +6399,10 @@ impl HelmPanel {
     }
 
     /// Color for a GitHub Actions status/conclusion pair — shared between
-    /// the run's own header and every job/step row on
-    /// `render_workflow_run_detail`, since all three use the identical
-    /// vocabulary (`status`: queued/in_progress/completed;  `conclusion`:
-    /// success/failure/cancelled/timed_out/action_required/skipped/neutral,
-    /// only set once `status` is "completed").
+    /// the run's own header badge and every job node's `accent_border` on
+    /// `render_workflow_run_graph` (`status`: queued/in_progress/completed;
+    /// `conclusion`: success/failure/cancelled/timed_out/action_required/
+    /// skipped/neutral, only set once `status` is "completed").
     fn workflow_status_color(
         &self,
         cx: &App,
@@ -6322,24 +6415,27 @@ impl HelmPanel {
                 cx.theme().danger
             }
             Some("skipped") | Some("neutral") => cx.theme().muted_foreground,
-            _ if status == "in_progress" || status == "queued" => cx.theme().warning,
+            _ if status == "in_progress" || status == "queued" => cx.theme().primary,
             _ => cx.theme().muted_foreground,
         }
     }
 
-    /// A single workflow run's own jobs/steps, live — reached by opening a
-    /// row on `WorkflowRuns`. This is the actual "what is it doing right
-    /// now" view: `WorkflowRuns`'s own list only has each run's overall
-    /// status, fetched once per screen-open, not the per-job/per-step detail
-    /// `poll_workflow_run_jobs` keeps refreshed here every 8s.
-    fn render_workflow_run_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The right pane of `render_workflow_runs` — the selected run's jobs
+    /// as a live `gpui_flow` graph, one node per job, colored by status
+    /// (`workflow_status_color`/`FlowNode::accent_border` — see
+    /// `sync_workflow_run_flow_nodes`, which keeps this updated every 8s).
+    /// No edges: the jobs API doesn't expose each job's `needs:`
+    /// dependencies (only the workflow YAML does), so nodes are laid out
+    /// left-to-right in API order rather than drawing dependency arrows
+    /// `sync_workflow_run_flow_nodes` can't actually back up correctly.
+    fn render_workflow_run_graph(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
 
         let Some(run) = self.selected_workflow_run.clone() else {
             return v_flex()
-                .flex_1()
+                .size_full()
                 .items_center()
                 .justify_center()
                 .p_4()
@@ -6347,7 +6443,7 @@ impl HelmPanel {
                     div()
                         .text_sm()
                         .text_color(muted_foreground)
-                        .child("No run selected"),
+                        .child("Select a run on the left to see its live status"),
                 )
                 .into_any_element();
         };
@@ -6406,6 +6502,7 @@ impl HelmPanel {
 
         if self.workflow_run_jobs.is_empty() && self.load_state == LoadState::Loading {
             return v_flex()
+                .size_full()
                 .child(header)
                 .child(divider)
                 .child(
@@ -6431,6 +6528,7 @@ impl HelmPanel {
         }
         if self.workflow_run_jobs.is_empty() && self.load_state == LoadState::Error {
             return v_flex()
+                .size_full()
                 .child(header)
                 .child(divider)
                 .child(
@@ -6444,7 +6542,7 @@ impl HelmPanel {
                                 .child(self.error_msg.clone()),
                         )
                         .child(
-                            Button::new("workflow-run-detail-retry")
+                            Button::new("workflow-run-graph-retry")
                                 .outline()
                                 .label("Retry")
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -6456,6 +6554,7 @@ impl HelmPanel {
         }
         if self.workflow_run_jobs.is_empty() {
             return v_flex()
+                .size_full()
                 .child(header)
                 .child(divider)
                 .child(
@@ -6474,110 +6573,29 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let jobs_len = self.workflow_run_jobs.len();
-        let jobs_cursor = self.workflow_run_jobs_cursor;
-        let job_urls: Vec<String> = self.workflow_run_jobs.iter().map(|j| j.html_url.clone()).collect();
-
-        let jobs_list = v_flex()
-            .id("helm-workflow-run-jobs-list")
-            .track_focus(&self.workflow_run_jobs_focus)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    window.focus(&this.workflow_run_jobs_focus, cx);
-                }),
-            )
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.workflow_run_jobs_cursor =
-                    step_selected(this.workflow_run_jobs_cursor, jobs_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.workflow_run_jobs_cursor =
-                    step_selected(this.workflow_run_jobs_cursor, jobs_len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(url) = this.workflow_run_jobs_cursor.and_then(|ix| job_urls.get(ix)) else {
-                    return;
-                };
-                cx.open_url(url);
-            }))
-            .gap_1()
-            .p_2()
-            .children(self.workflow_run_jobs.iter().enumerate().map(|(ix, job)| {
-                let job_status_label = job.conclusion.clone().unwrap_or_else(|| job.status.clone());
-                let job_color = self.workflow_status_color(cx, &job.status, &job.conclusion);
-                let is_selected = jobs_cursor == Some(ix);
-                let job_url = job.html_url.clone();
-
-                let steps = v_flex().gap_0p5().pl_4().pt_1().children(job.steps.iter().map(
-                    |step: &WorkflowStep| {
-                        let step_label = step.conclusion.clone().unwrap_or_else(|| step.status.clone());
-                        let step_color = self.workflow_status_color(cx, &step.status, &step.conclusion);
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().size_1p5().rounded_full().bg(step_color))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(foreground)
-                                    .child(step.name.clone()),
-                            )
-                            .child(div().text_xs().text_color(step_color).child(step_label))
-                    },
-                ));
-
-                v_flex()
-                    .id(("helm-run-job", ix))
-                    .w_full()
-                    .gap_1()
-                    .p_2()
-                    .rounded_md()
-                    .when(is_selected, |el| {
-                        el.bg(job_color.opacity(0.08)).border_1().border_color(job_color)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workflow_run_jobs_cursor = Some(ix);
-                        cx.open_url(&job_url);
-                    }))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .text_color(foreground)
-                                    .child(job.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(job_color.opacity(0.2))
-                                    .text_color(job_color)
-                                    .text_xs()
-                                    .child(job_status_label),
-                            ),
-                    )
-                    .child(steps)
-            }));
+        let Some(graph) = self.workflow_run_graph.clone() else {
+            return v_flex().size_full().child(header).child(divider).into_any_element();
+        };
 
         v_flex()
+            .size_full()
             .child(header)
             .child(divider)
-            .child(jobs_list)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .child(graph)
+                    .when_some(self.workflow_run_controls.clone(), |el, controls| {
+                        el.child(
+                            div().absolute().bottom(gpui::px(12.)).left(gpui::px(12.)).child(controls),
+                        )
+                    }),
+            )
             .into_any_element()
     }
+
 
     /// The Deployments screen.
     fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7377,6 +7395,14 @@ fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<u
     Some(if forward { (ix + 1) % len } else { (ix + len - 1) % len })
 }
 
+/// `gpui_flow` takes raw `u32` colors (it has no notion of a theme), so
+/// anything bridging a GPUI `Hsla` theme color into it needs this — same
+/// helper `designer_panel`/`database_panel` each define for their own
+/// `FlowGraph` usage.
+fn hex(color: gpui::Hsla) -> u32 {
+    u32::from(color.to_rgb()) >> 8
+}
+
 fn repo_vis_label(repo: &Repo) -> &'static str {
     if repo.archived {
         "archived"
@@ -7552,9 +7578,6 @@ impl Render for HelmPanel {
                         HelmScreen::Commits => self.render_commits(cx).into_any_element(),
                         HelmScreen::WorkflowRuns => {
                             self.render_workflow_runs(cx).into_any_element()
-                        }
-                        HelmScreen::WorkflowRunDetail => {
-                            self.render_workflow_run_detail(cx).into_any_element()
                         }
                         HelmScreen::Deployments => self.render_deployments(cx).into_any_element(),
                         HelmScreen::Tags => self.render_tags(cx).into_any_element(),

@@ -31,7 +31,7 @@ pub use clone::gh_clone_repo;
 pub use types::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,
     GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
-    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun, WorkflowStep,
+    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
 };
 
 /// Returns a `gh` Command with CREATE_NO_WINDOW set on Windows so no external

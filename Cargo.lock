@@ -9090,6 +9090,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
+ "gpui_flow",
  "log",
  "reqwest_client",
  "serde",
