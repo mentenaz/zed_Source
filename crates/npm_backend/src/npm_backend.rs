@@ -172,7 +172,9 @@ pub fn run_npm_cli(
 
     let output = match make_command(cli_name, args).output() {
         Ok(output) => output,
-        Err(_e) => {
+        // `e` is only read in the non-Windows arm below.
+        #[allow(unused_variables)]
+        Err(e) => {
             // Package-manager CLIs are `.cmd` shims on Windows (e.g.
             // `npm.cmd`); spawning them bare fails. Fall back to `cmd /C`
             // so PATH/PATHEXT resolution works, like `node_backend`.
@@ -184,7 +186,7 @@ pub fn run_npm_cli(
                 wrapped.extend(args.iter().cloned());
                 make_command("cmd", &wrapped)
                     .output()
-                    .map_err(|e| format!("failed to run `{cli_name}`: {e}"))?
+                    .map_err(|cmd_err| format!("failed to run `{cli_name}`: {cmd_err}"))?
             }
             #[cfg(not(target_os = "windows"))]
             {
