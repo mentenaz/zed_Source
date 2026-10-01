@@ -995,6 +995,14 @@ impl Session {
                     ))
                     .await
                     .ok();
+                console
+                    .send(
+                        "Run \"dev: Open Debug Adapter Logs\" from the command palette to see \
+                         the debug adapter's own output, which usually explains why it failed."
+                            .to_string(),
+                    )
+                    .await
+                    .ok();
             }
 
             result

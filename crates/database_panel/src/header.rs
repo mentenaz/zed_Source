@@ -187,9 +187,11 @@ impl DatabasePanel {
                                     .danger()
                                     .disabled(busy)
                                     .icon(Icon::new(GIconName::Delete))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.delete_connection(id, cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.delete_connection(id, window, cx);
+                                        },
+                                    )),
                             ),
                     ),
             )

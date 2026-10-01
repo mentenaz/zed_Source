@@ -29,8 +29,9 @@ use std::path::Path;
 
 use gpui::{
     App, AppContext, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
-    Task, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PromptLevel, Render,
+    Styled as _, Subscription, Task, WeakEntity, Window, actions, div, prelude::FluentBuilder as _,
+    px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, Size, StyledExt as _,
@@ -55,7 +56,25 @@ mod details;
 mod pages;
 mod search;
 
-actions!(npm_manager, [OpenNpmManager, ReloadNpmManager]);
+actions!(
+    npm_manager,
+    [
+        OpenNpmManager,
+        ReloadNpmManager,
+        /// Moves the selection down one row in whichever package list page
+        /// (Search/Installed/Updates/Vulnerabilities) currently has focus.
+        SelectNextPackage,
+        /// Moves the selection up one row, same scope as `SelectNextPackage`.
+        SelectPrevPackage,
+        /// Opens the selected row's details — the keyboard equivalent of
+        /// clicking its name / "More info".
+        OpenSelectedPackage,
+        /// Runs the selected row's primary action for the page it's on:
+        /// Install (Search), Remove (Installed), Update (Updates), or Fix
+        /// (Vulnerabilities, only when one is offered).
+        ActSelectedPackage
+    ]
+);
 
 /// Opens (or activates) the npm manager tab for the given workspace root, in
 /// the given workspace. This is the §6.3 seam the Node panel's quick action
@@ -98,6 +117,19 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    // The four package-list pages (Search/Installed/Updates/Vulnerabilities)
+    // had no keyboard path at all before this — a row could only be opened
+    // or acted on with the mouse. Scoped to `NpmPackageList` (each page sets
+    // that key context on its own list container), matching how
+    // `gpui_component::table::data_table` scopes its own row-navigation
+    // bindings to `DataTable` rather than putting them in the JSON keymap.
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNextPackage, Some("NpmPackageList")),
+        KeyBinding::new("up", SelectPrevPackage, Some("NpmPackageList")),
+        KeyBinding::new("enter", OpenSelectedPackage, Some("NpmPackageList")),
+        KeyBinding::new("space", ActSelectedPackage, Some("NpmPackageList")),
+    ]);
 }
 
 /// The workspace's first worktree's absolute path — the scan root the npm
@@ -614,14 +646,32 @@ impl NpmManagerPanel {
         self.install_pkg(name, version, false, window, cx);
     }
 
+    /// Confirms before removing — irreversible from here (no undo, and the
+    /// version being removed isn't remembered anywhere), and previously a
+    /// single un-gated click. Same `window.prompt` pattern as
+    /// `python_manager_panel::uninstall_pkg` / `database_panel`'s
+    /// `delete_connection` — see either's doc comment for why this uses
+    /// GPUI's own prompt rather than a `gpui_component` modal/dialog.
     fn remove_package(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let label = format!("remove {name}");
-        self.kick_run(
-            &label,
-            vec!["remove".to_string(), name.to_string()],
-            window,
+        let name = name.to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove {name}?"),
+            Some("This removes the package from the active project and cannot be undone."),
+            &["Remove", "Cancel"],
             cx,
         );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                let label = format!("remove {name}");
+                this.kick_run(&label, vec!["remove".to_string(), name.clone()], window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Bulk-updates every outdated package in the active project — or only the

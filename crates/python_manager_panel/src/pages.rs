@@ -4,8 +4,9 @@
 //! `vulnerabilities_page`/`count_badge` almost verbatim.
 
 use gpui::{
-    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, white,
+    AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, white,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon,
@@ -22,7 +23,30 @@ use gpui_component::{
 };
 use python_backend::{PythonOutdatedPkg, PythonPackage, PyPiVulnerability};
 
-use crate::PythonManagerPanel;
+use crate::{
+    ActSelectedPackage, OpenSelectedPackage, PythonManagerPanel, SelectNextPackage,
+    SelectPrevPackage,
+};
+
+/// The key context each package-list page's own container sets — see
+/// `python_manager_panel::init`'s `cx.bind_keys` for the up/down/enter/space
+/// bindings scoped to it, and why they live there rather than in the JSON
+/// keymap (mirrors `gpui_component::table::data_table`'s own `DataTable`
+/// context for the same reason; see also `npm_manager_panel`/
+/// `nuget_manager_panel::pages`'s identical `PACKAGE_LIST_CONTEXT`).
+const PACKAGE_LIST_CONTEXT: &str = "PythonPackageList";
+
+/// Moves `selected` one row up (`forward: false`) or down (`forward: true`)
+/// within a `len`-row list, wrapping at both ends — matches
+/// `gpui_component::table::TableState`'s default `loop_selection` behavior
+/// — and starting from the top row on the very first press.
+fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let ix = selected.unwrap_or(0);
+    Some(if forward { (ix + 1) % len } else { (ix + len - 1) % len })
+}
 
 pub(crate) fn build_all(
     panel: &PythonManagerPanel,
@@ -274,8 +298,20 @@ pub(crate) fn build_all(
     );
 
     // ── Installed / Updates pages ──────────────────────────────────
-    let installed_page = build_installed_page(&installed, &view, loading, python_exe.is_some());
-    let outdated_page = build_outdated_page(&outdated, &view);
+    let installed_page = build_installed_page(
+        &installed,
+        &view,
+        loading,
+        python_exe.is_some(),
+        panel.installed_cursor,
+        panel.installed_list_focus.clone(),
+    );
+    let outdated_page = build_outdated_page(
+        &outdated,
+        &view,
+        panel.outdated_cursor,
+        panel.outdated_list_focus.clone(),
+    );
 
     // ── Vulnerabilities page ────────────────────────────────────────
     let vulnerabilities_page = build_vulnerabilities_page(
@@ -284,6 +320,8 @@ pub(crate) fn build_all(
         panel.vuln_scanned,
         panel.vuln_scan_error.clone(),
         &view,
+        panel.vuln_cursor,
+        panel.vuln_list_focus.clone(),
     );
 
     let _ = cx;
@@ -295,6 +333,8 @@ fn build_installed_page(
     view: &Entity<PythonManagerPanel>,
     loading: bool,
     has_python: bool,
+    cursor: Option<usize>,
+    focus_handle: FocusHandle,
 ) -> SettingPage {
     let mut group = SettingGroup::new().title("Installed Packages");
     if installed.is_empty() && !loading {
@@ -306,16 +346,90 @@ fn build_installed_page(
             })
         }));
     } else {
-        for pkg in installed {
-            let name = pkg.name.clone();
-            let version = pkg.version.clone();
+        let rows = installed.to_vec();
+        let view = view.clone();
+        group = group.item(SettingItem::render(move |_o, _w, cx| {
             let view = view.clone();
-            group = group.item(SettingItem::render(move |_o, _w, cx| {
+            let len = rows.len();
+            let mut list = v_flex()
+                .id("py-installed-list")
+                .track_focus(&focus_handle)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus_handle = focus_handle.clone();
+                    move |_, window, cx| {
+                        window.focus(&focus_handle, cx);
+                    }
+                })
+                .key_context(PACKAGE_LIST_CONTEXT)
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectNextPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.installed_cursor = step_selected(p.installed_cursor, len, true);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectPrevPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.installed_cursor = step_selected(p.installed_cursor, len, false);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &OpenSelectedPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some(name) = p.installed_cursor.and_then(|ix| rows.get(ix)).map(|pkg| pkg.name.clone()) else {
+                                return;
+                            };
+                            p.fetch_details(name, cx);
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &ActSelectedPackage, window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some(name) = p.installed_cursor.and_then(|ix| rows.get(ix)).map(|pkg| pkg.name.clone()) else {
+                                return;
+                            };
+                            p.selected = Some(name.clone());
+                            p.uninstall_pkg(&name, window, cx);
+                        });
+                    }
+                })
+                .gap_1p5();
+
+            for (ix, pkg) in rows.iter().enumerate() {
+                let name = pkg.name.clone();
+                let version = pkg.version.clone();
                 let view = view.clone();
-                h_flex()
+                let is_selected = cursor == Some(ix);
+
+                let row = h_flex()
+                    .id(("py-installed-row", ix))
                     .gap_2()
                     .items_center()
                     .w_full()
+                    .rounded_md()
+                    .when(is_selected, |row| {
+                        row.bg(cx.theme().primary.opacity(0.08)).border_1().border_color(cx.theme().primary)
+                    })
+                    .on_click({
+                        let view = view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |p, cx| {
+                                p.installed_cursor = Some(ix);
+                                cx.notify();
+                            });
+                        }
+                    })
                     .child(
                         div()
                             .id(format!("inst-{name}"))
@@ -383,9 +497,11 @@ fn build_installed_page(
                                     });
                                 }
                             }),
-                    )
-            }));
-        }
+                    );
+                list = list.child(row);
+            }
+            list
+        }));
     }
     let count = installed.len();
     SettingPage::new("Installed")
@@ -395,7 +511,12 @@ fn build_installed_page(
         .sidebar_badge(move |_, cx| count_badge(count, loading, cx))
 }
 
-fn build_outdated_page(outdated: &[PythonOutdatedPkg], view: &Entity<PythonManagerPanel>) -> SettingPage {
+fn build_outdated_page(
+    outdated: &[PythonOutdatedPkg],
+    view: &Entity<PythonManagerPanel>,
+    cursor: Option<usize>,
+    focus_handle: FocusHandle,
+) -> SettingPage {
     let mut group = SettingGroup::new().title("Outdated Packages");
     if outdated.is_empty() {
         group = group.item(SettingItem::render(move |_o, _w, cx| {
@@ -416,25 +537,116 @@ fn build_outdated_page(outdated: &[PythonOutdatedPkg], view: &Entity<PythonManag
             })
         }));
 
-        for pkg in outdated {
-            let name = pkg.name.clone();
-            let current = pkg.version.clone();
-            let latest = pkg.latest_version.clone();
+        let rows = outdated.to_vec();
+        let view = view.clone();
+        group = group.item(SettingItem::render(move |_o, _w, cx| {
             let view = view.clone();
-            group = group.item(SettingItem::render(move |_o, _w, cx| {
-                h_flex()
+            let len = rows.len();
+            let mut list = v_flex()
+                .id("py-outdated-list")
+                .track_focus(&focus_handle)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus_handle = focus_handle.clone();
+                    move |_, window, cx| {
+                        window.focus(&focus_handle, cx);
+                    }
+                })
+                .key_context(PACKAGE_LIST_CONTEXT)
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectNextPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.outdated_cursor = step_selected(p.outdated_cursor, len, true);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectPrevPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.outdated_cursor = step_selected(p.outdated_cursor, len, false);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &OpenSelectedPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some(name) = p.outdated_cursor.and_then(|ix| rows.get(ix)).map(|pkg| pkg.name.clone()) else {
+                                return;
+                            };
+                            p.fetch_details(name, cx);
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &ActSelectedPackage, window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some((name, latest)) = p
+                                .outdated_cursor
+                                .and_then(|ix| rows.get(ix))
+                                .map(|pkg| (pkg.name.clone(), pkg.latest_version.clone()))
+                            else {
+                                return;
+                            };
+                            p.selected = Some(name.clone());
+                            p.install_pkg(&name, Some(&latest), window, cx);
+                        });
+                    }
+                })
+                .gap_1p5();
+
+            for (ix, pkg) in rows.iter().enumerate() {
+                let name = pkg.name.clone();
+                let current = pkg.version.clone();
+                let latest = pkg.latest_version.clone();
+                let view = view.clone();
+                let is_selected = cursor == Some(ix);
+
+                let row = h_flex()
+                    .id(("py-outdated-row", ix))
                     .gap_2()
                     .items_center()
                     .w_full()
+                    .rounded_md()
+                    .when(is_selected, |row| {
+                        row.bg(cx.theme().primary.opacity(0.08)).border_1().border_color(cx.theme().primary)
+                    })
+                    .on_click({
+                        let view = view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |p, cx| {
+                                p.outdated_cursor = Some(ix);
+                                cx.notify();
+                            });
+                        }
+                    })
                     .child(
                         div()
+                            .id(format!("outdated-{name}"))
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .font_family("Cascadia Mono")
                             .text_xs()
                             .text_color(cx.theme().foreground)
-                            .child(name.clone()),
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(cx.theme().primary))
+                            .child(name.clone())
+                            .on_click({
+                                let name = name.clone();
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    view.update(cx, |p, cx| {
+                                        p.fetch_details(name.clone(), cx);
+                                    });
+                                }
+                            }),
                     )
                     .child(
                         div()
@@ -455,9 +667,11 @@ fn build_outdated_page(outdated: &[PythonOutdatedPkg], view: &Entity<PythonManag
                                 });
                             }
                         }),
-                    )
-            }));
-        }
+                    );
+                list = list.child(row);
+            }
+            list
+        }));
     }
     let count = outdated.len();
     SettingPage::new("Updates")
@@ -473,6 +687,8 @@ fn build_vulnerabilities_page(
     scanned: bool,
     error: Option<String>,
     view: &Entity<PythonManagerPanel>,
+    cursor: Option<usize>,
+    focus_handle: FocusHandle,
 ) -> SettingPage {
     let mut group = SettingGroup::new().title("Known Vulnerabilities (PyPI / OSV.dev)");
 
@@ -524,78 +740,161 @@ fn build_vulnerabilities_page(
                 .child("No known vulnerabilities found in installed packages \u{2713}")
         }));
     } else {
+        // Flattened, name-sorted so display order and `vuln_cursor`'s index
+        // agree — same order the old per-row double loop rendered in.
         let mut names: Vec<&String> = vulns.keys().collect();
         names.sort();
-        for name in names {
-            let Some(vs) = vulns.get(name) else { continue };
-            for v in vs {
-                let pkg_name = name.clone();
+        let rows: Vec<(String, PyPiVulnerability)> = names
+            .into_iter()
+            .filter_map(|name| vulns.get(name).map(|vs| (name, vs)))
+            .flat_map(|(name, vs)| vs.iter().map(move |v| (name.clone(), v.clone())))
+            .collect();
+
+        let view = view.clone();
+        group = group.item(SettingItem::render(move |_o, _w, cx| {
+            let view = view.clone();
+            let len = rows.len();
+            let mut list = v_flex()
+                .id("py-vuln-list")
+                .track_focus(&focus_handle)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus_handle = focus_handle.clone();
+                    move |_, window, cx| {
+                        window.focus(&focus_handle, cx);
+                    }
+                })
+                .key_context(PACKAGE_LIST_CONTEXT)
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectNextPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.vuln_cursor = step_selected(p.vuln_cursor, len, true);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    move |_: &SelectPrevPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            p.vuln_cursor = step_selected(p.vuln_cursor, len, false);
+                            cx.notify();
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &OpenSelectedPackage, _window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some((pkg_name, v)) = p.vuln_cursor.and_then(|ix| rows.get(ix)) else {
+                                return;
+                            };
+                            let vuln_id = format!("{pkg_name}-{}", v.id);
+                            p.toggle_vuln(vuln_id, cx);
+                        });
+                    }
+                })
+                .on_action({
+                    let view = view.clone();
+                    let rows = rows.clone();
+                    move |_: &ActSelectedPackage, window, cx: &mut App| {
+                        view.update(cx, |p, cx| {
+                            let Some((name, fix)) = p.vuln_cursor.and_then(|ix| rows.get(ix)).and_then(
+                                |(pkg_name, v)| Some((pkg_name.clone(), v.fixed_in.first()?.clone())),
+                            ) else {
+                                return;
+                            };
+                            p.selected = Some(name.clone());
+                            p.install_pkg(&name, Some(&fix), window, cx);
+                        });
+                    }
+                })
+                .gap_1p5();
+
+            for (ix, (pkg_name, v)) in rows.iter().enumerate() {
+                let pkg_name = pkg_name.clone();
                 let id = v.id.clone();
                 let text = v.summary.clone().or_else(|| v.details.clone()).unwrap_or_default();
                 let fixed_in = v.fixed_in.clone();
                 let view = view.clone();
                 let vuln_id = format!("{pkg_name}-{id}");
                 let can_expand = !text.is_empty();
-                group = group.item(SettingItem::render(move |_o, _w, cx| {
-                    let view = view.clone();
-                    let is_open = can_expand && view.read(cx).expanded_vulns.contains(&vuln_id);
-                    let vuln_id_for_click = vuln_id.clone();
-                    let view_for_click = view.clone();
+                let is_open = can_expand && view.read(cx).expanded_vulns.contains(&vuln_id);
+                let is_selected = cursor == Some(ix);
+                let vuln_id_for_click = vuln_id.clone();
+                let view_for_click = view.clone();
 
-                    let header = h_flex()
-                        .id(format!("vuln-toggle-{vuln_id}"))
-                        .gap_2()
-                        .items_center()
-                        .w_full()
-                        .when(can_expand, |row| {
-                            row.cursor_pointer()
-                                .hover(|d| d.bg(cx.theme().list_hover))
-                                .on_click(move |_, _, cx| {
-                                    view_for_click.update(cx, |p, cx| {
-                                        p.toggle_vuln(vuln_id_for_click.clone(), cx);
-                                    });
-                                })
-                                .child(
-                                    Icon::new(if is_open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                        .xsmall()
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family("Cascadia Mono")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().foreground)
-                                .child(pkg_name.clone()),
-                        )
-                        .child(div().px_1().rounded_sm().text_xs().text_color(cx.theme().danger).child(id.clone()))
-                        .when_some(fixed_in.first().cloned(), |row, fix: String| {
-                            let name = pkg_name.clone();
-                            let fix_id = id.clone();
-                            let view = view.clone();
-                            row.child(
-                                Button::new(format!("fix-{name}-{fix_id}"))
-                                    .ghost()
+                let header = h_flex()
+                    .id(format!("vuln-toggle-{vuln_id}"))
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .when(can_expand, |row| {
+                        row.cursor_pointer()
+                            .hover(|d| d.bg(cx.theme().list_hover))
+                            .on_click(move |_, _, cx| {
+                                view_for_click.update(cx, |p, cx| {
+                                    p.toggle_vuln(vuln_id_for_click.clone(), cx);
+                                });
+                            })
+                            .child(
+                                Icon::new(if is_open { IconName::ChevronDown } else { IconName::ChevronRight })
                                     .xsmall()
-                                    .label(format!("Update \u{2192} {fix}"))
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        view.update(cx, |p, cx| {
-                                            p.selected = Some(name.clone());
-                                            p.install_pkg(&name, Some(&fix), window, cx);
-                                        });
-                                    }),
+                                    .text_color(cx.theme().muted_foreground),
                             )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family("Cascadia Mono")
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(pkg_name.clone()),
+                    )
+                    .child(div().px_1().rounded_sm().text_xs().text_color(cx.theme().danger).child(id.clone()))
+                    .when_some(fixed_in.first().cloned(), |row, fix: String| {
+                        let name = pkg_name.clone();
+                        let fix_id = id.clone();
+                        let view = view.clone();
+                        row.child(
+                            Button::new(format!("fix-{name}-{fix_id}"))
+                                .ghost()
+                                .xsmall()
+                                .label(format!("Update \u{2192} {fix}"))
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    view.update(cx, |p, cx| {
+                                        p.selected = Some(name.clone());
+                                        p.install_pkg(&name, Some(&fix), window, cx);
+                                    });
+                                }),
+                        )
+                    });
+
+                let row_click_view = view.clone();
+                let row_wrap = v_flex()
+                    .id(("py-vuln-row", ix))
+                    .w_full()
+                    .min_w_0()
+                    .pb_2()
+                    .rounded_md()
+                    .when(is_selected, |row| {
+                        row.bg(cx.theme().primary.opacity(0.08)).border_1().border_color(cx.theme().primary)
+                    })
+                    .on_click(move |_, _, cx| {
+                        row_click_view.update(cx, |p, cx| {
+                            p.vuln_cursor = Some(ix);
+                            cx.notify();
                         });
+                    });
 
-                    if !can_expand {
-                        return header.into_any_element();
-                    }
-
+                let row_wrap = if !can_expand {
+                    row_wrap.child(header)
+                } else {
                     let body = v_flex().w_full().min_w_0().gap_1().pl_2().child(
                         div().max_w(gpui::px(900.)).min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(
                             TextView::markdown(format!("vuln-summary-{pkg_name}-{id}"), text.clone())
@@ -604,16 +903,12 @@ fn build_vulnerabilities_page(
                                 .selectable(true),
                         ),
                     );
-
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .pb_2()
-                        .child(Collapsible::new().w_full().min_w_0().open(is_open).child(header).content(body))
-                        .into_any_element()
-                }));
+                    row_wrap.child(Collapsible::new().w_full().min_w_0().open(is_open).child(header).content(body))
+                };
+                list = list.child(row_wrap);
             }
-        }
+            list
+        }));
     }
 
     let count: usize = vulns.values().map(|v| v.len()).sum();
@@ -621,19 +916,26 @@ fn build_vulnerabilities_page(
         .icon(Icon::new(TriangleAlert))
         .resettable(false)
         .group(group)
-        .sidebar_badge(move |_, cx| count_badge(count, scanning, cx))
+        .sidebar_badge(move |_, cx| colored_count_badge(count, scanning, cx.theme().danger))
 }
 
 /// Sidebar count badge — `.flex()` before `.items_center().justify_center()`
 /// is required or the count text won't vertically center (a bug both
 /// `npm_manager_panel`/`nuget_manager_panel` had and had fixed).
 fn count_badge(count: usize, loading: bool, cx: &App) -> AnyElement {
+    colored_count_badge(count, loading, cx.theme().primary)
+}
+
+/// Like [`count_badge`], but with the pill's fill color set by the caller —
+/// used for the Vulnerabilities badge, which needs the error color rather
+/// than the primary-theme color the Installed/Updates badges use.
+fn colored_count_badge(count: usize, loading: bool, color: Hsla) -> AnyElement {
     h_flex().child(
         div()
             .when(count == 0 && !loading, |this| this.size_0())
             .when(count > 0, |this| {
                 this.flex()
-                    .bg(cx.theme().primary)
+                    .bg(color)
                     .rounded_full()
                     .px_1p5()
                     .min_w_3p5()

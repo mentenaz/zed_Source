@@ -56,6 +56,12 @@ impl TcpArgumentsTemplate {
 pub struct AttachRequest {
     /// The processId to attach to, if left empty we will show a process picker
     pub process_id: Option<u32>,
+    /// The port the target's debugger/inspector is already listening on.
+    ///
+    /// Some runtimes (e.g. Node) don't expose this on the process's command
+    /// line, so it can't always be auto-detected from `process_id` alone —
+    /// leave empty to let the adapter fall back to its own default.
+    pub port: Option<u16>,
 }
 
 impl<'de> Deserialize<'de> for AttachRequest {
@@ -66,6 +72,8 @@ impl<'de> Deserialize<'de> for AttachRequest {
         #[derive(Deserialize)]
         struct Helper {
             process_id: Option<u32>,
+            #[serde(default)]
+            port: Option<u16>,
         }
 
         let helper = Helper::deserialize(deserializer)?;
@@ -77,6 +85,7 @@ impl<'de> Deserialize<'de> for AttachRequest {
 
         Ok(AttachRequest {
             process_id: helper.process_id,
+            port: helper.port,
         })
     }
 }
@@ -168,6 +177,9 @@ impl DebugRequest {
                 process_id,
             }) => Ok(DebugRequest::Attach(AttachRequest {
                 process_id: Some(process_id),
+                // TODO: not threaded through the proto schema yet, so
+                // remote/collab sessions lose an explicitly-set port.
+                port: None,
             })),
         }
     }

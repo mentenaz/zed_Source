@@ -704,6 +704,61 @@ impl ShellKind {
     }
 }
 
+/// Returns whether `input` contains a shell command-chaining operator
+/// (`&&`, `||`, `;`, `|`, or a line break) outside of any quoted region.
+///
+/// Word-splitting a command string has no notion of shell operators, so a
+/// chain like `cargo build && cargo run` would otherwise hand `&&` to `cargo`
+/// as a literal argument. Callers use this to detect that the string has to be
+/// passed to a real shell instead of being split into a program and its args.
+///
+/// Quoting follows POSIX rules, matching the `shlex`-based
+/// [`ShellKind::split`]: single quotes are literal, double quotes honor
+/// backslash escapes, and a bare backslash escapes the next byte.
+///
+/// A lone `&` (background) only counts when it is whitespace-delimited, so
+/// ampersands embedded in a word — a URL like `https://host/?a=1&b=2` — are
+/// left alone.
+pub fn contains_shell_operator(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'\\' => i += 2,
+            b';' | b'|' | b'\n' | b'\r' => return true,
+            b'&' => {
+                let is_doubled = bytes.get(i + 1) == Some(&b'&');
+                let is_delimited = i == 0
+                    || bytes[i - 1].is_ascii_whitespace()
+                    || bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
+                if is_doubled || is_delimited {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1043,100 @@ mod tests {
             ] {
                 assert_eq!(shell_kind.to_shell_variable(input), input);
             }
+        }
+    }
+
+    #[test]
+    fn test_contains_shell_operator_detects_chains() {
+        for input in [
+            "cargo build && cargo run",
+            "cargo build&&cargo run",
+            "a || b",
+            "a; b",
+            "a | b",
+            "a & b",
+            "a &",
+            "&a",
+            "a\nb",
+            "a\rb",
+            "  &&  ",
+        ] {
+            assert!(
+                contains_shell_operator(input),
+                "expected {input:?} to be detected as a shell chain"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contains_shell_operator_ignores_plain_commands() {
+        for input in [
+            "",
+            "cargo",
+            "cargo run",
+            "RUST_LOG=debug ./target/debug/my-app --port 8080",
+            r#"C:\Program Files\my app\debug.exe --flag"#,
+            "/usr/local/bin/my-app --define key=value",
+            "node --experimental-vm-modules ./server.js",
+            "./gradlew :app:assembleDebug",
+        ] {
+            assert!(
+                !contains_shell_operator(input),
+                "expected {input:?} not to be detected as a shell chain"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contains_shell_operator_respects_quoting() {
+        // Operators inside quotes are literal arguments, not shell syntax.
+        for input in [
+            r#"echo "a && b""#,
+            "echo 'a && b'",
+            r#"my-app --message "build && deploy""#,
+            r#"my-app --filter 'a;b'"#,
+            r#"my-app --glob "*.rs|*.toml""#,
+            r#"my-app --pattern "line1\nline2""#,
+            // A backslash escapes the operator for a real shell.
+            r"echo a \&\& b",
+        ] {
+            assert!(
+                !contains_shell_operator(input),
+                "expected {input:?} not to be detected as a shell chain"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contains_shell_operator_sees_past_quoted_regions() {
+        for input in [
+            r#"my-app "a && b" && next"#,
+            r"my-app 'a; b' ; next",
+            r#"my-app "" && next"#,
+        ] {
+            assert!(
+                contains_shell_operator(input),
+                "expected {input:?} to be detected as a shell chain"
+            );
+        }
+
+        // An unterminated quote is a syntax error for a real shell, so the
+        // operators it swallows are reported as literal, not as a chain.
+        assert!(!contains_shell_operator(r#"my-app "unterminated && text"#));
+    }
+
+    #[test]
+    fn test_contains_shell_operator_ignores_ampersand_inside_a_word() {
+        // A lone `&` between word characters is left for the program itself
+        // rather than forcing the whole string through a shell.
+        for input in [
+            "curl https://example.com/?a=1&b=2",
+            "my-app --query name&value",
+        ] {
+            assert!(
+                !contains_shell_operator(input),
+                "expected {input:?} not to be detected as a shell chain"
+            );
         }
     }
 }

@@ -24,8 +24,8 @@ use db::kvp::KeyValueStore;
 use gpui::{
     App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
+    PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName as GIconName, Sizable as _, Size,
@@ -1736,25 +1736,57 @@ impl DatabasePanel {
         cx.notify();
     }
 
-    fn delete_connection(&mut self, id: ConnectionId, cx: &mut Context<Self>) {
+    /// Confirms before dropping a saved connection — irreversible (there is
+    /// no undo for a deleted `ConnectionConfig`, unlike disconnecting, which
+    /// just drops the live session) and previously a single un-gated click.
+    /// Uses GPUI's own `window.prompt`, not `gpui_component`'s
+    /// `open_dialog`/a custom `ModalView` — see `open_workspace_modal`'s doc
+    /// comment in this file for why a `gpui_component`-Root-dependent dialog
+    /// isn't an option here, and `project_panel::remove`'s delete-file
+    /// confirmation for the same pattern already used elsewhere in Zed.
+    fn delete_connection(&mut self, id: ConnectionId, window: &mut Window, cx: &mut Context<Self>) {
         if self.registry_busy {
             return;
         }
-        self.registry.disconnect(id).ok();
-        self.statuses.remove(&id);
-        self.connections.retain(|connection| connection.id != id);
-        // A connection can have several `(id, database)` schema/tree-state
-        // slots now (one per database that was ever opened this session) —
-        // drop all of them, not just a single `id`-keyed one.
-        self.schemas.retain(|key, _| key.0 != id);
-        self.tree_states.retain(|key, _| key.0 != id);
-        self.workbench_tree_states.retain(|key, _| key.0 != id);
-        if self.active_connection == Some(id) {
-            self.sync_active_connection_for_type();
-        }
-        self.persist_connections(cx);
-        self.persist_schema_cache(cx);
-        cx.notify();
+        let Some(title) = self
+            .connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .map(|connection| connection.title.clone())
+        else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Delete the connection \u{201c}{title}\u{201d}?"),
+            Some("This removes the saved connection and its cached schema. It does not affect the database itself, and cannot be undone."),
+            &["Delete", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.registry.disconnect(id).ok();
+                this.statuses.remove(&id);
+                this.connections.retain(|connection| connection.id != id);
+                // A connection can have several `(id, database)` schema/tree-state
+                // slots now (one per database that was ever opened this session) —
+                // drop all of them, not just a single `id`-keyed one.
+                this.schemas.retain(|key, _| key.0 != id);
+                this.tree_states.retain(|key, _| key.0 != id);
+                this.workbench_tree_states.retain(|key, _| key.0 != id);
+                if this.active_connection == Some(id) {
+                    this.sync_active_connection_for_type();
+                }
+                this.persist_connections(cx);
+                this.persist_schema_cache(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Handles a click on the type tab strip (`[SQLite][PostgreSQL][MySQL]

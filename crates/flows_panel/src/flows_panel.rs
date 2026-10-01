@@ -31,24 +31,27 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use gpui::{
-    Action, App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, TaskExt as _, WeakEntity,
-    Window, actions, div, prelude::FluentBuilder as _,
+    Action, AnchoredPositionMode, App, AppContext as _, AsyncWindowContext, ClickEvent, Context,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TaskExt as _, WeakEntity, Window, actions,
+    anchored, deferred, div, point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputState},
     spinner::Spinner,
+    switch::Switch,
     tag::Tag,
     v_flex,
 };
 use project::Project;
 use settings::Settings as _;
 use workflow_engine::{
-    ActionHistoryRecord, ActionMap, RunHistoryEntry, RunOutcome, RunStatus, StatusSink,
-    WorkflowDefinition, run_workflow, scan_project, task_chain,
+    ActionHistoryRecord, ActionMap, DetectedService, RunHistoryEntry, RunOutcome, RunStatus,
+    ServiceSpec, StatusSink, WorkflowDefinition, run_workflow, scan_project, task_chain,
 };
 use workspace::{
     OpenOptions, Workspace,
@@ -169,6 +172,83 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// One row of the "Add Task Chain" wizard (see [`TaskChainWizard`]) — starts
+/// pre-filled from a `DetectedService` scan result, but every field is a
+/// real editable `InputState`, since real project layouts vary too much for
+/// a blind guess to always be right.
+struct WizardService {
+    include: bool,
+    kind_label: &'static str,
+    name: Entity<InputState>,
+    command: Entity<InputState>,
+    /// Space-separated for editing — split back into a `Vec<String>` on
+    /// create (see `create_task_chain`). Good enough for the common case
+    /// (`npm run dev`, `manage.py runserver`); nothing here needs to handle
+    /// quoted args with embedded spaces.
+    args: Entity<InputState>,
+    cwd: Entity<InputState>,
+    port: Entity<InputState>,
+}
+
+impl WizardService {
+    fn from_detected(service: DetectedService, window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            include: true,
+            kind_label: service.kind.label(),
+            name: cx.new(|cx| InputState::new(window, cx).default_value(service.name)),
+            command: cx.new(|cx| InputState::new(window, cx).default_value(service.command)),
+            args: cx.new(|cx| InputState::new(window, cx).default_value(service.args.join(" "))),
+            cwd: cx.new(|cx| InputState::new(window, cx).default_value(service.relative_dir)),
+            port: cx.new(|cx| InputState::new(window, cx).default_value(service.port.to_string())),
+        }
+    }
+
+    fn blank(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            include: true,
+            kind_label: "Custom",
+            name: cx.new(|cx| InputState::new(window, cx).placeholder("service name")),
+            command: cx.new(|cx| InputState::new(window, cx).placeholder("npm")),
+            args: cx.new(|cx| InputState::new(window, cx).placeholder("run dev")),
+            cwd: cx.new(|cx| InputState::new(window, cx).placeholder(".")),
+            port: cx.new(|cx| InputState::new(window, cx).placeholder("3000")),
+        }
+    }
+
+    /// Guarantees a row exists for a panel's "anchor" project (see
+    /// `open_task_chain_wizard_anchored`) when `scan_project` didn't already
+    /// detect it — `name`/`relative_dir` are prefilled from the real
+    /// selected-project path, `command`/`port` are left as placeholders
+    /// since there's nothing to guess them from at this call site.
+    fn anchored(name: String, relative_dir: String, window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            include: true,
+            kind_label: "From Panel",
+            name: cx.new(|cx| InputState::new(window, cx).default_value(name)),
+            // Deliberately blank, not a guessed `npm`/`dotnet`/`python` —
+            // this row didn't come through `scan_project`'s detection, so
+            // there's no ecosystem signal to guess from at this call site
+            // (Node/Python/.NET panels all funnel through the same path).
+            // Left for the user to fill in.
+            command: cx.new(|cx| InputState::new(window, cx).placeholder("command")),
+            args: cx.new(|cx| InputState::new(window, cx).placeholder("args")),
+            cwd: cx.new(|cx| InputState::new(window, cx).default_value(relative_dir)),
+            port: cx.new(|cx| InputState::new(window, cx).placeholder("3000")),
+        }
+    }
+}
+
+/// The "Add Task Chain" wizard overlay — scans the open workspace for
+/// runnable services (`workflow_engine::scan_project`), proposes one
+/// editable row per detected service, and on "Create" turns the included
+/// rows into a new `.flow.json` with one `StartProcess` + `WaitForPort` pair
+/// per service (`task_chain::build`), all as independent parallel roots so
+/// they start concurrently.
+struct TaskChainWizard {
+    services: Vec<WizardService>,
+    error: Option<String>,
+}
+
 pub struct FlowsPanel {
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
@@ -179,6 +259,7 @@ pub struct FlowsPanel {
     /// button (nothing stops two *different* flows running at once).
     running: std::collections::HashSet<String>,
     error: Option<String>,
+    wizard: Option<TaskChainWizard>,
 }
 
 impl FlowsPanel {
@@ -206,6 +287,7 @@ impl FlowsPanel {
                 entries: Vec::new(),
                 running: std::collections::HashSet::new(),
                 error: None,
+                wizard: None,
             };
             panel.rescan(cx);
             panel
@@ -293,46 +375,166 @@ impl FlowsPanel {
         cx.notify();
     }
 
-    /// "+ Add Task Chain" — scans the open workspace for runnable services
-    /// and, if it finds any, generates one `StartProcess`/`WaitForPort`
-    /// pair per service into a new `.flow.json` (see the module doc's
-    /// deviation note on why this skips Forge's review wizard).
+    /// "+ Add Task Chain" — scans the open workspace and opens the review
+    /// wizard pre-filled with whatever it found.
     fn on_add_task_chain_click(
         &mut self,
         _: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_task_chain_wizard_anchored(None, window, cx);
+    }
+
+    /// Scans the open workspace and opens the review wizard pre-filled with
+    /// whatever it found. `anchor`, when set, is the absolute path of a
+    /// project selected in another panel (e.g. `node_panel`'s "task chain"
+    /// quick action) — if `scan_project` didn't already detect that exact
+    /// directory, a row for it is prepended so the wizard is never missing
+    /// the very project the user was looking at when they clicked the
+    /// button. An empty scan still opens the wizard (just with zero rows)
+    /// rather than silently doing nothing — "+ Add Custom Service" inside it
+    /// covers the case where detection missed everything.
+    pub fn open_task_chain_wizard_anchored(
+        &mut self,
+        anchor: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.project_root(cx) else {
-            self.error = Some("Open a folder first — Add Task Chain scans the open workspace.".to_string());
+            self.wizard = Some(TaskChainWizard {
+                services: Vec::new(),
+                error: Some(
+                    "Open a folder first — Add Task Chain scans the open workspace.".to_string(),
+                ),
+            });
             cx.notify();
-            return;
-        };
-        let Some(dir) = self.workflows_dir(cx) else {
             return;
         };
 
         let detected = scan_project(&root);
-        if detected.is_empty() {
-            self.error =
-                Some("No runnable services detected in this workspace.".to_string());
+        let mut services: Vec<WizardService> = detected
+            .into_iter()
+            .map(|service| WizardService::from_detected(service, window, cx))
+            .collect();
+
+        if let Some(anchor) = anchor {
+            let anchor_rel = anchor
+                .strip_prefix(&root)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| ".".to_string());
+            let already_detected = services
+                .iter()
+                .any(|service| service.cwd.read(cx).value() == anchor_rel);
+            if !already_detected {
+                let name = anchor
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "service".to_string());
+                services.insert(0, WizardService::anchored(name, anchor_rel, window, cx));
+            }
+        }
+
+        self.wizard = Some(TaskChainWizard {
+            services,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_task_chain_wizard(&mut self, cx: &mut Context<Self>) {
+        self.wizard = None;
+        cx.notify();
+    }
+
+    fn add_blank_wizard_service(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(wizard) = &mut self.wizard else {
+            return;
+        };
+        wizard.services.push(WizardService::blank(window, cx));
+        cx.notify();
+    }
+
+    fn remove_wizard_service(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(wizard) = &mut self.wizard
+            && index < wizard.services.len()
+        {
+            wizard.services.remove(index);
+        }
+        cx.notify();
+    }
+
+    fn toggle_wizard_service(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(wizard) = &mut self.wizard
+            && let Some(service) = wizard.services.get_mut(index)
+        {
+            service.include = !service.include;
+        }
+        cx.notify();
+    }
+
+    /// Reads every included row's current field values, builds the
+    /// `WorkflowDefinition` (`task_chain::build`), writes it to a freshly
+    /// minted `.flow.json`, and opens it the same way `on_new_workflow_click`
+    /// does.
+    fn create_task_chain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(wizard) = &self.wizard else {
+            return;
+        };
+
+        let mut specs = Vec::new();
+        for service in &wizard.services {
+            if !service.include {
+                continue;
+            }
+            let name = service.name.read(cx).value().trim().to_string();
+            let command = service.command.read(cx).value().trim().to_string();
+            if name.is_empty() || command.is_empty() {
+                self.wizard.as_mut().unwrap().error =
+                    Some("Every included service needs at least a name and a command.".to_string());
+                cx.notify();
+                return;
+            }
+            let args: Vec<String> = service
+                .args
+                .read(cx)
+                .value()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let cwd = service.cwd.read(cx).value().trim().to_string();
+            let port_text = service.port.read(cx).value().trim().to_string();
+            let port: u16 = match port_text.parse() {
+                Ok(port) => port,
+                Err(_) => {
+                    self.wizard.as_mut().unwrap().error =
+                        Some(format!("\"{port_text}\" isn't a valid port for \"{name}\"."));
+                    cx.notify();
+                    return;
+                }
+            };
+            specs.push(ServiceSpec {
+                name,
+                command,
+                args,
+                cwd,
+                port,
+            });
+        }
+
+        if specs.is_empty() {
+            self.wizard.as_mut().unwrap().error =
+                Some("Include at least one service before creating the task chain.".to_string());
             cx.notify();
             return;
         }
 
-        let specs: Vec<_> = detected
-            .into_iter()
-            .map(|service| workflow_engine::ServiceSpec {
-                name: service.name,
-                command: service.command,
-                args: service.args,
-                cwd: service.relative_dir,
-                port: service.port,
-            })
-            .collect();
-
+        let Some(dir) = self.workflows_dir(cx) else {
+            return;
+        };
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.error = Some(format!("Couldn't create {}: {e}", dir.display()));
+            self.wizard.as_mut().unwrap().error =
+                Some(format!("Couldn't create {}: {e}", dir.display()));
             cx.notify();
             return;
         }
@@ -342,11 +544,13 @@ impl FlowsPanel {
         let path = dir.join(format!("{slug}.flow.json"));
         let json = serde_json::to_string_pretty(&def).unwrap_or_default();
         if let Err(e) = std::fs::write(&path, json) {
-            self.error = Some(format!("Couldn't write {}: {e}", path.display()));
+            self.wizard.as_mut().unwrap().error =
+                Some(format!("Couldn't write {}: {e}", path.display()));
             cx.notify();
             return;
         }
 
+        self.wizard = None;
         self.error = None;
         self.rescan(cx);
         self.open_path(path, window, cx);
@@ -600,7 +804,7 @@ impl Panel for FlowsPanel {
 }
 
 impl Render for FlowsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_project = self.project_root(cx).is_some();
 
         let header = v_flex()
@@ -709,5 +913,191 @@ impl Render for FlowsPanel {
                     .overflow_y_scroll()
                     .child(body),
             )
+            .when(self.wizard.is_some(), |el| {
+                el.child(self.render_task_chain_wizard(window, cx))
+            })
     }
+}
+
+impl FlowsPanel {
+    /// The "Add Task Chain" modal — see [`TaskChainWizard`]'s doc comment.
+    fn render_task_chain_wizard(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let wizard = self.wizard.as_ref().unwrap();
+        let error = wizard.error.clone();
+        let rows: Vec<_> = wizard
+            .services
+            .iter()
+            .enumerate()
+            .map(|(index, service)| {
+                v_flex()
+                    .id(("task-chain-row", index))
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Switch::new(("task-chain-include", index))
+                                            .checked(service.include)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.toggle_wizard_service(index, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(service.kind_label),
+                                    ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("task-chain-remove-{index}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip("Remove")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_wizard_service(index, cx);
+                                    })),
+                            ),
+                    )
+                    .child(labeled_input("Name", &service.name, cx))
+                    .child(labeled_input("Command", &service.command, cx))
+                    .child(labeled_input("Args", &service.args, cx))
+                    .child(labeled_input("Working Dir", &service.cwd, cx))
+                    .child(labeled_input("Port", &service.port, cx))
+                    .into_any_element()
+            })
+            .collect();
+
+        let viewport = window.viewport_size();
+        deferred(
+            anchored()
+                .position_mode(AnchoredPositionMode::Window)
+                .position(point(px(0.0), px(0.0)))
+                .child(
+                    div()
+                        .id("task-chain-backdrop")
+                        .w(viewport.width)
+                        .h(viewport.height)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x000000aa))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_task_chain_wizard(cx)))
+                        .child(
+                            v_flex()
+                                .id("task-chain-card")
+                                .occlude()
+                                .w(px(420.0))
+                                .max_h(px(560.0))
+                                .p_4()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background)
+                                .shadow_md()
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                    if event.keystroke.key.as_str() == "escape" {
+                                        this.close_task_chain_wizard(cx);
+                                    }
+                                }))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child("Add Task Chain"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "Detected services from the open workspace. Review, edit, or \
+                                             remove any of these, then Create — each included service \
+                                             starts concurrently.",
+                                        ),
+                                )
+                                .when_some(error, |el, error| {
+                                    el.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().danger)
+                                            .child(error),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id("task-chain-rows")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .children(rows),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .justify_between()
+                                        .child(
+                                            Button::new("task-chain-add-custom")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::Plus)
+                                                .label("Add Custom Service")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.add_blank_wizard_service(window, cx);
+                                                })),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("task-chain-cancel")
+                                                        .ghost()
+                                                        .label("Cancel")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.close_task_chain_wizard(cx)
+                                                        })),
+                                                )
+                                                .child(
+                                                    Button::new("task-chain-create")
+                                                        .label("Create")
+                                                        .on_click(cx.listener(|this, _, window, cx| {
+                                                            this.create_task_chain(window, cx)
+                                                        })),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
+    }
+}
+
+fn labeled_input(label: &'static str, input: &Entity<InputState>, cx: &App) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(Input::new(input))
 }

@@ -37,9 +37,9 @@ use dotnet_backend::{
     read_installed_packages, resolve_csproj, scan_dotnet_projects,
 };
 use gpui::{
-    App, AppContext, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
-    Task, WeakEntity, Window, actions, div, px,
+    App, AppContext, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    InteractiveElement as _, IntoElement, ParentElement as _, PromptLevel, Render, Styled as _,
+    Subscription, Task, WeakEntity, Window, actions, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, Size, StyledExt as _,
@@ -58,7 +58,26 @@ mod details;
 mod pages;
 mod search;
 
-actions!(nuget_manager, [OpenNuGetManager, ReloadNuGetManager]);
+actions!(
+    nuget_manager,
+    [
+        OpenNuGetManager,
+        ReloadNuGetManager,
+        /// Moves the selection down one row in whichever package list page
+        /// (Search/Installed/Updates/Vulnerabilities) currently has focus.
+        SelectNextPackage,
+        /// Moves the selection up one row, same scope as `SelectNextPackage`.
+        SelectPrevPackage,
+        /// Opens the selected row's details — the keyboard equivalent of
+        /// clicking its name / "More info".
+        OpenSelectedPackage,
+        /// Runs the selected row's primary action for the page it's on:
+        /// Install (Search), Remove (Installed), or Update (Updates). The
+        /// Vulnerabilities page offers no per-row action here (no Fix
+        /// button — see `VulnPage`'s doc comment), so it's a no-op there.
+        ActSelectedPackage
+    ]
+);
 
 /// Opens (or activates) the NuGet manager tab for the given workspace root, in
 /// the given workspace. This is the seam the .NET panel's quick action calls.
@@ -112,6 +131,19 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    // The four package-list pages (Search/Installed/Updates/Vulnerabilities)
+    // had no keyboard path at all before this — a row could only be opened
+    // or acted on with the mouse. Scoped to `NuGetPackageList` (each page
+    // sets that key context on its own list container), matching how
+    // `gpui_component::table::data_table` scopes its own row-navigation
+    // bindings to `DataTable` rather than putting them in the JSON keymap.
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNextPackage, Some("NuGetPackageList")),
+        KeyBinding::new("up", SelectPrevPackage, Some("NuGetPackageList")),
+        KeyBinding::new("enter", OpenSelectedPackage, Some("NuGetPackageList")),
+        KeyBinding::new("space", ActSelectedPackage, Some("NuGetPackageList")),
+    ]);
 }
 
 /// The workspace's first worktree's absolute path — the scan root the NuGet
@@ -508,9 +540,32 @@ impl NuGetManagerPanel {
         self.install_pkg(name, version, window, cx);
     }
 
+    /// Confirms before removing — irreversible from here (no undo, and the
+    /// version being removed isn't remembered anywhere), and previously a
+    /// single un-gated click. Same `window.prompt` pattern as
+    /// `npm_manager_panel::remove_package` / `python_manager_panel`'s
+    /// `uninstall_pkg` — see either's doc comment for why this uses GPUI's
+    /// own prompt rather than a `gpui_component` modal/dialog.
     fn remove_package(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let command = dotnet_command(&["remove", "package", name]);
-        self.kick_run(&format!("remove {name}"), command, window, cx);
+        let name = name.to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove {name}?"),
+            Some("This removes the package from the active project and cannot be undone."),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                let command = dotnet_command(&["remove", "package", &name]);
+                this.kick_run(&format!("remove {name}"), command, window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Bulk-updates every outdated package — or only the patch-only ones when

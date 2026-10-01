@@ -1,0 +1,344 @@
+name: build_installers
+
+# Two ways to run this:
+#
+# 1. Manual: click "Run workflow" (Actions tab), pick which platform(s) to
+#    build, one architecture shared across all of them, and whether to
+#    publish. Good for testing one platform at a time.
+# 2. Automatic: push a tag matching "dev-v*" (e.g. `git tag dev-v1 && git
+#    push origin dev-v1`). Builds all three platforms for x86_64 and always
+#    publishes, under that exact tag name instead of the rolling
+#    "dev-build" the manual path uses — so each tagged run gets its own
+#    permanent Release page rather than overwriting the last one.
+#
+# Deliberately NOT "v*": that's the exact pattern release.yml (the real Zed
+# release pipeline) already listens for. Every job in that workflow is
+# gated to zed-industries/zed-extensions only, so it's inert here either
+# way — but a distinct prefix keeps the two fully separate at the trigger
+# level too, and avoids ever colliding with one of Zed's own real version
+# tags if you fetch upstream's tags into this fork later.
+#
+# Either way, check the result in a browser — this run's Artifacts section,
+# or the Release page.
+#
+# No code-signing certs needed for any platform: each OS's bundling script
+# already falls back to an unsigned (Windows) or ad-hoc-signed, non-
+# notarized (macOS) build when the real signing secrets aren't set, which
+# is the case here since this workflow doesn't set them. Linux binaries
+# were never signed in the first place. See each job's own comments below
+# for what that means when you actually try to run the result.
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Target architecture (applies to every platform built)
+        required: false
+        type: choice
+        options:
+          - x86_64
+          - aarch64
+        default: x86_64
+      build_windows:
+        description: Build Windows (.exe installer)
+        required: false
+        type: boolean
+        default: true
+      build_linux:
+        description: Build Linux (.tar.gz bundle + .deb)
+        required: false
+        type: boolean
+        default: true
+      build_macos:
+        description: Build macOS (.dmg)
+        required: false
+        type: boolean
+        default: true
+      publish_release:
+        description: >-
+          Publish every platform built to one shared GitHub Release (tag
+          "dev-build", overwritten on every run) so the whole set has a
+          permanent, shareable browser link — not just this run's
+          Artifacts, which expire.
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'dev-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  # workflow_dispatch's `inputs` context doesn't exist on a tag push, so
+  # every other job reads its settings from here instead of `inputs.*`
+  # directly — this is the one place that knows which trigger fired and
+  # fills in the "build everything, x86_64, publish" defaults for the tag
+  # path, or passes the manual dispatch's own choices straight through.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      architecture: ${{ steps.resolve.outputs.architecture }}
+      build_windows: ${{ steps.resolve.outputs.build_windows }}
+      build_linux: ${{ steps.resolve.outputs.build_linux }}
+      build_macos: ${{ steps.resolve.outputs.build_macos }}
+      publish_release: ${{ steps.resolve.outputs.publish_release }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - name: Resolve build parameters
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
+            echo "build_windows=true" >> "$GITHUB_OUTPUT"
+            echo "build_linux=true" >> "$GITHUB_OUTPUT"
+            echo "build_macos=true" >> "$GITHUB_OUTPUT"
+            echo "publish_release=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "architecture=${{ inputs.architecture }}" >> "$GITHUB_OUTPUT"
+            echo "build_windows=${{ inputs.build_windows }}" >> "$GITHUB_OUTPUT"
+            echo "build_linux=${{ inputs.build_linux }}" >> "$GITHUB_OUTPUT"
+            echo "build_macos=${{ inputs.build_macos }}" >> "$GITHUB_OUTPUT"
+            echo "publish_release=${{ inputs.publish_release }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=dev-build" >> "$GITHUB_OUTPUT"
+          fi
+
+  build_windows:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_windows == 'true' }}
+    # script/bundle-windows.ps1 assumes Inno Setup 6 is preinstalled at a
+    # fixed path only the 2022 runner image has by default — pin the image
+    # rather than "windows-latest", which will eventually move to 2025 and
+    # break this silently.
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # Skips code signing gracefully when the Azure signing secrets aren't
+      # set (they aren't here) — see its own CheckEnvironmentVariables.
+      # The resulting Zed-<arch>.exe will trigger a Windows SmartScreen
+      # warning on first run ("Windows protected your PC") — bypass with
+      # "More info" -> "Run anyway". Expected for an unsigned installer,
+      # not a build failure.
+      - name: Build the installer (script/bundle-windows.ps1)
+        shell: pwsh
+        run: ./script/bundle-windows.ps1 -Architecture ${{ needs.prepare.outputs.architecture }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zed-${{ needs.prepare.outputs.architecture }}.exe
+          path: target/Zed-${{ needs.prepare.outputs.architecture }}.exe
+          if-no-files-found: error
+
+  build_linux:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_linux == 'true' }}
+    # GitHub's hosted Arm64 Linux runners (public repos, no extra cost) —
+    # falls back to the regular x64 image otherwise.
+    runs-on: ${{ needs.prepare.outputs.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    timeout-minutes: 120
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      # A full Zed release build (native target + a second musl build for
+      # remote_server) is disk-hungry; GitHub's default runner image only
+      # has ~14GB free after its preinstalled toolchains. Clear headroom
+      # rather than find out mid-build.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          docker-images: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Download the WASI SDK (for bundled extensions)
+        run: ./script/download-wasi-sdk
+
+      # Produces a .tar.gz containing a self-contained zed.app/ directory
+      # (binary + bundled libs + .desktop file + icons) — this is the only
+      # format Zed's own scripts produce for Linux (besides, separately,
+      # script/bundle-flatpak for Flatpak). Extract the tarball and run
+      # bin/zed, or copy the .desktop file into
+      # ~/.local/share/applications for a menu entry.
+      - name: Build the bundle (script/bundle-linux)
+        run: ./script/bundle-linux
+
+      # Not an official Zed artifact — script/bundle-deb is this fork's own
+      # addition, repackaging the tarball above into a real .deb (installs
+      # to /usr/lib/<pkg>, /usr/bin/zed symlink, desktop/icon entries) since
+      # nothing upstream produces one. See that script's own comments for
+      # what it does and doesn't handle (there's no Depends: — the bundled
+      # libs cover most of it, see the script for why the rest is left
+      # undeclared rather than guessed).
+      - name: Build the .deb package (script/bundle-deb)
+        run: ./script/bundle-deb ${{ needs.prepare.outputs.architecture }}
+
+      - name: Upload artifact — Zed (tarball)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
+          path: target/release/zed-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload artifact — Zed (.deb)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-${{ needs.prepare.outputs.architecture }}.deb
+          path: target/release/*.deb
+          if-no-files-found: error
+
+      - name: Upload artifact — remote_server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
+          path: target/zed-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
+          if-no-files-found: error
+
+  build_macos:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_macos == 'true' }}
+    # Apple Silicon runner — GitHub retired Intel-hosted macOS images, so
+    # the x86_64 build cross-compiles from here (rustc/Xcode both support
+    # it out of the box; script/bundle-mac takes the target triple as an
+    # explicit argument specifically for this — release.yml's own
+    # bundle_mac_x86_64 job does the same from the same runner type).
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # dmg-license (script/bundle-mac embeds a license agreement into the
+      # DMG) is an npm package — pin a version rather than trust whatever
+      # Node happens to be preinstalled on the runner image.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Print macOS toolchain versions
+        run: |
+          sw_vers
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-version
+
+      # Falls back to an ad-hoc signature (`codesign --sign -`) when the
+      # real Apple Developer signing secrets aren't set (they aren't here).
+      # An ad-hoc-signed, non-notarized .dmg downloaded from a browser WILL
+      # be blocked by Gatekeeper on first open ("Apple could not verify...")
+      # — right-click the app -> Open (instead of double-clicking), or
+      # `xattr -cr /Applications/Zed*.app` after copying it over. Expected
+      # for an unsigned build, not a build failure.
+      - name: Build the bundle (script/bundle-mac)
+        run: |
+          triple="aarch64-apple-darwin"
+          if [ "${{ needs.prepare.outputs.architecture }}" = "x86_64" ]; then
+            triple="x86_64-apple-darwin"
+          fi
+          ./script/bundle-mac "$triple"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zed-${{ needs.prepare.outputs.architecture }}.dmg
+          path: target/${{ needs.prepare.outputs.architecture == 'x86_64' && 'x86_64-apple-darwin' || 'aarch64-apple-darwin' }}/release/Zed-${{ needs.prepare.outputs.architecture }}.dmg
+          if-no-files-found: error
+
+  publish_release:
+    needs: [prepare, build_windows, build_linux, build_macos]
+    # Runs even if some platforms were skipped (unticked) or failed, and
+    # publishes whatever did succeed — one un-ticked or failed platform
+    # shouldn't block the others from reaching the Release.
+    if: ${{ always() && needs.prepare.outputs.publish_release == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download Windows artifact
+        if: ${{ needs.build_windows.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: Zed-${{ needs.prepare.outputs.architecture }}.exe
+          path: dist
+
+      - name: Download Linux artifacts
+        if: ${{ needs.build_linux.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zed*-linux-${{ needs.prepare.outputs.architecture }}.*
+          path: dist
+          merge-multiple: true
+
+      - name: Download macOS artifact
+        if: ${{ needs.build_macos.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: Zed-${{ needs.prepare.outputs.architecture }}.dmg
+          path: dist
+
+      - name: Publish to a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          ARCH: ${{ needs.prepare.outputs.architecture }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No artifacts to publish — every build was skipped or failed."
+            exit 1
+          fi
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "Dev build ${RELEASE_TAG} (${ARCH})" \
+              --notes "Unsigned/ad-hoc-signed dev build, built by build_installers.yml. Not a stable release — see that workflow's job comments for what each platform needs to actually run it (SmartScreen / Gatekeeper)." \
+              --prerelease
+          fi
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

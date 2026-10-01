@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    PathPromptOptions, Render, StatefulInteractiveElement, Styled, Subscription, TaskExt,
-    WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
+    ParentElement, PathPromptOptions, Render, StatefulInteractiveElement, Styled, Subscription,
+    TaskExt, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable as _, StyledExt,
@@ -55,7 +55,24 @@ use workspace::{
     notifications::NotificationId,
 };
 
-actions!(helm_panel, [ToggleFocus]);
+actions!(
+    helm_panel,
+    [
+        ToggleFocus,
+        /// Moves the selection down one row in whichever list (repos,
+        /// issues) currently has focus.
+        SelectNextRow,
+        /// Moves the selection up one row, same scope as `SelectNextRow`.
+        SelectPrevRow,
+        /// Opens the selected row — the keyboard equivalent of clicking it
+        /// (drills into the repo / opens the issue detail).
+        OpenSelectedRow,
+        /// The Invitations screen's secondary per-row action (Decline) —
+        /// `OpenSelectedRow`/Enter there is Accept. No other list currently
+        /// uses this; everywhere else Enter is the row's only action.
+        ActSelectedRow
+    ]
+);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -64,6 +81,21 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    // Every list screen in Helm — repos, issues, and (not yet ported to
+    // this pattern) everything else — was mouse-only before this: no way to
+    // even reach a row without clicking it, let alone drill into one. Scoped
+    // to `HelmRowList` (each list container sets that key context), matching
+    // how `gpui_component::table::data_table` scopes its own row-navigation
+    // bindings to `DataTable`, and identically to
+    // `npm_manager_panel`/`nuget_manager_panel`/`python_manager_panel`'s own
+    // per-crate `PACKAGE_LIST_CONTEXT`.
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNextRow, Some("HelmRowList")),
+        KeyBinding::new("up", SelectPrevRow, Some("HelmRowList")),
+        KeyBinding::new("enter", OpenSelectedRow, Some("HelmRowList")),
+        KeyBinding::new("space", ActSelectedRow, Some("HelmRowList")),
+    ]);
 }
 
 /// Which screen the panel is currently showing.
@@ -174,6 +206,8 @@ pub struct HelmPanel {
     account: String,
     scopes: Vec<String>,
     org_logins: Vec<String>,
+    org_list_cursor: Option<usize>,
+    org_list_focus: FocusHandle,
     user: Option<GitHubUser>,
     /// Pending repo invitations the signed-in user hasn't accepted yet —
     /// just a count, surfaced as the hint badge on the Profile screen's
@@ -185,10 +219,22 @@ pub struct HelmPanel {
     /// [`Self::set_screen`] lands on a screen that isn't `OrgDetail`.
     selected_org: Option<String>,
     org_detail: Option<OrgDetail>,
+    /// Row `up`/`down`/`enter` act on, within the Profile screen's own nav
+    /// menu (Repositories/Organizations/Invitations/Account Security) —
+    /// built fresh each render, not a stored `Vec`, so this indexes
+    /// whatever `render_profile` computed that same pass.
+    profile_menu_cursor: Option<usize>,
+    profile_menu_focus: FocusHandle,
 
     // Repos
     repos: Vec<Repo>,
     repo_search: Entity<InputState>,
+    /// Row `up`/`down`/`enter` act on, within the filtered repo list
+    /// `render_repo_list` computes from `repos` + `repo_search` — an index
+    /// into that filtered order, not into `repos` itself, since the two can
+    /// disagree once a search narrows the list.
+    repo_list_cursor: Option<usize>,
+    repo_list_focus: FocusHandle,
 
     /// The repo the user drilled into from `RepoList`. Cleared whenever
     /// `set_screen` lands anywhere but `RepoDetail`.
@@ -216,17 +262,26 @@ pub struct HelmPanel {
 
     /// Populated by [`Self::load_branches`] for the `Branches` screen.
     branches: Vec<Branch>,
+    branches_list_cursor: Option<usize>,
+    branches_list_focus: FocusHandle,
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
     collaborators: Vec<Collaborator>,
+    collaborators_list_cursor: Option<usize>,
+    collaborators_list_focus: FocusHandle,
 
     // Repo-detail tab caches (Issues/Pulls/Releases/Packages/Traffic) —
     // loaded on screen entry and kept while drilling; `set_screen` clears
     // them along with `selected_repo` when leaving the repo-drilled screens.
     issues: Vec<Issue>,
     issues_filter: String,
+    /// Row `up`/`down`/`enter` act on, within `issues`.
+    issues_list_cursor: Option<usize>,
+    issues_list_focus: FocusHandle,
     pulls: Vec<Pull>,
     pulls_filter: String,
+    pulls_list_cursor: Option<usize>,
+    pulls_list_focus: FocusHandle,
     /// The issue/PR drilled into from `Issues`/`Pulls` — mutually exclusive
     /// (only one of the two is ever `Some` at a time), cleared whenever
     /// `set_screen` lands anywhere but `IssueDetail`/`PrDetail`. Same
@@ -240,22 +295,43 @@ pub struct HelmPanel {
     detail_comments: Vec<Comment>,
     detail_comments_state: LoadState,
     releases: Vec<Release>,
+    releases_list_cursor: Option<usize>,
+    releases_list_focus: FocusHandle,
     packages: Vec<Package>,
+    packages_list_cursor: Option<usize>,
+    packages_list_focus: FocusHandle,
     package_versions: Vec<PackageVersion>,
     package_versions_error: Option<String>,
     expanded_package: Option<String>,
     traffic: Option<RepoTraffic>,
     commits: Vec<CommitSummary>,
+    commits_list_cursor: Option<usize>,
+    commits_list_focus: FocusHandle,
     workflow_runs: Vec<WorkflowRun>,
+    workflow_runs_list_cursor: Option<usize>,
+    workflow_runs_list_focus: FocusHandle,
     deployments: Vec<Deployment>,
+    deployments_list_cursor: Option<usize>,
+    deployments_list_focus: FocusHandle,
     tags: Vec<Tag>,
+    tags_list_cursor: Option<usize>,
+    tags_list_focus: FocusHandle,
     dependabot_alerts: Vec<serde_json::Value>,
+    dependabot_list_cursor: Option<usize>,
+    dependabot_list_focus: FocusHandle,
     secret_scanning_alerts: Vec<serde_json::Value>,
+    secret_scanning_list_cursor: Option<usize>,
+    secret_scanning_list_focus: FocusHandle,
 
     // Pending repo invitations shown on the Profile screen's Invitations
     // screen — `repo_invitation_count` above is just the badge for that row.
     invitations: Vec<RepoInvitation>,
-    /// Pending org invitations, shown on the same Invitations screen.
+    invitations_list_cursor: Option<usize>,
+    invitations_list_focus: FocusHandle,
+    /// Pending org invitations, shown on the same Invitations screen — listed
+    /// above `invitations` with no visual separator, so `invitations_list_cursor`
+    /// covers both as one combined, index-shared list (org invitations first,
+    /// matching display order) rather than each getting its own cursor.
     org_invitations: Vec<OrgInvitation>,
 
     /// Another user's public profile, viewed via [`Self::open_user_profile`]
@@ -890,12 +966,18 @@ impl HelmPanel {
                 account: String::new(),
                 scopes: Vec::new(),
                 org_logins: Vec::new(),
+                org_list_cursor: None,
+                org_list_focus: cx.focus_handle(),
                 user: None,
                 repo_invitation_count: 0,
                 selected_org: None,
                 org_detail: None,
+                profile_menu_cursor: None,
+                profile_menu_focus: cx.focus_handle(),
                 repos: Vec::new(),
                 repo_search,
+                repo_list_cursor: None,
+                repo_list_focus: cx.focus_handle(),
                 selected_repo: None,
                 clone_url_copied: false,
                 cloning: false,
@@ -905,28 +987,54 @@ impl HelmPanel {
                 clone_target_dir: None,
                 workspace,
                 branches: Vec::new(),
+                branches_list_cursor: None,
+                branches_list_focus: cx.focus_handle(),
                 collaborators: Vec::new(),
+                collaborators_list_cursor: None,
+                collaborators_list_focus: cx.focus_handle(),
                 issues: Vec::new(),
                 issues_filter: "open".into(),
+                issues_list_cursor: None,
+                issues_list_focus: cx.focus_handle(),
                 pulls: Vec::new(),
                 pulls_filter: "open".into(),
+                pulls_list_cursor: None,
+                pulls_list_focus: cx.focus_handle(),
                 selected_issue: None,
                 selected_pr: None,
                 detail_comments: Vec::new(),
                 detail_comments_state: LoadState::Idle,
                 releases: Vec::new(),
+                releases_list_cursor: None,
+                releases_list_focus: cx.focus_handle(),
                 packages: Vec::new(),
+                packages_list_cursor: None,
+                packages_list_focus: cx.focus_handle(),
                 package_versions: Vec::new(),
                 package_versions_error: None,
                 expanded_package: None,
                 traffic: None,
                 commits: Vec::new(),
+                commits_list_cursor: None,
+                commits_list_focus: cx.focus_handle(),
                 workflow_runs: Vec::new(),
+                workflow_runs_list_cursor: None,
+                workflow_runs_list_focus: cx.focus_handle(),
                 deployments: Vec::new(),
+                deployments_list_cursor: None,
+                deployments_list_focus: cx.focus_handle(),
                 tags: Vec::new(),
+                tags_list_cursor: None,
+                tags_list_focus: cx.focus_handle(),
                 dependabot_alerts: Vec::new(),
+                dependabot_list_cursor: None,
+                dependabot_list_focus: cx.focus_handle(),
                 secret_scanning_alerts: Vec::new(),
+                secret_scanning_list_cursor: None,
+                secret_scanning_list_focus: cx.focus_handle(),
                 invitations: Vec::new(),
+                invitations_list_cursor: None,
+                invitations_list_focus: cx.focus_handle(),
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };
@@ -1510,10 +1618,17 @@ impl HelmPanel {
         let gh_state = self.gh_state.clone();
         let full_name = repo.full_name.clone();
         let target_for_gh = target_path.clone();
+        let repo_name = repo.name.clone();
         cx.spawn_in(window, async move |this, cx| {
+            // `run_npm: true` — installs dependencies as Phase 2 of the same
+            // clone, streamed into this same progress view (`CloneEvent::NpmStart`
+            // switches the "Cloning…" label, see the modal's render) instead of
+            // leaving it to `npm_bootstrap`'s separate post-open prompt. By the
+            // time the new workspace opens, `node_modules` already exists, so
+            // that prompt's own `check_worktree` guard skips it there.
             let result =
                 on_tokio(
-                    async move { gh_clone_repo(full_name, target_for_gh, false, &gh_state).await },
+                    async move { gh_clone_repo(full_name, target_for_gh, true, &gh_state).await },
                 )
                 .await;
             this.update_in(cx, |this, window, cx| {
@@ -1522,6 +1637,7 @@ impl HelmPanel {
                     Ok(()) => {
                         this.clone_lines
                             .push(format!("Cloned repository to {target_path}"));
+                        this.notify(format!("Cloned {repo_name} and installed dependencies"), cx);
                         this.workspace
                             .update(cx, |workspace, cx| {
                                 workspace
@@ -2683,41 +2799,85 @@ impl HelmPanel {
         }])
         .collect();
 
+        let len = rows.len();
+        let cursor = self.profile_menu_cursor;
+        let row_ids: Vec<&'static str> = rows.iter().map(|row| row.id).collect();
         v_flex()
             .child(stats_row)
             .child(div().h_px().w_full().bg(border))
-            .child(v_flex().py_1().children(rows.into_iter().map(|row| {
-                let hint = row.hint;
-                let id = row.id;
-                ListItem::new(format!("helm-profile-{}", row.id))
-                    .child(div().text_color(foreground).child(row.label))
-                    .suffix(move |_, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .children(
-                                hint.clone()
-                                    .map(|hint| div().text_color(muted_foreground).child(hint)),
-                            )
-                            .child(
-                                Icon::new(IconName::ChevronRight)
-                                    .xsmall()
-                                    .text_color(muted_foreground),
-                            )
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| match id {
-                        "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
-                        "repos" => this.open_repo_list(cx),
-                        "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
-                        "edit-profile" => this.open_edit_profile_dialog(window, cx),
-                        // No per-account security API is wired up (Dependabot
-                        // /secret-scanning alerts, elsewhere in this panel,
-                        // are repo-scoped, not account-scoped) — opens
-                        // GitHub's own settings page instead of a dead click.
-                        "account-security" => cx.open_url("https://github.com/settings/security"),
-                        _ => {}
+            .child(
+                v_flex()
+                    .id("helm-profile-menu")
+                    .track_focus(&self.profile_menu_focus)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        window.focus(&this.profile_menu_focus, cx);
                     }))
-            })))
+                    .key_context("HelmRowList")
+                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                        this.profile_menu_cursor = step_selected(this.profile_menu_cursor, len, true);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                        this.profile_menu_cursor = step_selected(this.profile_menu_cursor, len, false);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
+                        let Some(&id) = this.profile_menu_cursor.and_then(|ix| row_ids.get(ix)) else {
+                            return;
+                        };
+                        match id {
+                            "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
+                            "repos" => this.open_repo_list(cx),
+                            "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
+                            "edit-profile" => this.open_edit_profile_dialog(window, cx),
+                            "account-security" => {
+                                cx.open_url("https://github.com/settings/security")
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .py_1()
+                    .children(rows.into_iter().enumerate().map(|(ix, row)| {
+                        let hint = row.hint;
+                        let id = row.id;
+                        ListItem::new(format!("helm-profile-{}", row.id))
+                            .selected(cursor == Some(ix))
+                            .child(div().text_color(foreground).child(row.label))
+                            .suffix(move |_, _| {
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(
+                                        hint.clone()
+                                            .map(|hint| div().text_color(muted_foreground).child(hint)),
+                                    )
+                                    .child(
+                                        Icon::new(IconName::ChevronRight)
+                                            .xsmall()
+                                            .text_color(muted_foreground),
+                                    )
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.profile_menu_cursor = Some(ix);
+                                match id {
+                                    "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
+                                    "repos" => this.open_repo_list(cx),
+                                    "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
+                                    "edit-profile" => this.open_edit_profile_dialog(window, cx),
+                                    // No per-account security API is wired up
+                                    // (Dependabot/secret-scanning alerts,
+                                    // elsewhere in this panel, are
+                                    // repo-scoped, not account-scoped) —
+                                    // opens GitHub's own settings page
+                                    // instead of a dead click.
+                                    "account-security" => {
+                                        cx.open_url("https://github.com/settings/security")
+                                    }
+                                    _ => {}
+                                }
+                            }))
+                    })),
+            )
             .into_any_element()
     }
 
@@ -3218,20 +3378,45 @@ impl HelmPanel {
                 .into_any_element();
         }
 
+        let len = self.org_logins.len();
+        let cursor = self.org_list_cursor;
         v_flex()
+            .id("helm-org-list")
+            .track_focus(&self.org_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.org_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.org_list_cursor = step_selected(this.org_list_cursor, len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.org_list_cursor = step_selected(this.org_list_cursor, len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(org) = this.org_list_cursor.and_then(|ix| this.org_logins.get(ix)).cloned()
+                else {
+                    return;
+                };
+                this.select_org(org, cx);
+            }))
             .py_1()
-            .children(self.org_logins.clone().into_iter().map(|org| {
+            .children(self.org_logins.clone().into_iter().enumerate().map(|(ix, org)| {
                 let click_org = org.clone();
                 ListItem::new(format!("helm-org-{org}"))
+                    .selected(cursor == Some(ix))
                     .child(div().text_color(foreground).child(org))
                     .suffix(move |_, _| {
                         Icon::new(IconName::ChevronRight)
                             .xsmall()
                             .text_color(muted_foreground)
                     })
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_org(click_org.clone(), cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.org_list_cursor = Some(ix);
+                        this.select_org(click_org.clone(), cx)
+                    }))
             }))
             .into_any_element()
     }
@@ -3462,12 +3647,44 @@ impl HelmPanel {
                 )
                 .into_any_element()
         } else {
+            let len = filtered.len();
+            let cursor = self.repo_list_cursor;
+            // Captured for `OpenSelectedRow` below rather than re-reading
+            // `self.repos`: `repo_list_cursor` indexes this filtered order
+            // (per its own doc comment), and re-filtering `self.repos` by a
+            // *stale* `self.repo_search` value inside the action handler —
+            // run on a later keypress, against whatever the search box says
+            // *then* — would disagree with what's actually on screen now.
+            let filtered_for_open = filtered.clone();
             v_flex()
+                .id("helm-repo-list")
+                .track_focus(&self.repo_list_focus)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    window.focus(&this.repo_list_focus, cx);
+                }))
+                .key_context("HelmRowList")
+                .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                    this.repo_list_cursor = step_selected(this.repo_list_cursor, len, true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                    this.repo_list_cursor = step_selected(this.repo_list_cursor, len, false);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                    let Some(repo) =
+                        this.repo_list_cursor.and_then(|ix| filtered_for_open.get(ix)).cloned()
+                    else {
+                        return;
+                    };
+                    this.select_repo(repo, cx);
+                }))
                 .py_1()
-                .children(filtered.into_iter().map(|repo| {
+                .children(filtered.into_iter().enumerate().map(|(ix, repo)| {
                     let vis = repo_vis_label(&repo);
                     let click_repo = repo.clone();
                     ListItem::new(format!("helm-repo-{}", repo.id))
+                        .selected(cursor == Some(ix))
                         .child(div().text_color(foreground).child(repo.name.clone()))
                         .suffix(move |_, _| {
                             h_flex()
@@ -3481,6 +3698,7 @@ impl HelmPanel {
                                 )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.repo_list_cursor = Some(ix);
                             this.select_repo(click_repo.clone(), cx)
                         }))
                 }))
@@ -4038,12 +4256,32 @@ impl HelmPanel {
             .map(|r| r.default_branch.clone())
             .unwrap_or_default();
 
+        // Read-only list — branch rows have no click action, so this wires
+        // up/down + a selection highlight only, no `OpenSelectedRow` (Enter
+        // falls through as a no-op, matching what clicking a row already did).
+        let len = self.branches.len();
+        let cursor = self.branches_list_cursor;
         v_flex()
+            .id("helm-branches-list")
+            .track_focus(&self.branches_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.branches_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, false);
+                cx.notify();
+            }))
             .py_1()
-            .children(self.branches.iter().map(|branch| {
+            .children(self.branches.iter().enumerate().map(|(ix, branch)| {
                 let is_default = branch.name == default_branch;
                 let protected = branch.protected;
                 ListItem::new(format!("helm-branch-{}", branch.name))
+                    .selected(cursor == Some(ix))
                     .child(div().text_color(foreground).child(branch.name.clone()))
                     .suffix(move |_, _| {
                         h_flex()
@@ -4176,16 +4414,48 @@ impl HelmPanel {
         }
 
         let view = cx.entity();
+        let collab_len = self.collaborators.len();
+        let collab_cursor = self.collaborators_list_cursor;
 
         v_flex()
             .child(header)
             .child(div().h_px().w_full().bg(border))
-            .child(v_flex().py_1().children(self.collaborators.iter().map(|collab| {
-                let login = collab.login.clone();
-                let role_name = collab.role_name.clone();
+            .child(
+                v_flex()
+                    .id("helm-collaborators-list")
+                    .track_focus(&self.collaborators_list_focus)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        window.focus(&this.collaborators_list_focus, cx);
+                    }))
+                    .key_context("HelmRowList")
+                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                        this.collaborators_list_cursor =
+                            step_selected(this.collaborators_list_cursor, collab_len, true);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                        this.collaborators_list_cursor =
+                            step_selected(this.collaborators_list_cursor, collab_len, false);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                        let Some(login) = this
+                            .collaborators_list_cursor
+                            .and_then(|ix| this.collaborators.get(ix))
+                            .map(|c| c.login.clone())
+                        else {
+                            return;
+                        };
+                        this.open_user_profile(login, cx);
+                    }))
+                    .py_1()
+                    .children(self.collaborators.iter().enumerate().map(|(ix, collab)| {
+                        let login = collab.login.clone();
+                        let role_name = collab.role_name.clone();
 
-                ListItem::new(format!("helm-collaborator-{}", collab.id))
-                    .child(
+                        ListItem::new(format!("helm-collaborator-{}", collab.id))
+                            .selected(collab_cursor == Some(ix))
+                            .child(
                         h_flex()
                             .items_center()
                             .gap_2()
@@ -4255,9 +4525,11 @@ impl HelmPanel {
                         }
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.collaborators_list_cursor = Some(ix);
                         this.open_user_profile(login.clone(), cx);
                     }))
-            })))
+                    }))
+            )
             .into_any_element()
     }
 
@@ -4391,10 +4663,32 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        v_flex()
-            .child(filter_row)
-            .child(div().h_px().w_full().bg(cx.theme().border))
-            .child(v_flex().py_1().children(self.issues.iter().map(|issue| {
+        let issues_len = self.issues.len();
+        let issues_cursor = self.issues_list_cursor;
+        let issues_list = v_flex()
+            .id("helm-issues-list")
+            .track_focus(&self.issues_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.issues_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.issues_list_cursor = step_selected(this.issues_list_cursor, issues_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.issues_list_cursor = step_selected(this.issues_list_cursor, issues_len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(issue) = this.issues_list_cursor.and_then(|ix| this.issues.get(ix)).cloned()
+                else {
+                    return;
+                };
+                this.open_issue_detail(issue, cx);
+            }))
+            .py_1()
+            .children(self.issues.iter().enumerate().map(|(ix, issue)| {
                 let number = issue.number;
                 let title = issue.title.clone();
                 let state = if issue.state == "closed" {
@@ -4411,6 +4705,7 @@ impl HelmPanel {
                 let labels = issue.labels.clone();
                 let issue_for_click = issue.clone();
                 ListItem::new(format!("helm-issue-{number}"))
+                    .selected(issues_cursor == Some(ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -4472,9 +4767,15 @@ impl HelmPanel {
                             )
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.issues_list_cursor = Some(ix);
                         this.open_issue_detail(issue_for_click.clone(), cx);
                     }))
-            })))
+            }));
+
+        v_flex()
+            .child(filter_row)
+            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(issues_list)
             .into_any_element()
     }
 
@@ -4587,10 +4888,32 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        v_flex()
-            .child(filter_row)
-            .child(div().h_px().w_full().bg(cx.theme().border))
-            .child(v_flex().py_1().children(self.pulls.iter().map(|pr| {
+        let pulls_len = self.pulls.len();
+        let pulls_cursor = self.pulls_list_cursor;
+        let pulls_list = v_flex()
+            .id("helm-pulls-list")
+            .track_focus(&self.pulls_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.pulls_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.pulls_list_cursor = step_selected(this.pulls_list_cursor, pulls_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.pulls_list_cursor = step_selected(this.pulls_list_cursor, pulls_len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(pr) = this.pulls_list_cursor.and_then(|ix| this.pulls.get(ix)).cloned()
+                else {
+                    return;
+                };
+                this.open_pr_detail(pr, cx);
+            }))
+            .py_1()
+            .children(self.pulls.iter().enumerate().map(|(ix, pr)| {
                 let number = pr.number;
                 let title = pr.title.clone();
                 let merged = pr.merged;
@@ -4613,6 +4936,7 @@ impl HelmPanel {
                 };
                 let pr_for_click = pr.clone();
                 ListItem::new(format!("helm-pr-{number}"))
+                    .selected(pulls_cursor == Some(ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -4659,9 +4983,15 @@ impl HelmPanel {
                             )
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pulls_list_cursor = Some(ix);
                         this.open_pr_detail(pr_for_click.clone(), cx);
                     }))
-            })))
+            }));
+
+        v_flex()
+            .child(filter_row)
+            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(pulls_list)
             .into_any_element()
     }
 
@@ -5076,10 +5406,35 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        v_flex()
-            .child(header)
-            .child(div().h_px().w_full().bg(cx.theme().border))
-            .child(v_flex().py_1().children(self.releases.iter().map(|release| {
+        let releases_len = self.releases.len();
+        let releases_cursor = self.releases_list_cursor;
+        let releases_urls: Vec<String> =
+            self.releases.iter().map(|r| r.html_url.clone()).collect();
+        let releases_list = v_flex()
+            .id("helm-releases-list")
+            .track_focus(&self.releases_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.releases_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.releases_list_cursor = step_selected(this.releases_list_cursor, releases_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.releases_list_cursor =
+                    step_selected(this.releases_list_cursor, releases_len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(url) = this.releases_list_cursor.and_then(|ix| releases_urls.get(ix))
+                else {
+                    return;
+                };
+                cx.open_url(url);
+            }))
+            .py_1()
+            .children(self.releases.iter().enumerate().map(|(ix, release)| {
                 let tag = release.tag_name.clone();
                 let title = release
                     .name
@@ -5098,6 +5453,7 @@ impl HelmPanel {
                 let asset_count = release.assets.len();
                 let url = release.html_url.clone();
                 ListItem::new(format!("helm-release-{}", release.tag_name))
+                    .selected(releases_cursor == Some(ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -5161,8 +5517,16 @@ impl HelmPanel {
                             .xsmall()
                             .text_color(muted_foreground)
                     })
-                    .on_click(move |_, _, cx| cx.open_url(&url))
-            })))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.releases_list_cursor = Some(ix);
+                        cx.open_url(&url);
+                    }))
+            }));
+
+        v_flex()
+            .child(header)
+            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(releases_list)
             .into_any_element()
     }
 
@@ -5236,12 +5600,39 @@ impl HelmPanel {
         let expanded = self.expanded_package.clone();
         let version_error = self.package_versions_error.clone();
         let view = cx.entity();
+        let packages_len = self.packages.len();
+        let packages_cursor = self.packages_list_cursor;
+        let packages_for_open = self.packages.clone();
+        let owner_for_open = owner.clone();
 
         v_flex()
+            .id("helm-packages-list")
+            .track_focus(&self.packages_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.packages_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.packages_list_cursor = step_selected(this.packages_list_cursor, packages_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.packages_list_cursor =
+                    step_selected(this.packages_list_cursor, packages_len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(pkg) = this.packages_list_cursor.and_then(|ix| packages_for_open.get(ix))
+                else {
+                    return;
+                };
+                this.toggle_package_versions(owner_for_open.clone(), pkg.clone(), cx);
+            }))
             .py_1()
-            .children(self.packages.iter().map(|pkg| {
+            .children(self.packages.iter().enumerate().map(|(ix, pkg)| {
                 let pkg_name = pkg.name.clone();
                 let is_expanded = expanded.as_deref() == Some(pkg_name.as_str());
+                let is_selected = packages_cursor == Some(ix);
                 let pkg_type = pkg.package_type.clone();
                 let pkg_vis = pkg.visibility.clone();
                 let pkg_desc = pkg.description.clone();
@@ -5250,6 +5641,7 @@ impl HelmPanel {
                 let view = view.clone();
 
                 let row = ListItem::new(format!("helm-package-{pkg_name}"))
+                    .selected(is_selected)
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -5310,6 +5702,7 @@ impl HelmPanel {
                         let package_clone = package_clone.clone();
                         move |_, _window, cx| {
                             view.update(cx, |this, cx| {
+                                this.packages_list_cursor = Some(ix);
                                 this.toggle_package_versions(
                                     owner_clone.clone(),
                                     package_clone.clone(),
@@ -5652,10 +6045,29 @@ impl HelmPanel {
 
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
+        // Read-only list — no click action, so up/down + a selection
+        // highlight only (see `render_branches`'s identical reasoning).
+        let commits_len = self.commits.len();
+        let commits_cursor = self.commits_list_cursor;
 
         v_flex()
+            .id("helm-commits-list")
+            .track_focus(&self.commits_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.commits_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.commits_list_cursor = step_selected(this.commits_list_cursor, commits_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.commits_list_cursor =
+                    step_selected(this.commits_list_cursor, commits_len, false);
+                cx.notify();
+            }))
             .py_1()
-            .children(self.commits.iter().map(|commit| {
+            .children(self.commits.iter().enumerate().map(|(ix, commit)| {
                 let short_sha: String = commit.sha.chars().take(7).collect();
                 let author = commit
                     .author
@@ -5669,6 +6081,7 @@ impl HelmPanel {
                     .unwrap_or_default();
 
                 ListItem::new(format!("helm-commit-{}", commit.sha))
+                    .selected(commits_cursor == Some(ix))
                     .child(
                         h_flex()
                             .items_center()
@@ -5710,10 +6123,35 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let success = cx.theme().success;
         let danger = cx.theme().danger;
+        let runs_len = self.workflow_runs.len();
+        let runs_cursor = self.workflow_runs_list_cursor;
+        let run_urls: Vec<String> = self.workflow_runs.iter().map(|r| r.html_url.clone()).collect();
 
         v_flex()
+            .id("helm-workflow-runs-list")
+            .track_focus(&self.workflow_runs_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.workflow_runs_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.workflow_runs_list_cursor =
+                    step_selected(this.workflow_runs_list_cursor, runs_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.workflow_runs_list_cursor =
+                    step_selected(this.workflow_runs_list_cursor, runs_len, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
+                let Some(url) = this.workflow_runs_list_cursor.and_then(|ix| run_urls.get(ix)) else {
+                    return;
+                };
+                cx.open_url(url);
+            }))
             .py_1()
-            .children(self.workflow_runs.iter().map(|run| {
+            .children(self.workflow_runs.iter().enumerate().map(|(ix, run)| {
                 let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
                 let color = match status_label.as_str() {
                     "success" => success,
@@ -5723,6 +6161,7 @@ impl HelmPanel {
                 let url = run.html_url.clone();
 
                 ListItem::new(format!("helm-run-{}", run.id))
+                    .selected(runs_cursor == Some(ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -5743,7 +6182,10 @@ impl HelmPanel {
                     .suffix(move |_, _| {
                         div().text_xs().text_color(color).child(status_label.clone())
                     })
-                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workflow_runs_list_cursor = Some(ix);
+                        cx.open_url(&url);
+                    }))
                     .into_any_element()
             }))
             .into_any_element()
@@ -5764,12 +6206,31 @@ impl HelmPanel {
 
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
+        let deployments_len = self.deployments.len();
+        let deployments_cursor = self.deployments_list_cursor;
 
         v_flex()
+            .id("helm-deployments-list")
+            .track_focus(&self.deployments_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.deployments_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.deployments_list_cursor =
+                    step_selected(this.deployments_list_cursor, deployments_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.deployments_list_cursor =
+                    step_selected(this.deployments_list_cursor, deployments_len, false);
+                cx.notify();
+            }))
             .py_1()
-            .children(self.deployments.iter().map(|dep| {
+            .children(self.deployments.iter().enumerate().map(|(ix, dep)| {
                 let short_sha: String = dep.sha.chars().take(7).collect();
                 ListItem::new(format!("helm-deployment-{}", dep.id))
+                    .selected(deployments_cursor == Some(ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -5810,12 +6271,29 @@ impl HelmPanel {
 
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
+        let tags_len = self.tags.len();
+        let tags_cursor = self.tags_list_cursor;
 
         v_flex()
+            .id("helm-tags-list")
+            .track_focus(&self.tags_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.tags_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.tags_list_cursor = step_selected(this.tags_list_cursor, tags_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.tags_list_cursor = step_selected(this.tags_list_cursor, tags_len, false);
+                cx.notify();
+            }))
             .py_1()
-            .children(self.tags.iter().map(|tag| {
+            .children(self.tags.iter().enumerate().map(|(ix, tag)| {
                 let short_sha: String = tag.commit.sha.chars().take(7).collect();
                 ListItem::new(format!("helm-tag-{}", tag.name))
+                    .selected(tags_cursor == Some(ix))
                     .child(
                         div()
                             .text_sm()
@@ -5872,6 +6350,11 @@ impl HelmPanel {
                 .child(title.to_string())
         };
 
+        // Both are read-only (no click action), so each gets its own
+        // up/down + selection highlight and no `OpenSelectedRow` handler,
+        // same reasoning as `render_branches`.
+        let dependabot_len = self.dependabot_alerts.len();
+        let dependabot_cursor = self.dependabot_list_cursor;
         let dependabot_rows = self.dependabot_alerts.iter().enumerate().map(|(i, alert)| {
             let package = alert
                 .pointer("/dependency/package/name")
@@ -5889,6 +6372,7 @@ impl HelmPanel {
                 .unwrap_or("")
                 .to_string();
             ListItem::new(format!("helm-dependabot-{i}"))
+                .selected(dependabot_cursor == Some(i))
                 .child(div().text_sm().text_color(foreground).child(package))
                 .suffix(move |_, _| {
                     div()
@@ -5898,6 +6382,8 @@ impl HelmPanel {
                 })
         });
 
+        let secret_len = self.secret_scanning_alerts.len();
+        let secret_cursor = self.secret_scanning_list_cursor;
         let secret_rows = self.secret_scanning_alerts.iter().enumerate().map(|(i, alert)| {
             let secret_type = alert
                 .get("secret_type_display_name")
@@ -5911,6 +6397,7 @@ impl HelmPanel {
                 .unwrap_or("")
                 .to_string();
             ListItem::new(format!("helm-secret-scanning-{i}"))
+                .selected(secret_cursor == Some(i))
                 .child(div().text_sm().text_color(foreground).child(secret_type))
                 .suffix(move |_, _| div().text_xs().text_color(muted_foreground).child(state.clone()))
         });
@@ -5926,7 +6413,25 @@ impl HelmPanel {
                     .child("No open Dependabot alerts")
                     .into_any_element()
             } else {
-                v_flex().children(dependabot_rows).into_any_element()
+                v_flex()
+                    .id("helm-dependabot-list")
+                    .track_focus(&self.dependabot_list_focus)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        window.focus(&this.dependabot_list_focus, cx);
+                    }))
+                    .key_context("HelmRowList")
+                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                        this.dependabot_list_cursor =
+                            step_selected(this.dependabot_list_cursor, dependabot_len, true);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                        this.dependabot_list_cursor =
+                            step_selected(this.dependabot_list_cursor, dependabot_len, false);
+                        cx.notify();
+                    }))
+                    .children(dependabot_rows)
+                    .into_any_element()
             })
             .child(div().h_px().w_full().bg(border))
             .child(section_label("Secret scanning alerts"))
@@ -5939,7 +6444,25 @@ impl HelmPanel {
                     .child("No open secret scanning alerts")
                     .into_any_element()
             } else {
-                v_flex().children(secret_rows).into_any_element()
+                v_flex()
+                    .id("helm-secret-scanning-list")
+                    .track_focus(&self.secret_scanning_list_focus)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        window.focus(&this.secret_scanning_list_focus, cx);
+                    }))
+                    .key_context("HelmRowList")
+                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                        this.secret_scanning_list_cursor =
+                            step_selected(this.secret_scanning_list_cursor, secret_len, true);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                        this.secret_scanning_list_cursor =
+                            step_selected(this.secret_scanning_list_cursor, secret_len, false);
+                        cx.notify();
+                    }))
+                    .children(secret_rows)
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -6090,7 +6613,23 @@ impl HelmPanel {
 
         let view = cx.entity();
 
-        let org_rows = self.org_invitations.iter().map(|inv| {
+        // Org invitations are listed before repo invitations with no visual
+        // separator between them, so `invitations_list_cursor` indexes this
+        // one combined, display-order list rather than either `Vec` alone.
+        enum Invite {
+            Org(String),
+            Repo(u64),
+        }
+        let combined: Vec<Invite> = self
+            .org_invitations
+            .iter()
+            .map(|inv| Invite::Org(inv.organization.login.clone()))
+            .chain(self.invitations.iter().map(|inv| Invite::Repo(inv.id)))
+            .collect();
+        let combined_len = combined.len();
+        let cursor = self.invitations_list_cursor;
+
+        let org_rows = self.org_invitations.iter().enumerate().map(|(ix, inv)| {
             let org_login = inv.organization.login.clone();
             let role = inv.role.clone();
             let org_accept = org_login.clone();
@@ -6099,6 +6638,7 @@ impl HelmPanel {
             let view_decline = view.clone();
 
             ListItem::new(format!("helm-org-invitation-{}", inv.organization.login))
+                .selected(cursor == Some(ix))
                 .child(
                     v_flex()
                         .gap_0p5()
@@ -6165,10 +6705,61 @@ impl HelmPanel {
                 })
         });
 
+        let org_count = self.org_invitations.len();
+        let combined_for_open = combined;
+        let combined_for_act: Vec<(bool, String)> = self
+            .org_invitations
+            .iter()
+            .map(|inv| (true, inv.organization.login.clone()))
+            .chain(self.invitations.iter().map(|inv| (false, inv.id.to_string())))
+            .collect();
+
         v_flex()
+            .id("helm-invitations-list")
+            .track_focus(&self.invitations_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                window.focus(&this.invitations_list_focus, cx);
+            }))
+            .key_context("HelmRowList")
+            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
+                this.invitations_list_cursor =
+                    step_selected(this.invitations_list_cursor, combined_len, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
+                this.invitations_list_cursor =
+                    step_selected(this.invitations_list_cursor, combined_len, false);
+                cx.notify();
+            }))
+            // Enter accepts the selected row's invitation...
+            .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
+                let Some(invite) = this.invitations_list_cursor.and_then(|ix| combined_for_open.get(ix))
+                else {
+                    return;
+                };
+                match invite {
+                    Invite::Org(login) => this.handle_accept_org_invitation(login.clone(), window, cx),
+                    Invite::Repo(id) => this.handle_accept_invitation(*id, window, cx),
+                }
+            }))
+            // ...Space declines it — the Invitations screen's rows have no
+            // separate "view" action for Enter to be the safe default of, so
+            // Accept/Decline (its only two actions) split Enter/Space instead.
+            .on_action(cx.listener(move |this, _: &ActSelectedRow, window, cx| {
+                let Some((is_org, key)) =
+                    this.invitations_list_cursor.and_then(|ix| combined_for_act.get(ix))
+                else {
+                    return;
+                };
+                if *is_org {
+                    this.handle_decline_org_invitation(key.clone(), window, cx);
+                } else if let Ok(id) = key.parse() {
+                    this.handle_decline_invitation(id, window, cx);
+                }
+            }))
             .py_1()
             .children(org_rows)
-            .children(self.invitations.iter().map(|inv| {
+            .children(self.invitations.iter().enumerate().map(|(ix, inv)| {
                 let full_name = inv.repository.full_name.clone();
                 let private = inv.repository.private;
                 let inviter = inv.inviter.login.clone();
@@ -6179,6 +6770,7 @@ impl HelmPanel {
                 let view_decline = view.clone();
 
                 ListItem::new(format!("helm-invitation-{}", inv.id))
+                    .selected(cursor == Some(org_count + ix))
                     .child(
                         v_flex()
                             .gap_0p5()
@@ -6383,6 +6975,20 @@ fn labeled_field(
 
 /// Mirrors the old TS `visLabel`: archived beats internal beats
 /// private/public.
+/// Moves `selected` one row up (`forward: false`) or down (`forward: true`)
+/// within a `len`-row list, wrapping at both ends — matches
+/// `gpui_component::table::TableState`'s default `loop_selection` behavior
+/// — and starting from the top row on the very first press. Same helper as
+/// `npm_manager_panel`/`nuget_manager_panel`/`python_manager_panel::pages`'s
+/// own `step_selected`.
+fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let ix = selected.unwrap_or(0);
+    Some(if forward { (ix + 1) % len } else { (ix + len - 1) % len })
+}
+
 fn repo_vis_label(repo: &Repo) -> &'static str {
     if repo.archived {
         "archived"

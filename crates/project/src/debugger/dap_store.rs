@@ -7,7 +7,7 @@ use super::{
 use remote::Interactive;
 
 use crate::{
-    InlayHint, InlayHintLabel, ProjectEnvironment, ResolveState,
+    InlayHint, InlayHintLabel, InlayHintTooltip, ProjectEnvironment, ResolveState,
     debugger::session::SessionQuirks,
     project_settings::{DapBinary, ProjectSettings},
     worktree_store::WorktreeStore,
@@ -690,7 +690,7 @@ impl DapStore {
                             kind: Some(InlayHintKind::Type),
                             padding_left: false,
                             padding_right: false,
-                            tooltip: None,
+                            tooltip: Some(InlayHintTooltip::String(variable.value.clone())),
                             resolve_state: ResolveState::Resolved,
                         });
                     }
@@ -707,11 +707,13 @@ impl DapStore {
                         if let Some(response) = eval_task.await.log_err() {
                             inlay_hints.push(InlayHint {
                                 position,
-                                label: InlayHintLabel::String(format_value(response.result)),
+                                label: InlayHintLabel::String(format_value(
+                                    response.result.clone(),
+                                )),
                                 kind: Some(InlayHintKind::Type),
                                 padding_left: false,
                                 padding_right: false,
-                                tooltip: None,
+                                tooltip: Some(InlayHintTooltip::String(response.result)),
                                 resolve_state: ResolveState::Resolved,
                             });
                         };

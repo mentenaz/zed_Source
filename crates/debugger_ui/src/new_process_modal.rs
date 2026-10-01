@@ -28,7 +28,12 @@ use ui::{
     prelude::*,
 };
 use ui_input::InputField;
-use util::{ResultExt, debug_panic, rel_path::RelPath, shell::ShellKind};
+use util::{
+    ResultExt, debug_panic,
+    rel_path::RelPath,
+    shell::{Shell, ShellKind},
+    shell_builder::ShellBuilder,
+};
 use workspace::{ModalView, Workspace, notifications::DetachAndPromptErr, pane};
 
 use crate::{
@@ -865,35 +870,9 @@ impl ConfigureMode {
             Some(PathBuf::from(cwd_text))
         };
 
-        if cfg!(windows) {
-            return task::LaunchRequest {
-                program: self.program.read(cx).text(cx),
-                cwd,
-                args: Default::default(),
-                env: Default::default(),
-            };
-        }
         let command = self.program.read(cx).text(cx);
-        let mut args = ShellKind::Posix
-            .split(&command)
-            .into_iter()
-            .flatten()
-            .peekable();
-        let mut env = FxHashMap::default();
-        while args.peek().is_some_and(|arg| arg.contains('=')) {
-            let arg = args.next().unwrap();
-            let (lhs, rhs) = arg.split_once('=').unwrap();
-            env.insert(lhs.to_string(), rhs.to_string());
-        }
-
-        let program = if let Some(program) = args.next() {
-            program
-        } else {
-            env = FxHashMap::default();
-            command
-        };
-
-        let args = args.collect::<Vec<_>>();
+        let (program, args, env) =
+            resolve_launch_command(command, cfg!(windows), WindowsSplitting::No);
 
         task::LaunchRequest {
             program,
@@ -974,7 +953,10 @@ impl AttachMode {
         let definition = ZedDebugConfig {
             adapter: debugger.unwrap_or(DebugAdapterName("".into())).0,
             label: "Attach New Session Setup".into(),
-            request: dap::DebugRequest::Attach(task::AttachRequest { process_id: None }),
+            request: dap::DebugRequest::Attach(task::AttachRequest {
+                process_id: None,
+                port: None,
+            }),
             stop_on_entry: Some(false),
         };
         let attach_picker = cx.new(|cx| {
@@ -997,7 +979,10 @@ impl AttachMode {
         })
     }
     pub(super) fn debug_request(&self) -> task::AttachRequest {
-        task::AttachRequest { process_id: None }
+        task::AttachRequest {
+            process_id: None,
+            port: None,
+        }
     }
 }
 
@@ -1307,26 +1292,9 @@ impl PickerDelegate for DebugDelegate {
             })
             .unwrap_or_default();
 
-        let mut args = ShellKind::Posix
-            .split(&text)
-            .into_iter()
-            .flatten()
-            .peekable();
-        let mut env = HashMap::default();
-        while args.peek().is_some_and(|arg| arg.contains('=')) {
-            let arg = args.next().unwrap();
-            let (lhs, rhs) = arg.split_once('=').unwrap();
-            env.insert(lhs.to_string(), rhs.to_string());
-        }
-
-        let program = if let Some(program) = args.next() {
-            program
-        } else {
-            env = HashMap::default();
-            text
-        };
-
-        let args = args.collect::<Vec<_>>();
+        let (program, args, resolved_env) =
+            resolve_launch_command(text, cfg!(windows), WindowsSplitting::Yes);
+        let env: HashMap<String, String> = resolved_env.into_iter().collect();
         let task = task::TaskTemplate {
             label: "one-off".to_owned(), // TODO: rename using command as label
             env,
@@ -1623,6 +1591,71 @@ pub(crate) fn resolve_path(path: &mut String) {
     };
 }
 
+/// How [`resolve_launch_command`] treats a command string that contains no
+/// shell operator.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WindowsSplitting {
+    /// Word-split it, as on POSIX.
+    Yes,
+    /// Pass it through unsplit, so that unquoted paths containing spaces
+    /// (`C:\Program Files\app\debug.exe`) survive intact. Callers using this
+    /// expect `program` to be a bare path, so they have no use for a split-out
+    /// argument list.
+    No,
+}
+
+/// Resolves a user-typed command string into a program, its arguments, and any
+/// leading `KEY=VALUE` environment assignments.
+///
+/// The string is word-split, unless it contains a shell command-chaining
+/// operator (`&&`, `||`, `;`, `|`, ...), in which case the whole string is
+/// handed to a real shell as one `-c` payload. Word splitting has no notion of
+/// operators, so without this `"cargo build && cargo run"` would resolve to the
+/// program `cargo` with `&&` and `cargo run` as literal arguments.
+///
+/// Note that wrapping a chain in a shell makes the chain *run* correctly, but
+/// the debug adapter then attaches to the shell rather than to each command in
+/// the chain; only the first command is actually debugged.
+fn resolve_launch_command(
+    command: String,
+    is_windows: bool,
+    windows_splitting: WindowsSplitting,
+) -> (String, Vec<String>, FxHashMap<String, String>) {
+    if util::shell::contains_shell_operator(&command) {
+        // Leading `KEY=VALUE` assignments stay in the script text; the shell
+        // sets them itself, so there is nothing to lift out into `env`.
+        let (program, args) = ShellBuilder::new(&Shell::System, is_windows)
+            .non_interactive()
+            .build(Some(command), &[]);
+        return (program, args, FxHashMap::default());
+    }
+
+    if is_windows && windows_splitting == WindowsSplitting::No {
+        return (command, Vec::new(), FxHashMap::default());
+    }
+
+    let mut args = ShellKind::Posix
+        .split(&command)
+        .into_iter()
+        .flatten()
+        .peekable();
+    let mut env = FxHashMap::default();
+    while args.peek().is_some_and(|arg| arg.contains('=')) {
+        let arg = args.next().unwrap();
+        let (lhs, rhs) = arg.split_once('=').unwrap();
+        env.insert(lhs.to_string(), rhs.to_string());
+    }
+
+    let program = if let Some(program) = args.next() {
+        program
+    } else {
+        env = FxHashMap::default();
+        command
+    };
+
+    (program, args.collect::<Vec<_>>(), env)
+}
+
 #[cfg(test)]
 impl NewProcessModal {
     pub(crate) fn set_configure(
@@ -1665,5 +1698,155 @@ impl NewProcessModal {
                 })
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use util::shell::get_system_shell;
+
+    /// Asserts that `chain` was handed to a real shell as a single payload,
+    /// rather than word-split into a program plus literal `&&` arguments.
+    fn assert_shell_wrapped(program: String, args: Vec<String>, chain: &str) {
+        assert_eq!(program, get_system_shell());
+        assert!(
+            !args.iter().any(|arg| arg == "&&" || arg == "||"),
+            "shell operator leaked into argv: {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg.contains(chain)),
+            "chain {chain:?} not preserved in shell payload: {args:?}"
+        );
+    }
+
+    #[test]
+    fn splits_plain_command_into_program_and_args() {
+        let (program, args, env) = resolve_launch_command(
+            "./target/debug/app --port 8080".into(),
+            false,
+            WindowsSplitting::No,
+        );
+
+        assert_eq!(program, "./target/debug/app");
+        assert_eq!(args, vec!["--port".to_string(), "8080".to_string()]);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn lifts_leading_env_assignments() {
+        let (program, args, env) = resolve_launch_command(
+            "RUST_LOG=debug ./target/debug/app --release".into(),
+            false,
+            WindowsSplitting::No,
+        );
+
+        assert_eq!(program, "./target/debug/app");
+        assert_eq!(args, vec!["--release".to_string()]);
+        assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("debug"));
+    }
+
+    #[test]
+    fn wraps_chained_command_in_a_shell() {
+        let (program, args, env) = resolve_launch_command(
+            "cargo build && cargo run".into(),
+            false,
+            WindowsSplitting::No,
+        );
+
+        assert_shell_wrapped(program, args, "cargo build && cargo run");
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn wraps_chained_command_with_env_prefix_in_a_shell() {
+        // The `KEY=VALUE` prefix stays in the script text, where the shell
+        // applies it, so nothing is lifted into `env`.
+        let (program, args, env) = resolve_launch_command(
+            "RUST_LOG=debug cargo build && cargo run".into(),
+            false,
+            WindowsSplitting::No,
+        );
+
+        assert_shell_wrapped(program, args, "RUST_LOG=debug cargo build && cargo run");
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn wraps_pipes_and_semicolons() {
+        for chain in ["cat foo | grep bar", "a; b", "a || b", "a & b"] {
+            let (program, args, _) =
+                resolve_launch_command(chain.into(), false, WindowsSplitting::No);
+            assert_shell_wrapped(program, args, chain);
+        }
+    }
+
+    #[test]
+    fn keeps_quoted_operators_out_of_the_shell() {
+        let (program, args, env) = resolve_launch_command(
+            r#"my-app --message "build && deploy""#.into(),
+            false,
+            WindowsSplitting::No,
+        );
+
+        assert_eq!(program, "my-app");
+        assert_eq!(
+            args,
+            vec!["--message".to_string(), "build && deploy".to_string()]
+        );
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn windows_passes_plain_command_through_unsplit() {
+        let command = r"C:\Program Files\my app\debug.exe --flag";
+        let (program, args, env) =
+            resolve_launch_command(command.into(), true, WindowsSplitting::No);
+
+        assert_eq!(program, command);
+        assert!(args.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn windows_still_wraps_a_chained_command() {
+        // Regression test: Windows used to return the whole string as `program`
+        // with no args, so the chain could never run.
+        let chain = "cargo build && cargo run";
+        let (program, args, env) = resolve_launch_command(chain.into(), true, WindowsSplitting::No);
+
+        assert_shell_wrapped(program, args, chain);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn windows_splits_when_the_call_site_expects_args() {
+        // The one-off debug picker builds a task, so it needs the argument list
+        // on Windows too.
+        let (program, args, env) =
+            resolve_launch_command("my-app --port 8080".into(), true, WindowsSplitting::Yes);
+
+        assert_eq!(program, "my-app");
+        assert_eq!(args, vec!["--port".to_string(), "8080".to_string()]);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn empty_command_falls_back_to_itself() {
+        let (program, args, env) = resolve_launch_command("".into(), false, WindowsSplitting::No);
+
+        assert_eq!(program, "");
+        assert!(args.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn env_only_command_falls_back_to_itself() {
+        let (program, args, env) =
+            resolve_launch_command("RUST_LOG=debug".into(), false, WindowsSplitting::No);
+
+        assert_eq!(program, "RUST_LOG=debug");
+        assert!(args.is_empty());
+        assert!(env.is_empty());
     }
 }

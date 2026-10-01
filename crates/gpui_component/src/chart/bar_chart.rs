@@ -18,8 +18,6 @@ use crate::{
     },
 };
 
-use super::build_band_labels;
-
 /// Space reserved along the band axis for the value-axis tick labels, in pixels.
 ///
 /// Like [`AXIS_GAP`] this is a fixed budget rather than a measured one: the band
@@ -42,6 +40,7 @@ where
     fill_gradient:
         Option<Rc<dyn Fn(&T, RangeInclusive<f32>, &dyn Fn(f32) -> f32) -> [LinearColorStop; 2]>>,
     tick_margin: usize,
+    band_label: Option<Rc<dyn Fn(&T) -> SharedString>>,
     label: Option<Rc<dyn Fn(&T) -> SharedString>>,
     label_axis: bool,
     value_axis: bool,
@@ -69,6 +68,7 @@ where
             fill: None,
             fill_gradient: None,
             tick_margin: 1,
+            band_label: None,
             label: None,
             label_axis: true,
             value_axis: false,
@@ -191,6 +191,24 @@ where
         self
     }
 
+    /// Set the text drawn on the band axis for each datum, independently of the
+    /// band value itself.
+    ///
+    /// The band value has to be unique per bar (it is the band scale's key), so
+    /// it is often the full, verbose identity of a category — a file path, say.
+    /// This lets the axis show a short form of it (an abbreviated or truncated
+    /// label) while the band value, and with it the hover tooltip's title, keeps
+    /// the full text.
+    ///
+    /// Defaults to the band value.
+    pub fn band_label<S>(mut self, band_label: impl Fn(&T) -> S + 'static) -> Self
+    where
+        S: Into<SharedString> + 'static,
+    {
+        self.band_label = Some(Rc::new(move |t| band_label(t).into()));
+        self
+    }
+
     pub fn label<S>(mut self, label: impl Fn(&T) -> S + 'static) -> Self
     where
         S: Into<SharedString> + 'static,
@@ -252,6 +270,16 @@ where
         self
     }
 
+    /// The text to draw on the band axis for `d`: the [`BarChart::band_label`]
+    /// override if one was set, otherwise the band value itself.
+    fn band_text(&self, d: &T) -> SharedString {
+        match (self.band_label.as_ref(), self.band.as_ref()) {
+            (Some(band_label), _) => band_label(d),
+            (None, Some(band)) => band(d).into(),
+            (None, None) => SharedString::default(),
+        }
+    }
+
     /// The band scale (matching `paint`): spans the height for horizontal bars, the width
     /// otherwise. Shared by `tooltip_state` and `tooltip`.
     fn band_scale(&self, bounds: Bounds<Pixels>) -> Option<ScaleBand<B>> {
@@ -292,17 +320,14 @@ where
     /// horizontal bars, measured from the actual label text. Shared by `paint` and the
     /// tooltip so the crosshair lines up with the bar region.
     fn horizontal_gaps(&self, window: &mut Window) -> (f32, f32) {
-        let Some(band_fn) = self.band.as_ref() else {
+        if self.band.is_none() {
             return (0., 0.);
-        };
+        }
         let font_size = px(TEXT_SIZE);
         let band_gap = if self.label_axis {
             self.data
                 .iter()
-                .map(|v| {
-                    let s: SharedString = band_fn(v).into();
-                    measure_text_width(&s, font_size, window)
-                })
+                .map(|v| measure_text_width(&self.band_text(v), font_size, window))
                 .fold(0f32, f32::max)
                 + TEXT_GAP * 2.
         } else {
@@ -442,7 +467,7 @@ where
 
                             Some(
                                 Text::new(
-                                    band_fn(d).into(),
+                                    self.band_text(d),
                                     point(px(band_x + band_offset + band_width / 2.), px(label_y)),
                                     cx.theme().muted_foreground,
                                 )
@@ -453,14 +478,22 @@ where
                     PlotLabel::new(labels).paint(&bounds, window, cx);
                 }
                 BarAlignment::Left | BarAlignment::Right => {
-                    let labels = build_band_labels(
-                        &self.data,
-                        band_fn.as_ref(),
-                        &band_scale,
-                        band_width,
-                        self.tick_margin,
-                        cx.theme().muted_foreground,
-                    );
+                    // Not `build_band_labels`: the text comes from `band_text`, which
+                    // may be a short form of the band value rather than the value itself.
+                    let labels: Vec<AxisText> = self
+                        .data
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| (i + 1) % self.tick_margin == 0)
+                        .filter_map(|(_, d)| {
+                            let band_y = band_scale.tick(&band_fn(d))?;
+                            Some(AxisText::new(
+                                self.band_text(d),
+                                px(band_y + band_width / 2.),
+                                cx.theme().muted_foreground,
+                            ))
+                        })
+                        .collect();
                     let (side, align) = if matches!(alignment, BarAlignment::Left) {
                         (AxisLabelSide::Start, TextAlign::Right)
                     } else {

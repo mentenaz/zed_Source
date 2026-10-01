@@ -1373,7 +1373,13 @@ where
             .table_cell_size(self.options.size)
             .when(!is_head, |this| {
                 this.when(self.row_selectable, |this| {
-                    this.on_click(cx.listener(move |table, _, _window, cx| {
+                    this.on_click(cx.listener(move |table, _, window, cx| {
+                        // Selecting a row via mouse must also grant the table
+                        // keyboard focus — `track_focus` alone (`data_table.rs`'s
+                        // own root) doesn't do this on click, so without this a
+                        // row could be selected yet `up`/`down`/etc. would go
+                        // nowhere until the table was `Tab`-focused separately.
+                        window.focus(&table.focus_handle, cx);
                         table.set_selected_row(row_ix, cx);
                     }))
                 })

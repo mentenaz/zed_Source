@@ -439,6 +439,10 @@ impl DebugAdapter for PythonDebugAdapter {
         Some(SharedString::new_static("Python").into())
     }
 
+    fn attach_process_name_filter(&self) -> Option<Vec<&'static str>> {
+        Some(vec!["python", "python3"])
+    }
+
     async fn config_from_zed_format(&self, zed_scenario: ZedDebugConfig) -> Result<DebugScenario> {
         let mut args = json!({
             "request": match zed_scenario.request {
