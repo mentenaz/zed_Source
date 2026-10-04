@@ -4,7 +4,7 @@ An unofficial, personal fork of [Zed](https://github.com/zed-industries/zed) tha
 
 ![Workflow engine](docs/screenshots/Flow_Running.png)
 ![Database schema graph](docs/screenshots/Database_Schema_Graph.png)
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/screenshots/DashBoard.png)
 
 ## What this fork adds
 
