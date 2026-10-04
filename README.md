@@ -1,3 +1,41 @@
+# Zed Developer Tooling Suite (personal fork)
+
+An unofficial, personal fork of [Zed](https://github.com/zed-industries/zed) that adds a suite of developer-tooling panels and a visual workflow engine. Not affiliated with or endorsed by Zed Industries.
+
+![Workflow engine](docs/screenshots/Flow_Running.png)
+![Database schema graph](docs/screenshots/Database_Schema_Graph.png)
+![Dashboard](docs/screenshots/dashboard.png)
+
+## What this fork adds
+
+| Area                                      | What it does                                                                                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Node / .NET / Python panels**           | Per-project version and environment management. Select a project as the active target and run, build and test act on it.                                                        |
+| **Package managers** (npm, NuGet, Python) | Install, update and remove packages, vulnerability scanning, version search, inline README viewing.                                                                             |
+| **Database panel**                        | Simultaneous live connections to SQLite, PostgreSQL, MySQL and MSSQL, schema explorer, relationship graph, SQL workbench.                                                       |
+| **Flows (Task Chain)**                    | Visual workflow editor with try/catch, if/else, loops and error paths. Click any node to see its run result. Backed by the `workflow_engine` crate.                             |
+| **Dashboard**                             | One view of runtime versions, security findings, outdated packages, git status and system health. Reports failures (project not found, not scanned yet) instead of hiding them. |
+| **Cockpit and Processes**                 | Live CPU, RAM, per-core, disk and network metrics, and a process list with kill.                                                                                                |
+| **Git panel Details tab**                 | Commit activity, most-changed files and collaborators.                                                                                                                          |
+| **Helm**                                  | GitHub client panel: search, clone, repo browsing. Credentials are stored in the OS keychain.                                                                                   |
+| **Custom SQL language server**            | Experimental. It starts and responds, but completion quality is still rough.                                                                                                    |
+
+## Changes to existing Zed code
+
+- **`gpui`**: added zoom, pan and fit-view scaling support, which was missing. A standalone upstream PR is planned.
+- **Extended to support the panels**: `workspace`, `git`, `git_ui`, `project`, `settings`, `settings_content`, `json_schema_store`, `languages` and the `zed` app crate, plus small supporting edits in `fs`, `icons`, `paths` and `remote`.
+- **New crates**: `cockpit_panel`, `dashboard_panel`, `database_backend`, `database_panel`, `flows_panel`, `workflow_engine`, `node_panel`, `dotnet_panel`, `python_panel`, `npm_manager_panel`, `nuget_manager_panel`, `python_manager_panel`, `processes_panel`, `helm_panel`, `script_runner_panel`, `designer_panel` and their backends.
+
+## Status
+
+- Developed and tested on Windows. [CHECK: add "macOS and Linux untested" or change this if you've tested them.]
+- Tested mostly by hand. Automated tests are limited (a few in `gpui_flow`).
+- Not a packaged release. Build from source with Zed's [Windows build guide](./docs/src/development/windows.md).
+
+## Licence and attribution
+
+The combined work is distributed under **GPL-3.0-or-later**, inherited from the Zed crates modified here (see `LICENSE-GPL`). `gpui` and the GPUI component libraries remain **Apache-2.0** (see `LICENSE-APACHE`). `gpui_flow` is **MIT** © Adib, patched here for zoom, pan and fit-view; its licence text is kept in its crate folder.
+
 # Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
