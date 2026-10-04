@@ -7026,6 +7026,27 @@ fn hex(color: gpui::Hsla) -> u32 {
     u32::from(color.to_rgb()) >> 8
 }
 
+/// `WorkflowRunItem`'s job-node body — `gpui_flow`'s built-in fallback
+/// renderer (used whenever a node has no `node_type`/registered renderer,
+/// which every job node here doesn't) hardcodes `text_color(0x1a1a1a)`, a
+/// near-black that's invisible against a dark theme's `node_bg_color`
+/// (`cx.theme().popover`, set on this graph) — hence job names not being
+/// visible. Same `popover_foreground` theme color `designer_panel::render_leaf`
+/// uses for its own leaf nodes against the identical `popover` background.
+fn render_workflow_job_node(node: &FlowNode, _window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px_2()
+        .text_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(cx.theme().popover_foreground)
+        .child(node.label.to_string())
+        .into_any_element()
+}
+
 /// Color for a GitHub Actions status/conclusion pair — shared between a
 /// run's own header badge and every job node's `accent_border` on
 /// `WorkflowRunItem` (`status`: queued/in_progress/completed; `conclusion`:
@@ -7114,6 +7135,7 @@ impl WorkflowRunItem {
                 .grid_color(hex(cx.theme().sidebar_border))
                 .node_bg_color(hex(cx.theme().popover))
                 .node_border_color(hex(cx.theme().border))
+                .default_renderer(render_workflow_job_node)
         });
         let controls = cx.new(|_| Controls::new(state.clone()));
         let mut this = Self {
