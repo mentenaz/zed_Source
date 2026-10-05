@@ -126,24 +126,15 @@ The graph is not simply a diagram of what a workflow _could_ do.
 
 A development workflow can therefore look conceptually like:
 
-```text
-Wait for service
-       │
-       ▼
-Set environment
-       │
-       ▼
-Execute action
-       │
-       ▼
-Evaluate result
-       │
-   ┌───┴───┐
-   ▼       ▼
-Success   Error
-   │       │
-   ▼       ▼
- Continue  Handle
+```mermaid
+flowchart TD
+    A["Wait for service"] --> B["Set environment"] --> C["Execute action"] --> D{"Evaluate result"}
+    D -->|Success| E["Continue"]
+    D -->|Error| F["Handle error"]
+    classDef ok fill:#1b5e20,stroke:#1b5e20,color:#ffffff
+    classDef err fill:#b71c1c,stroke:#b71c1c,color:#ffffff
+    class E ok
+    class F err
 ```
 
 **The broader experiment is:**
@@ -357,26 +348,15 @@ Credentials are stored using the operating system's secure credential/keychain f
 
 The intended workflow is:
 
-```text
-GitHub
-   │
-   ▼
-Search repository
-   │
-   ▼
-Clone
-   │
-   ▼
-Open project
-   │
-   ▼
-Configure environment
-   │
-   ▼
-Install dependencies
-   │
-   ▼
-Run / Build / Test
+```mermaid
+flowchart LR
+    subgraph grp1["Get the code"]
+        A["GitHub"] --> B["Search repository"] --> C["Clone"]
+    end
+    subgraph grp2["Get it running"]
+        D["Open project"] --> E["Configure environment"] --> F["Install dependencies"] --> G["Run / Build / Test"]
+    end
+    C --> D
 ```
 
 The goal is to remove unnecessary boundaries between **source control and development**.
@@ -387,7 +367,7 @@ The goal is to remove unnecessary boundaries between **source control and develo
 
 Forge extends the Git experience with a Details view that provides higher-level repository information.
 
-![Forge Git Details](docs/screenshots/Git_Details.png)
+![Forge Git Details](docs/screenshots/Git_Insights.png)
 
 The Details view includes information such as:
 
@@ -417,16 +397,10 @@ The Processes tooling provides:
 
 This creates an interesting feedback loop:
 
-```text
-Build
-  ↓
-Application starts
-  ↓
-Process appears
-  ↓
-Resource usage changes
-  ↓
-Developer investigates
+```mermaid
+flowchart LR
+    A["Build"] --> B["Application starts"] --> C["Process appears"] --> D["Resource usage changes"] --> E["Developer investigates"]
+    E -.-> A
 ```
 
 The development environment can therefore expose both **what the developer is building** and **what the machine is doing as a result**.
@@ -437,31 +411,15 @@ The development environment can therefore expose both **what the developer is bu
 
 Forge includes a dedicated script execution surface.
 
-![Forge Script Runner](docs/screenshots/Script_Runner.png)
+### Script Runner Idle
+
+![Forge Script Runner](docs/screenshots/Script_Runner_Idle.png)
+
+### Script Runner Running With link navigate and copy
+
+![Forge Script Runner](docs/screenshots/Script_Runner_Running_With_Link.png)
 
 The purpose is to make commonly used development operations accessible from the workspace while still allowing the underlying commands and workflow to remain explicit.
-
----
-
-# Designer
-
-Forge also contains an experimental Designer surface.
-
-![Forge Designer](docs/screenshots/Designer.png)
-
-This forms part of the broader exploration into visual development tooling within a native editor environment.
-
----
-
-# SQL Language Server
-
-Forge includes an experimental SQL language server integrated directly into the editor.
-
-![Forge SQL Language Server](docs/screenshots/SQL_Language_Server.png)
-
-The language server currently starts and responds correctly.
-
-Completion quality is still rough and remains an active area of experimentation.
 
 ---
 
@@ -632,35 +590,25 @@ The individual systems are useful on their own.
 
 The more interesting experiment is what happens when they become part of the same environment.
 
-```text
-                         GitHub
-                           │
-                           ▼
-                         Helm
-                           │
-                           ▼
-                        Project
-                           │
-             ┌─────────────┴─────────────┐
-             ▼                           ▼
-        Runtime Setup              Dependencies
-       Node / .NET / Python       npm / NuGet / pip
-             │                           │
-             └─────────────┬─────────────┘
-                           ▼
-                       Database
-                           │
-                           ▼
-                    Workflow Engine
-                           │
-                           ▼
-                    Application Run
-                           │
-                           ▼
-                       Processes
-                           │
-                           ▼
-                    System Health
+```mermaid
+flowchart TD
+    GH["GitHub"] --> Helm["Helm"] --> Project["Project"]
+    Project --> Runtime["Runtime setup<br/>Node / .NET / Python"]
+    Project --> Deps["Dependencies<br/>npm / NuGet / pip"]
+    Runtime --> DB["Database"]
+    Deps --> DB
+    DB --> WF["Workflow engine"]
+    WF --> Run["Application run"]
+    Run --> Proc["Processes"]
+    Proc --> Health["System health"]
+    classDef src fill:#1F3A5F,stroke:#1F3A5F,color:#ffffff
+    classDef setup fill:#2f6f8f,stroke:#2f6f8f,color:#ffffff
+    classDef data fill:#6a4c93,stroke:#6a4c93,color:#ffffff
+    classDef live fill:#2e7d32,stroke:#2e7d32,color:#ffffff
+    class GH,Helm src
+    class Project,Runtime,Deps setup
+    class DB,WF data
+    class Run,Proc,Health live
 ```
 
 The long-term idea is to turn these into **connected developer capabilities rather than isolated utilities**.
