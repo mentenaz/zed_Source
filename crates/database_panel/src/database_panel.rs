@@ -972,7 +972,7 @@ impl DatabasePanel {
             missing.push("Title");
         }
         if db_type == DbType::Sqlite && self.new_connection_path.trim().is_empty() {
-            missing.push("File Path");
+            missing.push("Database File");
         }
         if db_type != DbType::Sqlite {
             if self.new_connection_host.trim().is_empty() {
@@ -1906,22 +1906,6 @@ impl DatabasePanel {
         .border_1()
         .border_color(input_border);
 
-        let path_entity = entity.clone();
-        let path_field = SettingField::input(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_path.clone().into()
-            },
-            move |value: SharedString, cx: &mut App| {
-                path_entity.update(cx, |this, cx| {
-                    this.new_connection_path = value.to_string();
-                    cx.notify();
-                });
-            },
-        )
-        .border_1()
-        .border_color(input_border);
-
         let host_entity = entity.clone();
         let host_field = SettingField::input(
             {
@@ -1994,47 +1978,96 @@ impl DatabasePanel {
 
         group = match db_type {
             DbType::Sqlite => {
+                // The database file is chosen only through the OS file picker —
+                // no free-text path — so it always points at a real file.
                 group
-                    .item(SettingItem::new("File Path", path_field))
-                    .item(SettingItem::render(move |_options, _window, _cx| {
+                    .item(SettingItem::render(move |_options, _window, cx| {
+                        let path = browse_entity.read(cx).new_connection_path.clone();
                         let browse_entity = browse_entity.clone();
-                        let connect_entity = sqlite_connect_entity.clone();
+                        let (path_label, path_color) = if path.trim().is_empty() {
+                            ("No file selected".to_string(), Color::Muted)
+                        } else {
+                            (path, Color::Default)
+                        };
                         h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
                             .gap_2()
                             .child(
-                                Button::new("browse-sqlite-path")
-                                    .outline()
-                                    .label("Browse…")
-                                    .on_click(move |_, window, cx| {
-                                        let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
-                                            files: true,
-                                            directories: false,
-                                            multiple: false,
-                                            prompt: Some("Select SQLite Database".into()),
-                                        });
-                                        let browse_entity = browse_entity.clone();
-                                        window
-                                            .spawn(cx, async move |cx| {
-                                                let Some(mut paths) = prompt
-                                                    .await
-                                                    .ok()
-                                                    .and_then(Result::ok)
-                                                    .flatten()
-                                                else {
-                                                    return;
-                                                };
-                                                let Some(path) = paths.pop() else {
-                                                    return;
-                                                };
-                                                browse_entity.update(cx, |this, cx| {
-                                                    this.new_connection_path =
-                                                        path.to_string_lossy().into_owned();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .detach();
-                                    }),
+                                Label::new("Database File")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
                             )
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div().min_w_0().child(
+                                            Label::new(path_label)
+                                                .size(LabelSize::Small)
+                                                .color(path_color)
+                                                .truncate(),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new("browse-sqlite-path")
+                                            .outline()
+                                            .label("Choose file…")
+                                            .on_click(move |_, window, cx| {
+                                                let prompt =
+                                                    cx.prompt_for_paths(gpui::PathPromptOptions {
+                                                        files: true,
+                                                        directories: false,
+                                                        multiple: false,
+                                                        prompt: Some(
+                                                            "Select SQLite Database".into(),
+                                                        ),
+                                                    });
+                                                let browse_entity = browse_entity.clone();
+                                                window
+                                                    .spawn(cx, async move |cx| {
+                                                        let Some(mut paths) = prompt
+                                                            .await
+                                                            .ok()
+                                                            .and_then(Result::ok)
+                                                            .flatten()
+                                                        else {
+                                                            return;
+                                                        };
+                                                        let Some(path) = paths.pop() else {
+                                                            return;
+                                                        };
+                                                        browse_entity.update(cx, |this, cx| {
+                                                            // Default the title to the file name
+                                                            // so a pick is enough to connect.
+                                                            if this
+                                                                .new_connection_title
+                                                                .trim()
+                                                                .is_empty()
+                                                                && let Some(stem) = path.file_stem()
+                                                            {
+                                                                this.new_connection_title = stem
+                                                                    .to_string_lossy()
+                                                                    .into_owned();
+                                                            }
+                                                            this.new_connection_path =
+                                                                path.to_string_lossy().into_owned();
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .detach();
+                                            }),
+                                    ),
+                            )
+                            .into_any_element()
+                    }))
+                    .item(SettingItem::render(move |_options, _window, _cx| {
+                        let connect_entity = sqlite_connect_entity.clone();
+                        h_flex()
+                            .justify_end()
                             .child(
                                 Button::new("add-connection")
                                     .label("Connect")
