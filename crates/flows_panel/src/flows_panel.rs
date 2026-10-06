@@ -9,21 +9,25 @@
 //!
 //! Deliberate deviations from the source, beyond the format cut:
 //! - No `favorite`/`tags`/sqlite `flows` index table — `flows_panel`'s own
-//!   persistence layer ([`persistence::DesignerDb`]) only carries the
-//!   Designer's last-open-flow record and scoped-kv run history, not a
-//!   general flows index. Rows sort by name instead of a favorite flag.
+//!   persistence layer ([`persistence`]) only carries scoped-kv run
+//!   history, not a general flows index. Rows sort by name instead of a
+//!   favorite flag.
 //! - "Add Task Chain" builds directly from every detected service
 //!   (`workflow_engine::scan_project`) instead of opening Forge's
 //!   review-and-edit wizard modal first — that wizard is a natural
 //!   follow-up once this panel has users who hit its limits, not required
 //!   to make "create a task chain" work.
-//! - Opening a flow uses `Workspace::open_abs_path`, which just opens the
-//!   `.flow.json` as a normal JSON file — there is no `designer_panel`
-//!   canvas yet for it to route to (that's a separate, later port).
-//! - Running a flow drives `workflow_engine::run_workflow` directly and
-//!   records the result via [`persistence::append_flow_history`]; there is
-//!   no live canvas to stream per-action status onto yet, so only the
-//!   final per-action outcomes (not the `Running` transition) are kept.
+//! - "Open" uses `Workspace::open_abs_path`. Since `designer_panel`
+//!   registers a project item for `.flow.json`, that path lands on the
+//!   Designer canvas too — the same place "Graph" opens directly via
+//!   `DesignerPanel::open`. Raw JSON is reached from the Designer's own
+//!   "Raw" button, not from here.
+//! - Running a flow from this panel drives `workflow_engine::run_workflow`
+//!   directly and records the result via
+//!   [`persistence::append_flow_history`]. Nothing here streams per-action
+//!   status, so only the final per-action outcomes (not the `Running`
+//!   transition) are kept; a live view is what running from the Designer
+//!   is for.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

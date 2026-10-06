@@ -1,5 +1,15 @@
 # gpui-base
 
+> **In this fork.** This crate is vendored from
+> [longbridge/gpui-component](https://github.com/longbridge/gpui-component),
+> copied in via the Forge repo, as the behaviour layer underneath
+> [`gpui_component`](../gpui_component/README.md). Nothing in the fork's
+> panels depends on it directly. It is not an untouched copy: its LSP code
+> was adapted to Zed's forked `lsp_types` (local inline-completion types,
+> `DiagnosticMessage`, flat `SemanticTokens::data`). See
+> [`PORTING.md`](../gpui_component/PORTING.md), Part 1, before re-syncing it
+> from upstream. The rest of this file is the upstream README.
+
 [![Crates.io](https://img.shields.io/crates/v/gpui-base.svg)](https://crates.io/crates/gpui-base)
 [![Documentation](https://docs.rs/gpui-base/badge.svg)](https://docs.rs/gpui-base)
 [![License](https://img.shields.io/crates/l/gpui-base.svg)](../../LICENSE-APACHE)

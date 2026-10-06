@@ -47,6 +47,7 @@ use gpui_component::{
     tag::Tag,
 };
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_version};
 use sysinfo::System;
 use workspace::{
     Workspace,
@@ -542,25 +543,14 @@ impl DotNetPanel {
         let PackagesState::Ready(list) = &self.outdated_packages else {
             return;
         };
-        let moves: Vec<(String, String)> = list
-            .iter()
-            .filter(|o| {
-                let kind = classify_update(&o.installed, &o.latest);
-                match ty {
-                    "patch" => kind == UpdateKind::Patch,
-                    _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
-                }
-            })
-            .map(|o| (o.id.clone(), o.latest.clone()))
-            .collect();
-        if moves.is_empty() {
-            return;
+        match update_all_command(list, ty) {
+            Ok(Some(command)) => self.kick_run("update all", command, window, cx),
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
         }
-        let segments = moves
-            .iter()
-            .map(|(id, latest)| format!("dotnet add package {id} --version {latest}"))
-            .collect::<Vec<_>>();
-        self.kick_run("update all", segments.join(" && "), window, cx);
     }
 }
 
@@ -1426,5 +1416,82 @@ impl NonEmpty for String {
     /// naturally while keeping `project_dir` returning a plain string.
     fn into_nonempty(self) -> Option<Self> {
         if self.is_empty() { None } else { Some(self) }
+    }
+}
+
+/// The command for the Outdated section's bulk buttons: one
+/// `dotnet add package <id> --version <latest>` per qualifying package,
+/// chained with `&&` — patch-only updates when `ty` is `"patch"`, otherwise
+/// patch and minor. `Ok(None)` when nothing qualifies; an error (and nothing
+/// run) if any qualifying entry isn't shell-plain.
+fn update_all_command(outdated: &[OutdatedPackage], ty: &str) -> Result<Option<String>, String> {
+    let mut segments = Vec::new();
+    for package in outdated.iter().filter(|o| {
+        let kind = classify_update(&o.installed, &o.latest);
+        match ty {
+            "patch" => kind == UpdateKind::Patch,
+            _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
+        }
+    }) {
+        check_package_name(&package.id)?;
+        check_version(&package.latest)?;
+        segments.push(format!(
+            "dotnet add package {} --version {}",
+            package.id, package.latest
+        ));
+    }
+    Ok((!segments.is_empty()).then(|| segments.join(" && ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(id: &str, installed: &str, latest: &str) -> OutdatedPackage {
+        OutdatedPackage {
+            id: id.to_string(),
+            installed: installed.to_string(),
+            latest: latest.to_string(),
+            update_kind: classify_update(installed, latest),
+        }
+    }
+
+    #[test]
+    fn path_file_name_is_the_last_component() {
+        assert_eq!(path_file_name("C:/work/src/App/App.csproj"), "App.csproj");
+        assert_eq!(path_file_name("single"), "single");
+        assert_eq!(path_file_name("/"), "/");
+    }
+
+    #[test]
+    fn update_all_chains_one_command_per_package() {
+        let list = [
+            outdated("Dapper", "2.1.0", "2.1.35"),
+            outdated("Serilog", "3.0.0", "3.1.0"),
+            outdated("Polly", "7.0.0", "8.0.0"),
+        ];
+        assert_eq!(
+            update_all_command(&list, "minor").unwrap().as_deref(),
+            Some(
+                "dotnet add package Dapper --version 2.1.35 && \
+                 dotnet add package Serilog --version 3.1.0"
+            )
+        );
+        assert_eq!(
+            update_all_command(&list, "patch").unwrap().as_deref(),
+            Some("dotnet add package Dapper --version 2.1.35")
+        );
+    }
+
+    #[test]
+    fn update_all_with_nothing_safe_to_update() {
+        assert_eq!(update_all_command(&[outdated("Polly", "7.0.0", "8.0.0")], "minor"), Ok(None));
+        assert_eq!(update_all_command(&[], "patch"), Ok(None));
+    }
+
+    #[test]
+    fn update_all_runs_nothing_if_any_entry_is_unsafe() {
+        let list = [outdated("Dapper", "2.1.0", "2.1.35"), outdated("Bad && calc", "1.0.0", "1.0.1")];
+        assert!(update_all_command(&list, "minor").is_err());
     }
 }

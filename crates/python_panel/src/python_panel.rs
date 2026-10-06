@@ -73,6 +73,8 @@ use python_backend::{
     list_packages, query_pip, query_python, scan_python_project, scan_python_projects,
 };
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_version, shell_path, shell_program};
+use workspace::{Toast, notifications::NotificationId};
 use sysinfo::System;
 use workspace::{
     Workspace,
@@ -360,27 +362,29 @@ impl PythonPanel {
         let PackagesState::Ready(list) = &self.outdated else {
             return;
         };
-        let moves: Vec<(String, String)> = list
-            .iter()
-            .filter(|o| match ty {
-                "patch" => o.kind == UpdateKind::Patch,
-                _ => matches!(o.kind, UpdateKind::Patch | UpdateKind::Minor),
-            })
-            .map(|o| (o.name.clone(), o.latest_version.clone()))
-            .collect();
-        if moves.is_empty() {
-            return;
-        }
         let exe = self
             .python_exe
             .clone()
             .unwrap_or_else(|| "python".to_string());
-        let segments = moves
-            .iter()
-            .map(|(name, latest)| format!("{exe} -m pip install --upgrade \"{name}=={latest}\""))
-            .collect::<Vec<_>>();
         let dir = self.active_project_dir();
-        self.dispatch_script(&segments.join(" && "), dir, window, cx);
+        let command =
+            shell_program(&exe, &dir).and_then(|exe| update_all_command(&exe, list, ty));
+        match command {
+            Ok(Some(command)) => self.dispatch_script(&command, dir, window, cx),
+            Ok(None) => {}
+            Err(error) => self.report(error, cx),
+        }
+    }
+
+    /// Tells the user why a command was refused (see
+    /// `script_runner_panel::command`). A toast, since this panel has no
+    /// error row of its own for run actions.
+    fn report(&self, message: String, cx: &mut App) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(Toast::new(NotificationId::unique::<PythonPanel>(), message), cx);
+            })
+            .ok();
     }
 
     /// Fires one `https://pypi.org/pypi/<name>/<version>/json` request per
@@ -1107,16 +1111,23 @@ impl PythonPanel {
                 .and_then(|n| n.to_str())
                 .unwrap_or(file)
                 .to_string();
-            let cmd = format!("python {file}");
+            // Runs from the entry point's own directory, so the file is
+            // normally just its name — which is what keeps a project under a
+            // path with spaces runnable.
+            let cmd = shell_path(file, dir).map(|file| format!("python {file}"));
             let cwd = dir.clone();
             row = row.child(
                 Button::new(format!("py-quick-entry-{idx}"))
                     .secondary()
                     .xsmall()
                     .label(filename)
-                    .tooltip(format!("Run \"{cmd}\""))
-                    .on_click(cx.listener(move |this, _e, window, cx| {
-                        this.dispatch_script(&cmd, cwd.clone(), window, cx);
+                    .tooltip(match &cmd {
+                        Ok(cmd) => format!("Run \"{cmd}\""),
+                        Err(error) => error.clone(),
+                    })
+                    .on_click(cx.listener(move |this, _e, window, cx| match &cmd {
+                        Ok(cmd) => this.dispatch_script(cmd, cwd.clone(), window, cx),
+                        Err(error) => this.report(error.clone(), cx),
                     })),
             );
         }
@@ -1583,4 +1594,88 @@ fn section_container(
         .w_full()
         .border_b_1()
         .border_color(cx.theme().border)
+}
+
+/// The command for the Outdated section's bulk buttons: one
+/// `pip install --upgrade "<name>==<latest>"` per qualifying package,
+/// chained with `&&` — patch-only updates when `ty` is `"patch"`, otherwise
+/// patch and minor. `Ok(None)` when nothing qualifies; an error (and nothing
+/// run) if any qualifying entry isn't shell-plain. `exe` must already be
+/// shell-ready (`shell_program`).
+fn update_all_command(
+    exe: &str,
+    outdated: &[PythonOutdatedPkg],
+    ty: &str,
+) -> Result<Option<String>, String> {
+    let mut segments = Vec::new();
+    for package in outdated.iter().filter(|o| match ty {
+        "patch" => o.kind == UpdateKind::Patch,
+        _ => matches!(o.kind, UpdateKind::Patch | UpdateKind::Minor),
+    }) {
+        check_package_name(&package.name)?;
+        check_version(&package.latest_version)?;
+        segments.push(format!(
+            "{exe} -m pip install --upgrade \"{}=={}\"",
+            package.name, package.latest_version
+        ));
+    }
+    Ok((!segments.is_empty()).then(|| segments.join(" && ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(name: &str, version: &str, latest: &str) -> PythonOutdatedPkg {
+        PythonOutdatedPkg {
+            name: name.to_string(),
+            version: version.to_string(),
+            latest_version: latest.to_string(),
+            kind: python_backend::classify_update(version, latest),
+        }
+    }
+
+    #[test]
+    fn path_file_name_is_the_last_component() {
+        assert_eq!(path_file_name("C:/work/services/api"), "api");
+        assert_eq!(path_file_name("single"), "single");
+        assert_eq!(path_file_name("/"), "/");
+    }
+
+    #[test]
+    fn update_all_pins_each_package_to_its_latest() {
+        let list = [
+            outdated("idna", "3.6", "3.6.1"),
+            outdated("urllib3", "2.1.0", "2.2.0"),
+            outdated("django", "4.2.0", "5.0.1"),
+        ];
+        assert_eq!(
+            update_all_command("python", &list, "minor").unwrap().as_deref(),
+            Some(
+                "python -m pip install --upgrade \"idna==3.6.1\" && \
+                 python -m pip install --upgrade \"urllib3==2.2.0\""
+            )
+        );
+        assert_eq!(
+            update_all_command("py", &list, "patch").unwrap().as_deref(),
+            Some("py -m pip install --upgrade \"idna==3.6.1\"")
+        );
+    }
+
+    #[test]
+    fn update_all_with_nothing_safe_to_update() {
+        assert_eq!(
+            update_all_command("python", &[outdated("django", "4.2.0", "5.0.1")], "minor"),
+            Ok(None)
+        );
+        assert_eq!(update_all_command("python", &[], "patch"), Ok(None));
+    }
+
+    #[test]
+    fn update_all_runs_nothing_if_any_entry_is_unsafe() {
+        let list = [outdated("idna", "3.6", "3.6.1"), outdated("x\" && calc", "1.0.0", "1.0.1")];
+        assert!(update_all_command("python", &list, "minor").is_err());
+        let list = [outdated("idna", "3.6", "3.6.1 && calc")];
+        assert!(update_all_command("python", &list, "minor").is_err());
+    }
 }

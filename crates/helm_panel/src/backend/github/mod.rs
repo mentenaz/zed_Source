@@ -24,7 +24,7 @@ pub use api::{
     gh_update_repo, gh_update_topics, gh_update_user,
 };
 pub use cli::{
-    gh_auth_status, gh_check_cli, gh_ensure_repo_scope, gh_login, gh_logout,
+    gh_auth_status, gh_check_cli, gh_ensure_scope, gh_login, gh_logout,
 };
 pub use clone::gh_clone_repo;
 

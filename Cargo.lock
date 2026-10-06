@@ -5578,6 +5578,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tempfile",
  "windows-registry 0.6.1",
 ]
 
@@ -12520,6 +12521,7 @@ dependencies = [
  "gpui_util",
  "log",
  "serde",
+ "tempfile",
  "windows-registry 0.6.1",
 ]
 
@@ -12540,6 +12542,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo 0.39.6",
+ "tempfile",
  "ui",
  "workspace",
  "worktree",
@@ -12672,6 +12675,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "windows-registry 0.6.1",
 ]
 
@@ -12684,6 +12688,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "project",
+ "tempfile",
  "tokio",
  "workspace",
 ]
@@ -15873,6 +15878,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tempfile",
  "windows-registry 0.6.1",
 ]
 

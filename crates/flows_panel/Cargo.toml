@@ -27,3 +27,7 @@ settings.workspace = true
 ui.workspace = true
 workflow_engine.workspace = true
 workspace.workspace = true
+
+[dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

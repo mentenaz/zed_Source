@@ -40,7 +40,7 @@ use crate::backend::github::{
     Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
     gh_accept_org_invitation, gh_accept_repo_invitation, gh_add_collaborator, gh_auth_status,
     gh_check_cli, gh_clone_repo, gh_create_pull, gh_create_release, gh_create_repo,
-    gh_decline_org_invitation, gh_decline_repo_invitation, gh_ensure_repo_scope, gh_get_branches,
+    gh_decline_org_invitation, gh_decline_repo_invitation, gh_ensure_scope, gh_get_branches,
     gh_get_collaborators, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
     gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
     gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_get_workflow_run,
@@ -98,6 +98,220 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", OpenSelectedRow, Some("HelmRowList")),
         KeyBinding::new("space", ActSelectedRow, Some("HelmRowList")),
     ]);
+}
+
+/// A change Helm sends to GitHub on the user's behalf. Every mutating
+/// handler builds one of these and hands it to [`HelmPanel::run_action`], so
+/// they all share one failure path — including being sent through the auth
+/// gate and re-sent when the token turns out to lack a scope.
+#[derive(Clone)]
+enum HelmAction {
+    CreateRepo {
+        opts: serde_json::Value,
+    },
+    EditRepo {
+        changes: serde_json::Value,
+        topics: Vec<String>,
+    },
+    CreatePull {
+        title: String,
+        body: String,
+        head: String,
+        base: String,
+    },
+    CreateRelease {
+        tag_name: String,
+        title: String,
+        body: String,
+        draft: bool,
+        prerelease: bool,
+    },
+    UpdateProfile {
+        changes: serde_json::Value,
+    },
+    AcceptRepoInvitation(u64),
+    DeclineRepoInvitation(u64),
+    AcceptOrgInvitation(String),
+    DeclineOrgInvitation(String),
+    SetCollaboratorPermission {
+        login: String,
+        permission: String,
+    },
+    RemoveCollaborator(String),
+}
+
+impl HelmAction {
+    /// The OAuth scope GitHub wants for this action — what the auth gate
+    /// asks for when the action is rejected and the token doesn't have it.
+    fn required_scope(&self) -> &'static str {
+        match self {
+            HelmAction::UpdateProfile { .. } => "user",
+            HelmAction::AcceptOrgInvitation(_) | HelmAction::DeclineOrgInvitation(_) => {
+                "write:org"
+            }
+            _ => "repo",
+        }
+    }
+
+    /// Completes "Failed to …" in the failure notification.
+    fn failure_label(&self) -> &'static str {
+        match self {
+            HelmAction::CreateRepo { .. } => "create repository",
+            HelmAction::EditRepo { .. } => "update repository",
+            HelmAction::CreatePull { .. } => "create pull request",
+            HelmAction::CreateRelease { .. } => "create release",
+            HelmAction::UpdateProfile { .. } => "update profile",
+            HelmAction::AcceptRepoInvitation(_) | HelmAction::AcceptOrgInvitation(_) => {
+                "accept invitation"
+            }
+            HelmAction::DeclineRepoInvitation(_) | HelmAction::DeclineOrgInvitation(_) => {
+                "decline invitation"
+            }
+            HelmAction::SetCollaboratorPermission { .. } => "update collaborator",
+            HelmAction::RemoveCollaborator(_) => "remove collaborator",
+        }
+    }
+
+    /// Whether this acts on `HelmPanel::selected_repo`.
+    fn needs_repo(&self) -> bool {
+        matches!(
+            self,
+            HelmAction::EditRepo { .. }
+                | HelmAction::CreatePull { .. }
+                | HelmAction::CreateRelease { .. }
+                | HelmAction::SetCollaboratorPermission { .. }
+                | HelmAction::RemoveCollaborator(_)
+        )
+    }
+
+    /// Makes the API call(s). Returns the resulting repository for the two
+    /// actions that produce one (create and edit), `None` otherwise.
+    async fn perform(self, repo: Option<Repo>, gh_state: &GhState) -> Result<Option<Repo>, String> {
+        let selected = || repo.clone().ok_or_else(|| "No repository selected".to_string());
+        match self {
+            HelmAction::CreateRepo { opts } => gh_create_repo(opts, gh_state).await.map(Some),
+            HelmAction::EditRepo { changes, topics } => {
+                let repo = selected()?;
+                let owner = repo.owner.login;
+                let updated = gh_update_repo(owner.clone(), repo.name, changes, gh_state).await?;
+                // The topics endpoint 404s on a pre-rename name, so it has to
+                // use the name from the PATCH response.
+                gh_update_topics(owner, updated.name.clone(), topics, gh_state).await?;
+                Ok(Some(updated))
+            }
+            HelmAction::CreatePull {
+                title,
+                body,
+                head,
+                base,
+            } => {
+                let repo = selected()?;
+                gh_create_pull(
+                    repo.owner.login,
+                    repo.name,
+                    head,
+                    base,
+                    title,
+                    (!body.is_empty()).then_some(body),
+                    gh_state,
+                )
+                .await
+                .map(|_| None)
+            }
+            HelmAction::CreateRelease {
+                tag_name,
+                title,
+                body,
+                draft,
+                prerelease,
+            } => {
+                let repo = selected()?;
+                gh_create_release(
+                    repo.owner.login,
+                    repo.name,
+                    tag_name,
+                    (!title.is_empty()).then_some(title),
+                    (!body.is_empty()).then_some(body),
+                    Some(draft),
+                    Some(prerelease),
+                    gh_state,
+                )
+                .await
+                .map(|_| None)
+            }
+            HelmAction::UpdateProfile { changes } => {
+                gh_update_user(changes, gh_state).await.map(|_| None)
+            }
+            HelmAction::AcceptRepoInvitation(id) => {
+                gh_accept_repo_invitation(id, gh_state).await.map(|_| None)
+            }
+            HelmAction::DeclineRepoInvitation(id) => {
+                gh_decline_repo_invitation(id, gh_state).await.map(|_| None)
+            }
+            HelmAction::AcceptOrgInvitation(org) => {
+                gh_accept_org_invitation(org, gh_state).await.map(|_| None)
+            }
+            HelmAction::DeclineOrgInvitation(org) => {
+                gh_decline_org_invitation(org, gh_state).await.map(|_| None)
+            }
+            HelmAction::SetCollaboratorPermission { login, permission } => {
+                let repo = selected()?;
+                gh_add_collaborator(repo.owner.login, repo.name, login, permission, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+            HelmAction::RemoveCollaborator(login) => {
+                let repo = selected()?;
+                gh_remove_collaborator(repo.owner.login, repo.name, login, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+        }
+    }
+}
+
+/// An action GitHub rejected because the token lacked a scope, kept so it
+/// can be re-sent once the auth gate has granted it.
+struct PendingAction {
+    action: HelmAction,
+    /// Where the user was when the action failed, restored after re-auth
+    /// (which otherwise always lands on the menu).
+    resume_screen: HelmScreen,
+}
+
+/// What `gh auth status` says about the token after a permission-shaped API
+/// failure — decides whether re-authorizing could fix it at all.
+enum TokenScopeCheck {
+    /// The token has the scope; the failure is about the account's rights
+    /// (or org policy), which re-auth can't change.
+    HasScope,
+    MissingScope,
+    NotLoggedIn,
+}
+
+/// The `error_msg` that puts the auth screen into its "authorize this scope"
+/// state. One function so the code that sets it and `render_auth`'s check
+/// for it can't drift apart.
+fn missing_scope_message(scope: &str) -> String {
+    format!("Missing '{scope}' scope.")
+}
+
+/// Whether a `gh_api_fetch` error is one a missing scope produces. GitHub
+/// answers 403 for an insufficient scope, 404 when the scope is so
+/// insufficient the resource isn't visible to the token at all, and 401 for
+/// a token it no longer accepts.
+fn is_permission_error(error: &str) -> bool {
+    ["GitHub API 401", "GitHub API 403", "GitHub API 404"]
+        .iter()
+        .any(|prefix| error.starts_with(prefix))
+}
+
+/// Whether a token carrying `granted` satisfies `needed`, counting the one
+/// parent scope that implies it (`admin:org` includes `write:org`).
+fn token_has_scope(granted: &[String], needed: &str) -> bool {
+    granted.iter().any(|scope| {
+        scope == needed || (needed == "write:org" && scope == "admin:org")
+    })
 }
 
 /// Which screen the panel is currently showing.
@@ -200,6 +414,12 @@ pub struct HelmPanel {
     // Auth
     auth_initialized: bool,
     login_started: bool,
+    /// Set when an action was bounced to the auth gate for a missing scope;
+    /// re-sent by `do_auth` once the scope is granted.
+    pending_action: Option<PendingAction>,
+    /// The scope the auth gate's "Authorize" button requests. `repo` for
+    /// the startup check; an action's own scope when it sent us there.
+    scope_to_authorize: &'static str,
     device_code: String,
     device_url: String,
     /// True for 2s after the device code is copied, flips the copy icon to
@@ -434,6 +654,12 @@ impl HelmRepositoryModal {
             HelmModalKind::CreatePull(default_base) => default_base.clone(),
             _ => String::new(),
         };
+        // Create defaults to private; Edit starts from the repo's current
+        // visibility so saving without touching the switch changes nothing.
+        let private = match &kind {
+            HelmModalKind::EditRepo(repo) => repo.private,
+            _ => true,
+        };
 
         let clone_progress_sub = matches!(kind, HelmModalKind::CloneRepo)
             .then(|| cx.observe(&parent, |_, _, cx| cx.notify()));
@@ -460,7 +686,7 @@ impl HelmRepositoryModal {
             base_branch: cx.new(|cx| InputState::new(window, cx).default_value(base_branch_value)),
             company: cx.new(|cx| InputState::new(window, cx).default_value(company_value)),
             location: cx.new(|cx| InputState::new(window, cx).default_value(location_value)),
-            private: true,
+            private,
             has_issues,
             has_wiki,
             has_projects,
@@ -498,6 +724,7 @@ impl Render for HelmRepositoryModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        let visibility_warning = cx.theme().warning;
         let parent = self.parent.clone();
         let title = self.title();
         let kind = self.kind.clone();
@@ -507,9 +734,17 @@ impl Render for HelmRepositoryModal {
         let content = match &kind {
             HelmModalKind::CreateRepo => v_flex()
                 .gap_3()
-                .child(Input::new(&self.name))
-                .child(Input::new(&self.description))
-                .child(Input::new(&self.organization))
+                .child(labeled_field("Name", Input::new(&self.name), muted))
+                .child(labeled_field(
+                    "Description",
+                    Input::new(&self.description),
+                    muted,
+                ))
+                .child(labeled_field(
+                    "Owner",
+                    Input::new(&self.organization),
+                    muted,
+                ))
                 .child(
                     Switch::new("helm-modal-private")
                         .label("Private")
@@ -520,12 +755,36 @@ impl Render for HelmRepositoryModal {
                         })),
                 )
                 .into_any_element(),
-            HelmModalKind::EditRepo(_) => v_flex()
+            HelmModalKind::EditRepo(repo) => v_flex()
                 .gap_3()
-                .child(Input::new(&self.name))
-                .child(Input::new(&self.description))
-                .child(Input::new(&self.homepage))
-                .child(Input::new(&self.topics))
+                .child(labeled_field("Name", Input::new(&self.name), muted))
+                .child(labeled_field(
+                    "Description",
+                    Input::new(&self.description),
+                    muted,
+                ))
+                .child(labeled_field(
+                    "Homepage",
+                    Input::new(&self.homepage),
+                    muted,
+                ))
+                .child(labeled_field("Topics", Input::new(&self.topics), muted))
+                .child(
+                    Switch::new("helm-modal-edit-private")
+                        .label("Private")
+                        .checked(self.private)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.private = *checked;
+                            cx.notify();
+                        })),
+                )
+                .children((self.private != repo.private).then(|| {
+                    div().text_xs().text_color(visibility_warning).child(if self.private {
+                        "Saving will make this repository private."
+                    } else {
+                        "Saving will make this repository public — anyone will be able to see it."
+                    })
+                }))
                 .child(
                     Switch::new("helm-modal-issues")
                         .label("Issues")
@@ -565,8 +824,13 @@ impl Render for HelmRepositoryModal {
                 .into_any_element(),
             HelmModalKind::AddCollaborator => v_flex()
                 .gap_3()
-                .child(Input::new(&self.username))
-                .child(
+                .child(labeled_field(
+                    "Username",
+                    Input::new(&self.username),
+                    muted,
+                ))
+                .child(labeled_field(
+                    "Permission",
                     Button::new("helm-modal-permission")
                         .outline()
                         .label(COLLABORATOR_PERMISSIONS[self.permission])
@@ -575,7 +839,8 @@ impl Render for HelmRepositoryModal {
                                 (this.permission + 1) % COLLABORATOR_PERMISSIONS.len();
                             cx.notify();
                         })),
-                )
+                    muted,
+                ))
                 .into_any_element(),
             HelmModalKind::RemoveCollaborator(login) => v_flex()
                 .gap_2()
@@ -832,6 +1097,7 @@ impl Render for HelmRepositoryModal {
                             description,
                             homepage,
                             topics,
+                            private,
                             has_issues,
                             has_wiki,
                             has_projects,
@@ -964,6 +1230,8 @@ impl HelmPanel {
                 error_msg: String::new(),
                 auth_initialized: false,
                 login_started: false,
+                pending_action: None,
+                scope_to_authorize: "repo",
                 device_code: String::new(),
                 device_url: String::new(),
                 code_copied: false,
@@ -1130,12 +1398,22 @@ impl HelmPanel {
                         this.error_msg.clear();
                         this.screen = HelmScreen::Menu;
                         this.load_repo_invitations(cx);
+                        // An action that was bounced here for a missing
+                        // scope: put the user back where they were and
+                        // re-send it. `may_reauthorize: false` so a second
+                        // rejection reports the failure instead of looping
+                        // the gate.
+                        if let Some(pending) = this.pending_action.take() {
+                            this.screen = pending.resume_screen;
+                            this.run_action(pending.action, false, cx);
+                        }
                     }
                     AuthOutcome::MissingRepoScope { account, scopes } => {
                         this.account = account;
                         this.scopes = scopes;
                         this.load_state = LoadState::Idle;
-                        this.error_msg = "Missing 'repo' scope.".into();
+                        this.scope_to_authorize = "repo";
+                        this.error_msg = missing_scope_message("repo");
                     }
                     AuthOutcome::NotLoggedIn => {
                         this.load_state = LoadState::Idle;
@@ -1191,6 +1469,28 @@ impl HelmPanel {
 
         // Subscribe before starting the login process so no early lines are
         // missed.
+        self.listen_for_device_code(cx);
+
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move { gh_login(&gh_state).await }).await;
+            this.update(cx, |this, cx| match result {
+                Ok(()) => this.do_auth(cx),
+                Err(e) => {
+                    this.load_state = LoadState::Error;
+                    this.error_msg = e;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Mirrors the device code and verification URL that `gh auth login` /
+    /// `gh auth refresh` print onto the panel, until the command reports
+    /// `Done`. Call before spawning the command.
+    fn listen_for_device_code(&mut self, cx: &mut Context<Self>) {
         let mut rx = self.gh_state.auth_tx.subscribe();
         cx.spawn(async move |this, cx| {
             loop {
@@ -1230,31 +1530,28 @@ impl HelmPanel {
             }
         })
         .detach();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_login(&gh_state).await }).await;
-            this.update(cx, |this, cx| match result {
-                Ok(()) => this.do_auth(cx),
-                Err(e) => {
-                    this.load_state = LoadState::Error;
-                    this.error_msg = e;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
-    fn handle_ensure_repo_scope(&mut self, cx: &mut Context<Self>) {
+    /// Runs `gh auth refresh -s <scope> --hostname github.com` for
+    /// `self.scope_to_authorize` and shows its device code the same way a
+    /// first login does — `login_started` is what switches `render_auth`
+    /// over to the code/URL view, without which the refresh would sit
+    /// waiting on a code the user was never shown.
+    fn handle_authorize_scope(&mut self, cx: &mut Context<Self>) {
+        self.login_started = true;
+        self.device_code.clear();
+        self.device_url.clear();
+        self.code_copied = false;
         self.load_state = LoadState::Loading;
         self.error_msg.clear();
         cx.notify();
 
+        self.listen_for_device_code(cx);
+
+        let scope = self.scope_to_authorize;
         let gh_state = self.gh_state.clone();
         cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_ensure_repo_scope(&gh_state).await }).await;
+            let result = on_tokio(async move { gh_ensure_scope(scope, &gh_state).await }).await;
             this.update(cx, |this, cx| match result {
                 Ok(()) => this.do_auth(cx),
                 Err(e) => {
@@ -1300,6 +1597,7 @@ impl HelmPanel {
                     this.user = None;
                     this.auth_initialized = false;
                     this.login_started = false;
+                    this.pending_action = None;
                     this.device_code.clear();
                     this.device_url.clear();
                     this.code_copied = false;
@@ -1689,6 +1987,171 @@ impl HelmPanel {
         .detach();
     }
 
+    /// Sends `action` to GitHub and applies its result to the panel.
+    ///
+    /// When GitHub rejects it with a permission-shaped error and
+    /// `may_reauthorize` is set, `gh auth status` is consulted to tell a
+    /// token that lacks the action's scope apart from an account that simply
+    /// lacks the rights. Only the former is sent to the auth gate (with the
+    /// action parked in `pending_action` for `do_auth` to re-send) —
+    /// re-authorizing can't fix the latter, so that just reports the
+    /// failure.
+    fn run_action(&mut self, action: HelmAction, may_reauthorize: bool, cx: &mut Context<Self>) {
+        let repo = self.selected_repo.clone();
+        if action.needs_repo() && repo.is_none() {
+            return;
+        }
+        let scope = action.required_scope();
+        let performed = action.clone();
+
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let (result, scope_check) = on_tokio(async move {
+                let result = performed.perform(repo, &gh_state).await;
+                let scope_check = match &result {
+                    Err(error) if may_reauthorize && is_permission_error(error) => {
+                        match gh_auth_status().await {
+                            Ok(Some(info)) if token_has_scope(&info.scopes, scope) => {
+                                TokenScopeCheck::HasScope
+                            }
+                            Ok(Some(_)) => TokenScopeCheck::MissingScope,
+                            Ok(None) => TokenScopeCheck::NotLoggedIn,
+                            // Couldn't ask `gh`; fall through to reporting
+                            // the original failure rather than guessing.
+                            Err(_) => TokenScopeCheck::HasScope,
+                        }
+                    }
+                    _ => TokenScopeCheck::HasScope,
+                };
+                (result, scope_check)
+            })
+            .await;
+            this.update(cx, |this, cx| match (result, scope_check) {
+                (Ok(repo), _) => {
+                    this.action_succeeded(&action, repo, cx);
+                    this.action_settled(&action, cx);
+                }
+                (Err(error), TokenScopeCheck::HasScope) => {
+                    this.notify(format!("Failed to {}: {error}", action.failure_label()), cx);
+                    this.action_settled(&action, cx);
+                }
+                (Err(_), TokenScopeCheck::MissingScope) => {
+                    this.notify(
+                        format!(
+                            "GitHub rejected the request: your login is missing the '{scope}' \
+                             scope. Authorize it and Helm will try again."
+                        ),
+                        cx,
+                    );
+                    this.pending_action = Some(PendingAction {
+                        action,
+                        resume_screen: this.screen,
+                    });
+                    // The same state `do_auth` leaves behind for a token
+                    // without `repo`, so `render_auth` shows its "Authorize"
+                    // prompt — for this action's scope.
+                    this.screen = HelmScreen::Auth;
+                    this.login_started = false;
+                    this.load_state = LoadState::Idle;
+                    this.scope_to_authorize = scope;
+                    this.error_msg = missing_scope_message(scope);
+                    cx.notify();
+                }
+                (Err(_), TokenScopeCheck::NotLoggedIn) => {
+                    this.notify(
+                        "GitHub rejected the request: you are no longer signed in. \
+                         Sign in and Helm will try again.",
+                        cx,
+                    );
+                    this.pending_action = Some(PendingAction {
+                        action,
+                        resume_screen: this.screen,
+                    });
+                    this.login_started = false;
+                    // Re-runs the status check, which lands on the login
+                    // prompt.
+                    this.do_auth(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Applies a successful action to panel state. `repo` is the repository
+    /// GitHub returned, for the actions that return one.
+    fn action_succeeded(&mut self, action: &HelmAction, repo: Option<Repo>, cx: &mut Context<Self>) {
+        match action {
+            HelmAction::CreateRepo { .. } => {
+                if let Some(repo) = repo {
+                    self.repos.push(repo.clone());
+                    self.select_repo(repo, cx);
+                }
+            }
+            HelmAction::EditRepo { .. } => {
+                if let Some(updated) = repo {
+                    if let Some(existing) = self.repos.iter_mut().find(|r| r.id == updated.id) {
+                        *existing = updated.clone();
+                    }
+                    self.selected_repo = Some(updated);
+                }
+            }
+            HelmAction::UpdateProfile { .. } => {
+                self.notify("Profile updated", cx);
+                let gh_state = self.gh_state.clone();
+                cx.spawn(async move |this, cx| {
+                    let updated = on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
+                    this.update(cx, |this, cx| {
+                        if let Ok(user) = updated {
+                            this.user = Some(user);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            HelmAction::AcceptRepoInvitation(id) => {
+                self.invitations.retain(|inv| inv.id != *id);
+                self.notify("Invitation accepted", cx);
+            }
+            HelmAction::DeclineRepoInvitation(id) => {
+                self.invitations.retain(|inv| inv.id != *id);
+                self.notify("Invitation declined", cx);
+            }
+            HelmAction::AcceptOrgInvitation(org) => {
+                self.org_invitations
+                    .retain(|inv| &inv.organization.login != org);
+                self.notify("Invitation accepted", cx);
+            }
+            HelmAction::DeclineOrgInvitation(org) => {
+                self.org_invitations
+                    .retain(|inv| &inv.organization.login != org);
+                self.notify("Invitation declined", cx);
+            }
+            HelmAction::CreatePull { .. }
+            | HelmAction::CreateRelease { .. }
+            | HelmAction::SetCollaboratorPermission { .. }
+            | HelmAction::RemoveCollaborator(_) => {}
+        }
+        self.repo_invitation_count = self.invitations.len() + self.org_invitations.len();
+        cx.notify();
+    }
+
+    /// Runs once an action has finished either way (but not when it was
+    /// parked for re-auth): reloads the list the action edits, so the UI
+    /// reflects what GitHub actually has rather than what was attempted.
+    fn action_settled(&mut self, action: &HelmAction, cx: &mut Context<Self>) {
+        match action {
+            HelmAction::CreatePull { .. } => self.load_pulls(cx),
+            HelmAction::CreateRelease { .. } => self.load_releases(cx),
+            HelmAction::SetCollaboratorPermission { .. } | HelmAction::RemoveCollaborator(_) => {
+                self.load_collaborators(cx)
+            }
+            _ => {}
+        }
+    }
+
     /// Creates a repo under the authenticated user's own account, or under the
     /// given org (`Some(owner)`) via `gh_create_repo`'s `"owner"` key — the
     /// key is stripped from the request body and rerouted to
@@ -1702,7 +2165,7 @@ impl HelmPanel {
         description: String,
         private: bool,
         owner: Option<String>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let mut opts = json!({
@@ -1713,48 +2176,31 @@ impl HelmPanel {
         if let Some(owner) = owner {
             opts["owner"] = json!(owner);
         }
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move { gh_create_repo(opts, &gh_state).await }).await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(repo) => {
-                    this.repos.push(repo.clone());
-                    this.select_repo(repo, cx);
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to create repository: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(HelmAction::CreateRepo { opts }, true, cx);
     }
 
     /// Renames/updates description+homepage, toggles feature switches
-    /// (issues/wiki/projects/discussions) and updates topics for
-    /// `self.selected_repo`, in that order — the topics endpoint 404s on the
-    /// pre-rename name, so it must use the renamed repo's name from the
-    /// first response.
+    /// (issues/wiki/projects/discussions), optionally changes visibility,
+    /// and updates topics for `self.selected_repo`.
     fn handle_edit_repo(
         &mut self,
         name: String,
         description: String,
         homepage: String,
         topics: Vec<String>,
+        private: bool,
         has_issues: bool,
         has_wiki: bool,
         has_projects: bool,
         has_discussions: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.selected_repo.clone() else {
+        let Some(repo) = self.selected_repo.as_ref() else {
             return;
         };
-        let owner = repo.owner.login.clone();
 
-        let changes = json!({
+        let mut changes = json!({
             "name": name,
             "description": description,
             "homepage": homepage,
@@ -1763,39 +2209,15 @@ impl HelmPanel {
             "has_projects": has_projects,
             "has_discussions": has_discussions,
         });
+        // Only sent when the switch was actually flipped: a visibility change
+        // is the one consequential field here, so an unrelated edit (or an
+        // `internal` repo, which also reports `private: true`) must not
+        // restate it.
+        if private != repo.private {
+            changes["private"] = json!(private);
+        }
 
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                let updated =
-                    gh_update_repo(owner.clone(), repo.name.clone(), changes, &gh_state).await?;
-                let topics_result =
-                    gh_update_topics(owner, updated.name.clone(), topics, &gh_state).await;
-                match topics_result {
-                    Ok(_) => Ok(updated),
-                    Err(e) => Err(e),
-                }
-            })
-            .await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(mut updated) => {
-                    // `gh_update_repo`'s response reflects the PATCH body, not the
-                    // just-applied topics PUT — fold the topics we sent back in so
-                    // `selected_repo` doesn't briefly show stale ones.
-                    if let Some(idx) = this.repos.iter().position(|r| r.id == updated.id) {
-                        std::mem::swap(&mut this.repos[idx], &mut updated);
-                        updated = this.repos[idx].clone();
-                    }
-                    this.selected_repo = Some(updated);
-                    cx.notify();
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to update repository: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(HelmAction::EditRepo { changes, topics }, true, cx);
     }
 
     /// Loads the branch list for `self.selected_repo` — mirrors `load_repos`'s
@@ -2372,36 +2794,19 @@ impl HelmPanel {
         body: String,
         head: String,
         base: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                gh_create_pull(
-                    repo.owner.login,
-                    repo.name,
-                    head,
-                    base,
-                    title,
-                    (!body.is_empty()).then_some(body),
-                    &gh_state,
-                )
-                .await
-            })
-            .await;
-            this.update_in(cx, |this, _window, cx| {
-                if let Err(e) = result {
-                    this.notify(format!("Failed to create pull request: {e}"), cx);
-                }
-                this.load_pulls(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(
+            HelmAction::CreatePull {
+                title,
+                body,
+                head,
+                base,
+            },
+            true,
+            cx,
+        );
     }
 
     /// Opens the "Create release" modal.
@@ -2416,37 +2821,20 @@ impl HelmPanel {
         body: String,
         draft: bool,
         prerelease: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                gh_create_release(
-                    repo.owner.login,
-                    repo.name,
-                    tag_name,
-                    (!title.is_empty()).then_some(title),
-                    (!body.is_empty()).then_some(body),
-                    Some(draft),
-                    Some(prerelease),
-                    &gh_state,
-                )
-                .await
-            })
-            .await;
-            this.update_in(cx, |this, _window, cx| {
-                if let Err(e) = result {
-                    this.notify(format!("Failed to create release: {e}"), cx);
-                }
-                this.load_releases(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(
+            HelmAction::CreateRelease {
+                tag_name,
+                title,
+                body,
+                draft,
+                prerelease,
+            },
+            true,
+            cx,
+        );
     }
 
     /// Opens the "Edit profile" modal, prefilled from `self.user`.
@@ -2458,14 +2846,10 @@ impl HelmPanel {
     }
 
     /// Updates the signed-in user's profile. GitHub's `/user` PATCH endpoint
-    /// needs the `user` OAuth scope — already granted at login time
-    /// (`gh_login` requests `repo,read:org,user` up front, see cli.rs), so
-    /// unlike `gh_ensure_repo_scope` (an explicit, user-visible re-auth
-    /// screen for a scope that's genuinely sometimes missing) this doesn't
-    /// call `gh_ensure_user_scope` here: that runs `gh auth refresh`, an
-    /// interactive device-code re-auth, with no UI surfacing the
-    /// code/URL — it would silently hang Save waiting on a browser flow the
-    /// user was never shown.
+    /// needs the `user` OAuth scope, which `gh_login` requests up front
+    /// (`repo,read:org,user`, see cli.rs). A login made outside Helm may not
+    /// have it; in that case `run_action` sends this through the auth gate
+    /// for `user`, where the device code is shown, and re-sends it.
     fn handle_update_profile(
         &mut self,
         name: String,
@@ -2473,145 +2857,47 @@ impl HelmPanel {
         company: String,
         location: String,
         blog: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                let changes = json!({
-                    "name": name,
-                    "bio": bio,
-                    "company": company,
-                    "location": location,
-                    "blog": blog,
-                });
-                gh_update_user(changes, &gh_state).await
-            })
-            .await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(_) => {
-                    this.notify("Profile updated", cx);
-                    let gh_state = this.gh_state.clone();
-                    cx.spawn_in(window, async move |this, cx| {
-                        let updated =
-                            on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
-                        this.update(cx, |this, cx| {
-                            if let Ok(user) = updated {
-                                this.user = Some(user);
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to update profile: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        let changes = json!({
+            "name": name,
+            "bio": bio,
+            "company": company,
+            "location": location,
+            "blog": blog,
+        });
+        self.run_action(HelmAction::UpdateProfile { changes }, true, cx);
     }
 
     /// Accepts a pending repo invitation and drops it from the list + badge.
-    fn handle_accept_invitation(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_accept_repo_invitation(id, &gh_state).await }).await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(()) => {
-                    this.invitations.retain(|inv| inv.id != id);
-                    this.repo_invitation_count = this.invitations.len();
-                    this.notify("Invitation accepted", cx);
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to accept invitation: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+    fn handle_accept_invitation(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+        self.run_action(HelmAction::AcceptRepoInvitation(id), true, cx);
     }
 
     /// Declines a pending repo invitation and drops it from the list + badge.
-    fn handle_decline_invitation(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_decline_repo_invitation(id, &gh_state).await }).await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(()) => {
-                    this.invitations.retain(|inv| inv.id != id);
-                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
-                    this.notify("Invitation declined", cx);
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to decline invitation: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+    fn handle_decline_invitation(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+        self.run_action(HelmAction::DeclineRepoInvitation(id), true, cx);
     }
 
     /// Accepts a pending org invitation and drops it from the list + badge.
     fn handle_accept_org_invitation(
         &mut self,
         org: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let gh_state = self.gh_state.clone();
-        let org_for_call = org.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_accept_org_invitation(org_for_call, &gh_state).await })
-                    .await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(()) => {
-                    this.org_invitations
-                        .retain(|inv| inv.organization.login != org);
-                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
-                    this.notify("Invitation accepted", cx);
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to accept invitation: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(HelmAction::AcceptOrgInvitation(org), true, cx);
     }
 
     /// Declines a pending org invitation and drops it from the list + badge.
     fn handle_decline_org_invitation(
         &mut self,
         org: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let gh_state = self.gh_state.clone();
-        let org_for_call = org.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_decline_org_invitation(org_for_call, &gh_state).await })
-                    .await;
-            this.update_in(cx, |this, _window, cx| match result {
-                Ok(()) => {
-                    this.org_invitations.retain(|inv| inv.organization.login != org);
-                    this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
-                    this.notify("Invitation declined", cx);
-                }
-                Err(e) => {
-                    this.notify(format!("Failed to decline invitation: {e}"), cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(HelmAction::DeclineOrgInvitation(org), true, cx);
     }
 
     /// Sets `login`'s permission on `self.selected_repo` — GitHub's
@@ -2622,27 +2908,14 @@ impl HelmPanel {
         &mut self,
         login: String,
         permission: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                gh_add_collaborator(repo.owner.login, repo.name, login, permission, &gh_state).await
-            })
-            .await;
-            this.update_in(cx, |this, _window, cx| {
-                if let Err(e) = result {
-                    this.notify(format!("Failed to update collaborator: {e}"), cx);
-                }
-                this.load_collaborators(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(
+            HelmAction::SetCollaboratorPermission { login, permission },
+            true,
+            cx,
+        );
     }
 
     /// Removes `login` as a collaborator on `self.selected_repo`, then
@@ -2650,27 +2923,10 @@ impl HelmPanel {
     fn handle_remove_collaborator(
         &mut self,
         login: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        let gh_state = self.gh_state.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = on_tokio(async move {
-                gh_remove_collaborator(repo.owner.login, repo.name, login, &gh_state).await
-            })
-            .await;
-            this.update_in(cx, |this, _window, cx| {
-                if let Err(e) = result {
-                    this.notify(format!("Failed to remove collaborator: {e}"), cx);
-                }
-                this.load_collaborators(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.run_action(HelmAction::RemoveCollaborator(login), true, cx);
     }
 
     /// Navigate to `screen` as a user-initiated action: push the current
@@ -3072,9 +3328,12 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        // Missing 'repo' scope.
-        if self.error_msg.contains("repo") && !self.login_started {
+        // Missing scope — `repo` from the startup check, or whichever scope
+        // a rejected action needs.
+        if self.error_msg == missing_scope_message(self.scope_to_authorize) && !self.login_started
+        {
             let loading = self.load_state == LoadState::Loading;
+            let scope = self.scope_to_authorize;
             return v_flex()
                 .gap_3()
                 .p_4()
@@ -3086,20 +3345,28 @@ impl HelmPanel {
                         .bg(warning.opacity(0.12))
                         .text_color(warning)
                         .text_sm()
-                        .child("⚠ Missing 'repo' scope"),
+                        .child(format!("⚠ Missing '{scope}' scope")),
                 )
                 .child(
                     div()
                         .text_sm()
                         .text_color(muted_foreground)
-                        .child("Helm needs the repo scope to manage repositories."),
+                        .child(if self.pending_action.is_some() {
+                            format!(
+                                "GitHub rejected your last change because this login lacks \
+                                 the {scope} scope. Authorize it and Helm will send the \
+                                 change again."
+                            )
+                        } else {
+                            format!("Helm needs the {scope} scope to manage repositories.")
+                        }),
                 )
                 .child(
-                    Button::new("auth-ensure-repo-scope")
+                    Button::new("auth-authorize-scope")
                         .primary()
-                        .label("Authorize repo scope")
+                        .label(format!("Authorize {scope} scope"))
                         .disabled(loading)
-                        .on_click(cx.listener(|this, _, _, cx| this.handle_ensure_repo_scope(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.handle_authorize_scope(cx))),
                 )
                 .into_any_element();
         }
@@ -6993,7 +7260,7 @@ impl HelmPanel {
 /// `CreateRepo`'s) have no distinguishing placeholder text of their own.
 fn labeled_field(
     label: &'static str,
-    input: Input,
+    input: impl IntoElement,
     muted: gpui::Hsla,
 ) -> impl IntoElement {
     v_flex()
@@ -7014,8 +7281,24 @@ fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<u
     if len == 0 {
         return None;
     }
-    let ix = selected.unwrap_or(0);
-    Some(if forward { (ix + 1) % len } else { (ix + len - 1) % len })
+    Some(match selected {
+        // Nothing selected yet: the first press lands on the nearest end
+        // rather than stepping past it.
+        None => {
+            if forward {
+                0
+            } else {
+                len - 1
+            }
+        }
+        Some(ix) => {
+            if forward {
+                (ix + 1) % len
+            } else {
+                (ix + len - 1) % len
+            }
+        }
+    })
 }
 
 /// `gpui_flow` takes raw `u32` colors (it has no notion of a theme), so
@@ -7610,5 +7893,97 @@ impl Render for HelmPanel {
                         HelmScreen::Security => self.render_security(cx).into_any_element(),
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scopes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn permission_errors_are_recognized_by_status() {
+        assert!(is_permission_error("GitHub API 401: {\"message\":\"Bad credentials\"}"));
+        assert!(is_permission_error("GitHub API 403: {\"message\":\"Forbidden\"}"));
+        assert!(is_permission_error("GitHub API 404: {\"message\":\"Not Found\"}"));
+
+        // Validation, server and transport failures are not about the token.
+        assert!(!is_permission_error("GitHub API 422: {\"message\":\"Validation Failed\"}"));
+        assert!(!is_permission_error("GitHub API 500: oops"));
+        assert!(!is_permission_error("Network error: timed out"));
+        assert!(!is_permission_error("gh auth token failed: GitHub API 403"));
+    }
+
+    #[test]
+    fn token_scope_matching() {
+        let granted = scopes(&["gist", "read:org", "repo"]);
+        assert!(token_has_scope(&granted, "repo"));
+        assert!(!token_has_scope(&granted, "user"));
+        // `read:org` is not enough to change an org membership.
+        assert!(!token_has_scope(&granted, "write:org"));
+        assert!(token_has_scope(&scopes(&["write:org"]), "write:org"));
+        assert!(token_has_scope(&scopes(&["admin:org"]), "write:org"));
+        // A narrower repo scope is not the full one.
+        assert!(!token_has_scope(&scopes(&["public_repo"]), "repo"));
+        assert!(!token_has_scope(&[], "repo"));
+    }
+
+    #[test]
+    fn actions_ask_for_the_scope_they_need() {
+        let json = serde_json::Value::Null;
+        assert_eq!(HelmAction::CreateRepo { opts: json.clone() }.required_scope(), "repo");
+        assert_eq!(
+            HelmAction::EditRepo { changes: json.clone(), topics: Vec::new() }.required_scope(),
+            "repo"
+        );
+        assert_eq!(HelmAction::RemoveCollaborator("x".into()).required_scope(), "repo");
+        assert_eq!(HelmAction::AcceptRepoInvitation(1).required_scope(), "repo");
+        assert_eq!(HelmAction::UpdateProfile { changes: json }.required_scope(), "user");
+        assert_eq!(HelmAction::AcceptOrgInvitation("o".into()).required_scope(), "write:org");
+        assert_eq!(HelmAction::DeclineOrgInvitation("o".into()).required_scope(), "write:org");
+    }
+
+    #[test]
+    fn only_repository_actions_need_a_selected_repo() {
+        let json = serde_json::Value::Null;
+        assert!(HelmAction::EditRepo { changes: json.clone(), topics: Vec::new() }.needs_repo());
+        assert!(HelmAction::RemoveCollaborator("x".into()).needs_repo());
+        assert!(!HelmAction::CreateRepo { opts: json.clone() }.needs_repo());
+        assert!(!HelmAction::UpdateProfile { changes: json }.needs_repo());
+        assert!(!HelmAction::AcceptRepoInvitation(1).needs_repo());
+    }
+
+    #[test]
+    fn step_selected_starts_at_the_nearest_end() {
+        assert_eq!(step_selected(None, 3, true), Some(0));
+        assert_eq!(step_selected(None, 3, false), Some(2));
+    }
+
+    #[test]
+    fn step_selected_wraps_at_both_ends() {
+        assert_eq!(step_selected(Some(0), 3, true), Some(1));
+        assert_eq!(step_selected(Some(2), 3, true), Some(0));
+        assert_eq!(step_selected(Some(0), 3, false), Some(2));
+        assert_eq!(step_selected(Some(1), 3, false), Some(0));
+        assert_eq!(step_selected(Some(0), 1, true), Some(0));
+        assert_eq!(step_selected(Some(0), 1, false), Some(0));
+    }
+
+    #[test]
+    fn step_selected_handles_empty_and_shrunken_lists() {
+        assert_eq!(step_selected(None, 0, true), None);
+        assert_eq!(step_selected(Some(4), 0, false), None);
+        // A selection left over from a longer list still lands in range.
+        assert!(step_selected(Some(9), 3, true).is_some_and(|ix| ix < 3));
+        assert!(step_selected(Some(9), 3, false).is_some_and(|ix| ix < 3));
+    }
+
+    #[test]
+    fn missing_scope_message_names_the_scope() {
+        assert_eq!(missing_scope_message("repo"), "Missing 'repo' scope.");
+        assert_ne!(missing_scope_message("repo"), missing_scope_message("user"));
     }
 }

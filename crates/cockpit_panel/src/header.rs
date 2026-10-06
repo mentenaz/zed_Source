@@ -52,3 +52,24 @@ fn fmt_uptime(total_seconds: u64) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_under_a_day_omits_the_day_segment() {
+        assert_eq!(fmt_uptime(0), "00:00:00");
+        assert_eq!(fmt_uptime(59), "00:00:59");
+        assert_eq!(fmt_uptime(60), "00:01:00");
+        assert_eq!(fmt_uptime(3_661), "01:01:01");
+        assert_eq!(fmt_uptime(86_399), "23:59:59");
+    }
+
+    #[test]
+    fn uptime_of_a_day_or_more_shows_days() {
+        assert_eq!(fmt_uptime(86_400), "1d 00:00:00");
+        assert_eq!(fmt_uptime(90_061), "1d 01:01:01");
+        assert_eq!(fmt_uptime(40 * 86_400 + 5), "40d 00:00:05");
+    }
+}

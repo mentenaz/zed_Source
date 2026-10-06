@@ -52,6 +52,7 @@ use gpui_component::{
     v_flex,
 };
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_version};
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 
 mod details;
@@ -524,8 +525,7 @@ impl NuGetManagerPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let command = dotnet_command(&["add", "package", name, "--version", version]);
-        self.kick_run(&format!("install {name}"), command, window, cx);
+        self.run_or_reject(&format!("install {name}"), install_command(name, version), window, cx);
     }
 
     /// Updates an installed package to the given version — `dotnet add
@@ -560,8 +560,7 @@ impl NuGetManagerPanel {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
-                let command = dotnet_command(&["remove", "package", &name]);
-                this.kick_run(&format!("remove {name}"), command, window, cx);
+                this.run_or_reject(&format!("remove {name}"), remove_command(&name), window, cx);
             })
             .ok();
         })
@@ -573,26 +572,29 @@ impl NuGetManagerPanel {
     /// `dotnet add package` per target in a single Script Runner run (chained
     /// with `&&`, which the pwsh shell the runner uses understands).
     fn update_all(&mut self, ty: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let moves: Vec<(String, String)> = self
-            .outdated
-            .iter()
-            .filter(|o| {
-                let kind = classify_update(&o.installed, &o.latest);
-                match ty {
-                    "patch" => kind == UpdateKind::Patch,
-                    _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
-                }
-            })
-            .map(|o| (o.id.clone(), o.latest.clone()))
-            .collect();
-        if moves.is_empty() {
-            return;
+        match update_all_command(&self.outdated, ty) {
+            Ok(Some(command)) => self.kick_run("update all", command, window, cx),
+            Ok(None) => {}
+            Err(error) => self.run_or_reject("update all", Err(error), window, cx),
         }
-        let segments = moves
-            .iter()
-            .map(|(id, latest)| dotnet_command(&["add", "package", id, "--version", latest]))
-            .collect::<Vec<_>>();
-        self.kick_run("update all", segments.join(" && "), window, cx);
+    }
+
+    /// Runs `command` if it was built successfully; otherwise shows the
+    /// refusal (see `script_runner_panel::command`).
+    fn run_or_reject(
+        &mut self,
+        label: &str,
+        command: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            Ok(command) => self.kick_run(label, command, window, cx),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     /// Runs a `dotnet` command for the active project, streaming its output
@@ -872,5 +874,119 @@ impl Render for NuGetManagerPanel {
             .pl_2()
             .bg(theme.background)
             .child(body)
+    }
+}
+
+/// `dotnet add package <id> --version <version>` — installs, or moves an
+/// existing reference to that version. Refuses an id or version that isn't
+/// shell-plain.
+fn install_command(id: &str, version: &str) -> Result<String, String> {
+    check_package_name(id)?;
+    check_version(version)?;
+    Ok(dotnet_command(&["add", "package", id, "--version", version]))
+}
+
+/// `dotnet remove package <id>`.
+fn remove_command(id: &str) -> Result<String, String> {
+    check_package_name(id)?;
+    Ok(dotnet_command(&["remove", "package", id]))
+}
+
+/// The command for "Update all": one `dotnet add package <id> --version
+/// <latest>` per qualifying package, chained with `&&` so a failure stops
+/// the rest — patch-only updates when `ty` is `"patch"`, otherwise patch and
+/// minor. `Ok(None)` when nothing qualifies; an error (and nothing run) if
+/// any qualifying entry isn't shell-plain.
+fn update_all_command(outdated: &[OutdatedPackage], ty: &str) -> Result<Option<String>, String> {
+    let mut segments = Vec::new();
+    for package in outdated.iter().filter(|o| {
+        let kind = classify_update(&o.installed, &o.latest);
+        match ty {
+            "patch" => kind == UpdateKind::Patch,
+            _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
+        }
+    }) {
+        segments.push(install_command(&package.id, &package.latest)?);
+    }
+    Ok((!segments.is_empty()).then(|| segments.join(" && ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(id: &str, installed: &str, latest: &str) -> OutdatedPackage {
+        OutdatedPackage {
+            id: id.to_string(),
+            installed: installed.to_string(),
+            latest: latest.to_string(),
+            update_kind: classify_update(installed, latest),
+        }
+    }
+
+    #[test]
+    fn dotnet_command_joins_parts() {
+        assert_eq!(
+            dotnet_command(&["add", "package", "Serilog", "--version", "4.0.0"]),
+            "dotnet add package Serilog --version 4.0.0"
+        );
+        assert_eq!(dotnet_command(&[]), "dotnet");
+    }
+
+    #[test]
+    fn install_and_remove_commands() {
+        assert_eq!(
+            install_command("Serilog", "4.0.0").as_deref(),
+            Ok("dotnet add package Serilog --version 4.0.0")
+        );
+        assert_eq!(remove_command("Newtonsoft.Json").as_deref(), Ok("dotnet remove package Newtonsoft.Json"));
+    }
+
+    #[test]
+    fn install_and_remove_refuse_shell_syntax() {
+        assert!(install_command("Serilog; calc", "4.0.0").is_err());
+        assert!(install_command("Serilog", "4.0.0 && calc").is_err());
+        assert!(install_command("--source=http://evil.test", "1.0.0").is_err());
+        assert!(remove_command("Serilog|more").is_err());
+        assert!(remove_command("").is_err());
+    }
+
+    #[test]
+    fn update_all_chains_one_command_per_package() {
+        let list = [
+            outdated("Dapper", "2.1.0", "2.1.35"),
+            outdated("Serilog", "3.0.0", "3.1.0"),
+            outdated("Polly", "7.0.0", "8.0.0"),
+        ];
+        assert_eq!(
+            update_all_command(&list, "minor").unwrap().as_deref(),
+            Some(
+                "dotnet add package Dapper --version 2.1.35 && \
+                 dotnet add package Serilog --version 3.1.0"
+            )
+        );
+        assert_eq!(
+            update_all_command(&list, "patch").unwrap().as_deref(),
+            Some("dotnet add package Dapper --version 2.1.35")
+        );
+    }
+
+    #[test]
+    fn update_all_with_nothing_safe_to_update() {
+        assert_eq!(update_all_command(&[outdated("Polly", "7.0.0", "8.0.0")], "minor"), Ok(None));
+        assert_eq!(update_all_command(&[], "patch"), Ok(None));
+    }
+
+    #[test]
+    fn update_all_runs_nothing_if_any_entry_is_unsafe() {
+        let list = [outdated("Dapper", "2.1.0", "2.1.35"), outdated("Bad && calc", "1.0.0", "1.0.1")];
+        assert!(update_all_command(&list, "minor").is_err());
+    }
+
+    #[test]
+    fn fallback_name_is_the_last_path_component() {
+        assert_eq!(fallback_name("C:/work/MyApp"), "MyApp");
+        assert_eq!(fallback_name("/home/me/projects/api"), "api");
+        assert_eq!(fallback_name(""), "main");
     }
 }

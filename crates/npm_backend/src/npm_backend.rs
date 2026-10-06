@@ -315,7 +315,11 @@ pub fn parse_installed(raw: &str) -> Result<Vec<NpmInstalledPkg>, String> {
                     .and_then(|n| n.as_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| {
-                        path.rsplit('/').next().unwrap_or(path).to_string()
+                        // Everything after `node_modules/`, so a scoped
+                        // package keeps its `@scope/` prefix.
+                        path.rsplit_once("node_modules/")
+                            .map_or(path, |(_, name)| name)
+                            .to_string()
                     }),
                 version: entry
                     .get("version")
@@ -736,4 +740,432 @@ pub fn has_vuln(pkg_names: &[String], audit: &[NpmAuditVuln]) -> bool {
     pkg_names
         .iter()
         .any(|name| audit.iter().any(|a| a.package == *name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn installed(name: &str, version: &str) -> NpmInstalledPkg {
+        NpmInstalledPkg {
+            name: name.to_string(),
+            version: version.to_string(),
+            path: None,
+            is_dev: false,
+        }
+    }
+
+    fn peers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, range)| (name.to_string(), range.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn package_manager_follows_the_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(detect_package_manager(&root), PackageManager::Npm);
+
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        assert_eq!(detect_package_manager(&root), PackageManager::Npm);
+
+        std::fs::write(dir.path().join("bun.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(&root), PackageManager::Bun);
+
+        std::fs::write(dir.path().join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(&root), PackageManager::Yarn);
+
+        // pnpm is checked first, so it wins when several lockfiles coexist.
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_package_manager(&root), PackageManager::Pnpm);
+    }
+
+    #[test]
+    fn package_manager_cli_names() {
+        assert_eq!(PackageManager::Npm.cli_name(), "npm");
+        assert_eq!(PackageManager::Yarn.cli_name(), "yarn");
+        assert_eq!(PackageManager::Pnpm.cli_name(), "pnpm");
+        assert_eq!(PackageManager::Bun.cli_name(), "bun");
+    }
+
+    #[test]
+    fn installed_classic_shape_takes_names_from_keys() {
+        let raw = json!({
+            "name": "app",
+            "dependencies": {
+                "zod": { "version": "3.23.8" },
+                "@types/node": { "version": "20.11.0", "dev": true, "path": "/app/node_modules/@types/node" },
+                "Express": { "version": "4.19.2" },
+                "broken": {}
+            }
+        })
+        .to_string();
+
+        let packages = parse_installed(&raw).unwrap();
+        let summary: Vec<_> = packages
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str(), p.is_dev))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("@types/node", "20.11.0", true),
+                ("broken", "", false),
+                ("Express", "4.19.2", false),
+                ("zod", "3.23.8", false),
+            ]
+        );
+        assert_eq!(packages[0].path.as_deref(), Some("/app/node_modules/@types/node"));
+        assert_eq!(packages[3].path, None);
+    }
+
+    #[test]
+    fn installed_lockfile_shape_keeps_direct_installs_only() {
+        let raw = json!({
+            "packages": {
+                "": { "name": "app", "version": "1.0.0" },
+                "node_modules/react": { "version": "18.2.0" },
+                "node_modules/@scope/widget": { "version": "2.0.0", "dev": true },
+                "node_modules/named": { "name": "real-name", "version": "1.1.0" },
+                "node_modules/react/node_modules/loose-envify": { "version": "1.4.0" },
+                "packages/local": { "version": "0.0.1" }
+            }
+        })
+        .to_string();
+
+        let packages = parse_installed(&raw).unwrap();
+        let summary: Vec<_> = packages
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str(), p.is_dev))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("@scope/widget", "2.0.0", true),
+                ("react", "18.2.0", false),
+                ("real-name", "1.1.0", false),
+            ]
+        );
+        assert_eq!(packages[1].path.as_deref(), Some("node_modules/react"));
+    }
+
+    #[test]
+    fn installed_rejects_unrecognized_output() {
+        assert!(parse_installed(r#"{"name":"app"}"#).is_err());
+        assert!(parse_installed("npm ERR! something").is_err());
+        assert!(parse_installed(r#"{"dependencies":{}}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn outdated_rows_are_sorted_and_incomplete_ones_dropped() {
+        let raw = json!({
+            "zod": { "current": "3.22.0", "wanted": "3.23.8", "latest": "3.23.8", "location": "node_modules/zod" },
+            "react": { "current": "17.0.2", "wanted": "17.0.2", "latest": "18.2.0" },
+            "missing-install": { "wanted": "1.0.0", "latest": "1.0.0" },
+            "no-latest": { "current": "1.0.0", "wanted": "1.0.1" }
+        })
+        .to_string();
+
+        let outdated = parse_outdated(&raw).unwrap();
+        let names: Vec<_> = outdated.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["missing-install", "react", "zod"]);
+        assert_eq!(outdated[0].current, "");
+        assert_eq!(outdated[1].latest, "18.2.0");
+        assert_eq!(outdated[1].location, None);
+        assert_eq!(outdated[2].location.as_deref(), Some("node_modules/zod"));
+    }
+
+    #[test]
+    fn outdated_non_object_output_means_up_to_date() {
+        assert!(parse_outdated("{}").unwrap().is_empty());
+        assert!(parse_outdated("[]").unwrap().is_empty());
+        assert!(parse_outdated("").is_err());
+    }
+
+    #[test]
+    fn audit_modern_shape() {
+        let raw = json!({
+            "vulnerabilities": {
+                "lodash": {
+                    "severity": "high",
+                    "via": [
+                        "some-dependency",
+                        { "title": "Prototype Pollution", "url": "https://example.test/lodash", "exploitability": 3 }
+                    ],
+                    "fixAvailable": { "name": "lodash", "version": "4.17.21" }
+                },
+                "transitive-only": {
+                    "severity": "moderate",
+                    "via": ["lodash"],
+                    "fixAvailable": true
+                },
+                "bare": {}
+            }
+        })
+        .to_string();
+
+        let vulns = parse_audit(&raw).unwrap();
+        let packages: Vec<_> = vulns.iter().map(|v| v.package.as_str()).collect();
+        assert_eq!(packages, vec!["bare", "lodash", "transitive-only"]);
+
+        assert_eq!(vulns[0].severity, "unknown");
+        assert_eq!(vulns[0].title, "");
+        assert_eq!(vulns[0].fixed_in, None);
+
+        assert_eq!(vulns[1].severity, "high");
+        assert_eq!(vulns[1].title, "Prototype Pollution");
+        assert_eq!(vulns[1].url, "https://example.test/lodash");
+        assert_eq!(vulns[1].exploitability, Some(3));
+        assert_eq!(vulns[1].fixed_in.as_deref(), Some("4.17.21"));
+
+        // `via` holding only package names carries no advisory text, and a
+        // boolean `fixAvailable` names no version.
+        assert_eq!(vulns[2].title, "");
+        assert_eq!(vulns[2].url, "");
+        assert_eq!(vulns[2].fixed_in, None);
+    }
+
+    #[test]
+    fn audit_legacy_shape() {
+        let raw = json!({
+            "advisories": {
+                "1523": {
+                    "module_name": "minimist",
+                    "severity": "low",
+                    "title": "Prototype Pollution",
+                    "url": "https://example.test/1523",
+                    "patched_versions": ">=1.2.3"
+                },
+                "9999": { "severity": "high" }
+            }
+        })
+        .to_string();
+
+        let vulns = parse_audit(&raw).unwrap();
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0].package, "minimist");
+        assert_eq!(vulns[0].severity, "low");
+        assert_eq!(vulns[0].title, "Prototype Pollution");
+        assert_eq!(vulns[0].url, "https://example.test/1523");
+        assert_eq!(vulns[0].exploitability, None);
+        assert_eq!(vulns[0].fixed_in.as_deref(), Some(">=1.2.3"));
+    }
+
+    #[test]
+    fn audit_clean_and_invalid_output() {
+        assert!(parse_audit(r#"{"vulnerabilities":{}}"#).unwrap().is_empty());
+        assert!(parse_audit("{}").unwrap().is_empty());
+        assert!(parse_audit("npm ERR!").is_err());
+    }
+
+    #[test]
+    fn search_results_and_total() {
+        let json = json!({
+            "total": 250,
+            "objects": [
+                {
+                    "downloads": 1234,
+                    "package": {
+                        "name": "left-pad",
+                        "version": "1.3.0",
+                        "description": "String left pad",
+                        "engines": { "node": ">=4" }
+                    }
+                },
+                { "package": { "version": "1.0.0" } },
+                { "score": 1 },
+                { "package": { "name": "bare" } }
+            ]
+        });
+
+        let (results, total) = parse_npm_search(&json);
+        assert_eq!(total, 250);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "left-pad");
+        assert_eq!(results[0].version, "1.3.0");
+        assert_eq!(results[0].description.as_deref(), Some("String left pad"));
+        assert_eq!(results[0].downloads, Some(1234));
+        assert_eq!(results[0].engines_node.as_deref(), Some(">=4"));
+        assert_eq!(results[0].compat, None);
+        assert_eq!(results[1].name, "bare");
+        assert_eq!(results[1].version, "");
+        assert_eq!(results[1].downloads, None);
+    }
+
+    #[test]
+    fn search_total_never_undercounts_the_page() {
+        let json = json!({ "objects": [{ "package": { "name": "a" } }, { "package": { "name": "b" } }] });
+        let (results, total) = parse_npm_search(&json);
+        assert_eq!(results.len(), 2);
+        assert_eq!(total, 2);
+
+        let (results, total) = parse_npm_search(&json!({}));
+        assert!(results.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn packument_details() {
+        let json = json!({
+            "name": "widget",
+            "description": "top-level description",
+            "dist-tags": { "latest": "10.0.0" },
+            "readme": "# Widget",
+            "versions": {
+                "9.0.0": { "peerDependencies": { "react": "^17.0.0" } },
+                "10.0.0": {
+                    "description": "latest description",
+                    "license": "MIT",
+                    "homepage": "https://example.test/widget",
+                    "peerDependencies": { "react": "^18.0.0", "ignored": 5 }
+                },
+                "2.5.0": {}
+            }
+        });
+
+        let details = parse_npm_packument(&json).unwrap();
+        assert_eq!(details.name, "widget");
+        assert_eq!(details.version, "10.0.0");
+        assert_eq!(details.description.as_deref(), Some("latest description"));
+        assert_eq!(details.license.as_deref(), Some("MIT"));
+        assert_eq!(details.homepage.as_deref(), Some("https://example.test/widget"));
+        assert_eq!(details.readme.as_deref(), Some("# Widget"));
+        assert_eq!(details.weekly_downloads, None);
+
+        // Semver order, not string order: 10.0.0 sorts above 9.0.0.
+        let versions: Vec<_> = details.versions.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(versions, vec!["10.0.0", "9.0.0", "2.5.0"]);
+        assert_eq!(details.versions[0].peer_deps, peers(&[("react", "^18.0.0")]));
+        assert_eq!(details.versions[1].peer_deps, peers(&[("react", "^17.0.0")]));
+        assert!(details.versions[2].peer_deps.is_empty());
+    }
+
+    #[test]
+    fn packument_fallbacks() {
+        let json = json!({
+            "name": "legacy",
+            "version": "1.0.0",
+            "description": "top-level description",
+            "license": { "type": "Apache-2.0" },
+            "readme": "No README found"
+        });
+        let details = parse_npm_packument(&json).unwrap();
+        assert_eq!(details.version, "1.0.0");
+        assert_eq!(details.description.as_deref(), Some("top-level description"));
+        assert_eq!(details.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(details.readme, None);
+        assert!(details.versions.is_empty());
+
+        let with_url = json!({ "name": "x", "license": { "type": "MIT", "url": "https://example.test/license" } });
+        assert_eq!(
+            parse_npm_packument(&with_url).unwrap().license.as_deref(),
+            Some("https://example.test/license")
+        );
+
+        assert!(parse_npm_packument(&json!({ "version": "1.0.0" })).is_err());
+    }
+
+    #[test]
+    fn weekly_downloads() {
+        assert_eq!(parse_npm_downloads(&json!({ "downloads": 98765, "package": "x" })), Some(98765));
+        assert_eq!(parse_npm_downloads(&json!({ "error": "not found" })), None);
+    }
+
+    #[test]
+    fn node_engine_compatibility() {
+        assert_eq!(node_engine_compatible("20.11.0", ""), Some(true));
+        assert_eq!(node_engine_compatible("20.11.0", " * "), Some(true));
+        assert_eq!(node_engine_compatible("20.11.0", ">=18"), Some(true));
+        assert_eq!(node_engine_compatible("16.20.0", ">=18"), Some(false));
+        // Unknown rather than a guess when either side can't be parsed.
+        assert_eq!(node_engine_compatible("20.11.0", "^18 || ^20"), None);
+        assert_eq!(node_engine_compatible("v20", ">=18"), None);
+    }
+
+    #[test]
+    fn peer_conflicts_against_installed_packages() {
+        let tree = [installed("react", "18.2.0"), installed("weird", "not-semver")];
+        let conflicts = peer_conflicts_with_installed(
+            &peers(&[
+                ("react", "^17.0.0"),
+                ("react", "^18.0.0"),
+                ("not-installed", "^1.0.0"),
+                ("react", "workspace:*"),
+                ("weird", "^1.0.0"),
+            ]),
+            &tree,
+        );
+        // An unparseable installed version is treated as 0.0.0.
+        assert_eq!(conflicts, vec!["react@^17.0.0", "weird@^1.0.0"]);
+    }
+
+    #[test]
+    fn peer_conflicts_for_a_candidate_version() {
+        let ranges = peers(&[("a", "^17.0.0"), ("b", ">=18"), ("c", "file:../c")]);
+        assert_eq!(peer_conflicts_for("18.2.0", &ranges), vec!["a@^17.0.0"]);
+        assert_eq!(peer_conflicts_for("17.0.2", &ranges), vec!["b@>=18"]);
+    }
+
+    #[test]
+    fn version_must_match_every_parseable_range() {
+        let ranges = vec!["^18.0.0".to_string(), ">=18.2".to_string(), "workspace:*".to_string()];
+        assert!(version_matches_all("18.2.0", &ranges));
+        assert!(!version_matches_all("18.1.0", &ranges));
+        assert!(!version_matches_all("latest", &ranges));
+        assert!(version_matches_all("1.0.0", &[]));
+    }
+
+    #[test]
+    fn classify_update_by_changed_component() {
+        assert_eq!(classify_update("1.2.3", "2.0.0"), UpdateKind::Major);
+        assert_eq!(classify_update("1.2.3", "1.3.0"), UpdateKind::Minor);
+        assert_eq!(classify_update("1.2.3", "1.2.4"), UpdateKind::Patch);
+        assert_eq!(classify_update("1.2.3", "1.2.3"), UpdateKind::Current);
+    }
+
+    #[test]
+    fn classify_update_non_semver() {
+        assert_eq!(classify_update("github:user/repo", "github:user/repo"), UpdateKind::Current);
+        assert_eq!(classify_update("github:user/repo", "1.0.0"), UpdateKind::Major);
+    }
+
+    #[test]
+    fn engine_compat_checks_both_node_and_npm() {
+        let ok = engine_compat(Some(">=18"), Some(">=9"), "20.11.0", "10.2.4");
+        assert!(ok.supported);
+        assert_eq!(ok.node_range, ">=18");
+        assert_eq!(ok.npm_range, ">=9");
+        assert_eq!(ok.node_version, "20.11.0");
+        assert_eq!(ok.npm_version, "10.2.4");
+
+        assert!(!engine_compat(Some(">=22"), None, "20.11.0", "10.2.4").supported);
+        assert!(!engine_compat(Some(">=18"), Some(">=11"), "20.11.0", "10.2.4").supported);
+
+        let unconstrained = engine_compat(None, None, "20.11.0", "10.2.4");
+        assert!(unconstrained.supported);
+        assert_eq!(unconstrained.node_range, "*");
+        assert_eq!(unconstrained.npm_range, "*");
+
+        // A range `semver` can't parse is not held against the project.
+        assert!(engine_compat(Some("^18 || ^20"), None, "16.0.0", "8.0.0").supported);
+    }
+
+    #[test]
+    fn version_from_cli_output() {
+        assert_eq!(version_from_output("v20.11.0\n"), "20.11.0");
+        assert_eq!(version_from_output("10.2.4"), "10.2.4");
+        assert_eq!(version_from_output("npm 10.2.4 on win32"), "10.2.4");
+        assert_eq!(version_from_output("  command not found  "), "command not found");
+    }
+
+    #[test]
+    fn has_vuln_matches_by_package_name() {
+        let audit = parse_audit(r#"{"vulnerabilities":{"lodash":{"severity":"high"}}}"#).unwrap();
+        assert!(has_vuln(&["react".to_string(), "lodash".to_string()], &audit));
+        assert!(!has_vuln(&["react".to_string()], &audit));
+        assert!(!has_vuln(&[], &audit));
+    }
 }

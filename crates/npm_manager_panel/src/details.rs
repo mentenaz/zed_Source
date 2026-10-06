@@ -328,3 +328,20 @@ fn thousands(n: u64) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thousands_groups_digits_in_threes() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(7), "7");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(12_345), "12,345");
+        assert_eq!(thousands(100_000), "100,000");
+        assert_eq!(thousands(12_345_678), "12,345,678");
+        assert_eq!(thousands(1_000_000_000), "1,000,000,000");
+    }
+}

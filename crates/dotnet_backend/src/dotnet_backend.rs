@@ -419,9 +419,9 @@ fn version_parts(v: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// Classify the kind of update from `installed` → `latest`. When the parts
-/// can't be parsed at all it defaults to `Major` (the conservative choice:
-/// a visual nudge to at least review the bump).
+/// Classify the kind of update from `installed` → `latest`. Unparseable or
+/// equal versions default to `Patch` (the least alarming classification) —
+/// `python_backend::classify_update` deliberately matches this fallback.
 pub fn classify_update(installed: &str, latest: &str) -> UpdateKind {
     match (version_parts(installed), version_parts(latest)) {
         (Some(inst), Some(lat)) if inst != lat => {
@@ -894,5 +894,429 @@ fn normalize_authors(v: Option<&serde_json::Value>) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pkg(id: &str, version: &str) -> InstalledPackage {
+        InstalledPackage {
+            id: id.to_string(),
+            version: version.to_string(),
+        }
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "").unwrap();
+    }
+
+    fn sorted_names(projects: &[DotnetProject]) -> Vec<String> {
+        let mut names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn package_refs_self_closing_in_either_attribute_order() {
+        let xml = r#"
+            <ItemGroup>
+              <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+              <PackageReference Version="8.0.0" Include="Serilog" />
+              <PackageReference Include='Dapper' Version='2.1.35'/>
+            </ItemGroup>"#;
+        assert_eq!(
+            parse_package_refs(xml),
+            vec![
+                pkg("Newtonsoft.Json", "13.0.3"),
+                pkg("Serilog", "8.0.0"),
+                pkg("Dapper", "2.1.35"),
+            ]
+        );
+    }
+
+    #[test]
+    fn package_refs_child_element_version() {
+        let xml = r#"
+            <PackageReference Include="Polly">
+              <Version>8.4.1</Version>
+              <PrivateAssets>all</PrivateAssets>
+            </PackageReference>
+            <PackageReference Include="xunit" Version="2.9.0" />"#;
+        assert_eq!(
+            parse_package_refs(xml),
+            vec![pkg("Polly", "8.4.1"), pkg("xunit", "2.9.0")]
+        );
+    }
+
+    #[test]
+    fn package_refs_skip_versionless_and_longer_identifiers() {
+        let xml = r#"
+            <PackageReference Include="CentrallyManaged" />
+            <PackageReferenceUpdate Include="NotAReference" Version="1.0.0" />
+            <PackageReference Include="Kept" Version="1.2.3" />"#;
+        assert_eq!(parse_package_refs(xml), vec![pkg("Kept", "1.2.3")]);
+    }
+
+    #[test]
+    fn package_refs_empty_input() {
+        assert!(parse_package_refs("").is_empty());
+        assert!(parse_package_refs("<Project></Project>").is_empty());
+    }
+
+    #[test]
+    fn packages_config_ignores_the_root_element() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+            <packages>
+              <package id="EntityFramework" version="6.4.4" targetFramework="net48" />
+              <package version="4.7.2" id="NUnit" />
+              <package id="NoVersion" />
+            </packages>"#;
+        assert_eq!(
+            parse_packages_config(xml),
+            vec![pkg("EntityFramework", "6.4.4"), pkg("NUnit", "4.7.2")]
+        );
+    }
+
+    #[test]
+    fn installed_packages_merge_dedupe_and_sort() {
+        let dir = tempfile::tempdir().unwrap();
+        let csproj = dir.path().join("App.csproj");
+        std::fs::write(
+            &csproj,
+            r#"<Project>
+                 <PackageReference Include="Zeta" Version="1.0.0" />
+                 <PackageReference Include="alpha" Version="2.0.0" />
+               </Project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("packages.config"),
+            r#"<packages>
+                 <package id="ALPHA" version="2.0.0" />
+                 <package id="Mid" version="3.0.0" />
+               </packages>"#,
+        )
+        .unwrap();
+
+        let installed = read_installed_packages(&csproj.to_string_lossy());
+        assert_eq!(
+            installed,
+            vec![pkg("alpha", "2.0.0"), pkg("Mid", "3.0.0"), pkg("Zeta", "1.0.0")]
+        );
+    }
+
+    #[test]
+    fn installed_packages_missing_file_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("Nope.csproj");
+        assert!(read_installed_packages(&missing.to_string_lossy()).is_empty());
+    }
+
+    #[test]
+    fn classify_update_by_changed_component() {
+        assert_eq!(classify_update("1.2.3", "2.0.0"), UpdateKind::Major);
+        assert_eq!(classify_update("1.2.3", "1.3.0"), UpdateKind::Minor);
+        assert_eq!(classify_update("1.2.3", "1.2.4"), UpdateKind::Patch);
+        // Short versions pad with zeros; prerelease suffixes are ignored.
+        assert_eq!(classify_update("1.2", "1.3"), UpdateKind::Minor);
+        assert_eq!(classify_update("1.2.3-beta.1", "1.2.4"), UpdateKind::Patch);
+    }
+
+    #[test]
+    fn classify_update_falls_back_to_patch() {
+        assert_eq!(classify_update("1.2.3", "1.2.3"), UpdateKind::Patch);
+        assert_eq!(classify_update("not-a-version", "2.0.0"), UpdateKind::Patch);
+        assert_eq!(classify_update("1.0.0", ""), UpdateKind::Patch);
+    }
+
+    #[test]
+    fn update_kind_labels() {
+        assert_eq!(UpdateKind::Major.label(), "major");
+        assert_eq!(UpdateKind::Minor.label(), "minor");
+        assert_eq!(UpdateKind::Patch.label(), "patch");
+    }
+
+    #[test]
+    fn download_counts_are_abbreviated() {
+        assert_eq!(fmt_downloads(0), "0");
+        assert_eq!(fmt_downloads(999), "999");
+        assert_eq!(fmt_downloads(1_500), "1.5K");
+        assert_eq!(fmt_downloads(2_400_000), "2.4M");
+        assert_eq!(fmt_downloads(3_100_000_000), "3.1B");
+    }
+
+    #[test]
+    fn outdated_json_dedupes_across_frameworks_and_sorts() {
+        let json = json!({
+            "projects": [{
+                "frameworks": [
+                    {
+                        "framework": "net8.0",
+                        "topLevelPackages": [
+                            { "id": "Serilog", "resolvedVersion": "3.0.0", "latestVersion": "4.0.0" },
+                            { "id": "Dapper", "resolvedVersion": "2.1.0", "latestVersion": "2.1.35" },
+                            { "id": "UpToDate", "resolvedVersion": "1.0.0", "latestVersion": "1.0.0" },
+                            { "id": "NoLatest", "resolvedVersion": "1.0.0" }
+                        ]
+                    },
+                    {
+                        "framework": "net9.0",
+                        "topLevelPackages": [
+                            { "id": "serilog", "resolvedVersion": "3.1.0", "latestVersion": "4.0.0" }
+                        ]
+                    }
+                ]
+            }]
+        })
+        .to_string();
+
+        let outdated = parse_outdated_json(&json).unwrap();
+        let summary: Vec<_> = outdated
+            .iter()
+            .map(|p| (p.id.as_str(), p.installed.as_str(), p.latest.as_str(), p.update_kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Dapper", "2.1.0", "2.1.35", UpdateKind::Patch),
+                ("Serilog", "3.0.0", "4.0.0", UpdateKind::Major),
+            ]
+        );
+    }
+
+    #[test]
+    fn outdated_json_tolerates_missing_sections_but_not_bad_json() {
+        assert!(parse_outdated_json("{}").unwrap().is_empty());
+        assert!(parse_outdated_json(r#"{"projects":[{}]}"#).unwrap().is_empty());
+        assert!(parse_outdated_json("not json").is_err());
+    }
+
+    #[test]
+    fn vulnerable_json_normalizes_severity_and_url() {
+        let json = json!({
+            "projects": [{
+                "frameworks": [{
+                    "topLevelPackages": [
+                        {
+                            "id": "Zed.Pkg",
+                            "vulnerabilities": [
+                                { "severity": "High", "advisoryurl": "https://example.test/a" },
+                                { "advisoryurl": "https://example.test/b" }
+                            ]
+                        },
+                        { "id": "Clean.Pkg" },
+                        {
+                            "id": "Alpha.Pkg",
+                            "vulnerabilities": [{ "severity": "CRITICAL" }]
+                        }
+                    ]
+                }]
+            }]
+        })
+        .to_string();
+
+        let vulnerable = parse_vulnerable_json(&json).unwrap();
+        let summary: Vec<_> = vulnerable
+            .iter()
+            .map(|v| (v.id.as_str(), v.severity.as_str(), v.advisory_url.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Alpha.Pkg", "critical", ""),
+                ("Zed.Pkg", "high", "https://example.test/a"),
+                ("Zed.Pkg", "low", "https://example.test/b"),
+            ]
+        );
+        assert!(parse_vulnerable_json("[").is_err());
+    }
+
+    #[test]
+    fn registry_urls_are_lowercased() {
+        assert_eq!(
+            nuget_registration_url("Newtonsoft.Json"),
+            "https://api.nuget.org/v3/registration5-semver1/newtonsoft.json/index.json"
+        );
+        assert_eq!(
+            nuget_flat_readme_url("Serilog", "4.0.0-Beta"),
+            "https://api.nuget.org/v3-flatcontainer/serilog/4.0.0-beta/readme"
+        );
+    }
+
+    #[test]
+    fn search_results_skip_entries_without_an_id() {
+        let json = json!({
+            "totalHits": 42,
+            "data": [
+                { "id": "Serilog", "version": "4.0.0", "description": "Logging", "totalDownloads": 1500 },
+                { "version": "1.0.0" },
+                { "id": "Bare" }
+            ]
+        });
+        let (results, total) = parse_nuget_search(&json).unwrap();
+        assert_eq!(total, 42);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "Serilog");
+        assert_eq!(results[0].version, "4.0.0");
+        assert_eq!(results[0].description.as_deref(), Some("Logging"));
+        assert_eq!(results[0].total_downloads, 1500);
+        assert_eq!(results[1].id, "Bare");
+        assert_eq!(results[1].version, "");
+        assert_eq!(results[1].description, None);
+        assert_eq!(results[1].total_downloads, 0);
+
+        let (results, total) = parse_nuget_search(&json!({})).unwrap();
+        assert!(results.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn registration_pages_flatten_in_order() {
+        let pages = vec![
+            json!({ "items": [{ "n": 1 }, { "n": 2 }] }),
+            json!({ "count": 64 }),
+            json!({ "items": [{ "n": 3 }] }),
+        ];
+        let items = registration_items_from_pages(&pages);
+        let order: Vec<_> = items.iter().map(|i| i["n"].as_u64().unwrap()).collect();
+        assert_eq!(order, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn details_use_the_newest_entry_and_list_versions_newest_first() {
+        let catalog = vec![
+            json!({ "catalogEntry": { "id": "Serilog", "version": "3.0.0" } }),
+            json!({ "catalogEntry": {
+                "id": "Serilog",
+                "version": "4.0.0",
+                "description": "Simple .NET logging",
+                "dependencyGroups": [{
+                    "targetFramework": "net8.0",
+                    "dependencies": [
+                        { "id": "System.Text.Json", "range": "[8.0.0, )" },
+                        { "range": "[1.0.0, )" }
+                    ]
+                }],
+                "vulnerabilities": [
+                    { "severity": "Moderate", "advisoryUrl": "https://example.test/adv" }
+                ]
+            } }),
+        ];
+
+        let details = parse_nuget_details(&catalog).unwrap();
+        assert_eq!(details.id, "Serilog");
+        assert_eq!(details.version, "4.0.0");
+        assert_eq!(details.description.as_deref(), Some("Simple .NET logging"));
+        assert_eq!(details.versions, vec!["4.0.0", "3.0.0"]);
+        assert_eq!(details.readme, None);
+
+        assert_eq!(details.dependencies.len(), 1);
+        assert_eq!(details.dependencies[0].target_framework, "net8.0");
+        assert_eq!(details.dependencies[0].dependencies.len(), 1);
+        assert_eq!(details.dependencies[0].dependencies[0].id, "System.Text.Json");
+        assert_eq!(details.dependencies[0].dependencies[0].range, "[8.0.0, )");
+
+        assert_eq!(details.vulnerabilities.len(), 1);
+        assert_eq!(details.vulnerabilities[0].id, "Serilog");
+        assert_eq!(details.vulnerabilities[0].severity, "moderate");
+        assert_eq!(details.vulnerabilities[0].advisory_url, "https://example.test/adv");
+    }
+
+    #[test]
+    fn details_reject_empty_or_blank_catalogs() {
+        assert!(parse_nuget_details(&[]).is_err());
+        assert!(parse_nuget_details(&[json!({ "catalogEntry": { "id": "", "version": "1.0.0" } })]).is_err());
+        assert!(parse_nuget_details(&[json!({ "noEntry": true })]).is_err());
+    }
+
+    #[test]
+    fn scan_finds_projects_and_solutions_but_skips_build_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Everything.sln"));
+        touch(&root.join("src/App/App.csproj"));
+        touch(&root.join("src/Lib/Lib.csproj"));
+        touch(&root.join("src/App/bin/Debug/Stale.csproj"));
+        touch(&root.join("src/App/obj/Generated.csproj"));
+        touch(&root.join("node_modules/pkg/Vendored.csproj"));
+
+        let projects = scan_dotnet_projects(&root.to_string_lossy(), 0);
+        assert_eq!(sorted_names(&projects), vec!["App", "Everything", "Lib"]);
+
+        let solution = projects.iter().find(|p| p.name == "Everything").unwrap();
+        assert!(solution.is_solution);
+        assert!(solution.path.ends_with("Everything.sln"));
+        assert!(projects.iter().filter(|p| p.name != "Everything").all(|p| !p.is_solution));
+    }
+
+    #[test]
+    fn scan_treats_a_nested_git_directory_as_a_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        touch(&root.join("Root.csproj"));
+        std::fs::create_dir_all(root.join("vendor/.git")).unwrap();
+        touch(&root.join("vendor/Vendor.csproj"));
+        touch(&root.join("vendor/deep/Deep.csproj"));
+
+        // The root's own `.git` doesn't stop the scan; a nested repository's
+        // does, after reporting the projects sitting directly in it.
+        let projects = scan_dotnet_projects(&root.to_string_lossy(), 0);
+        assert_eq!(sorted_names(&projects), vec!["Root", "Vendor"]);
+    }
+
+    #[test]
+    fn scan_stops_past_the_depth_limit_and_on_missing_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(&dir.path().join("App.csproj"));
+        let root = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(scan_dotnet_projects(&root, MAX_SCAN_DEPTH).len(), 1);
+        assert!(scan_dotnet_projects(&root, MAX_SCAN_DEPTH + 1).is_empty());
+        assert!(scan_dotnet_projects(&dir.path().join("missing").to_string_lossy(), 0).is_empty());
+    }
+
+    #[test]
+    fn find_csproj_ignores_solutions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Everything.sln"));
+        assert_eq!(find_csproj(&root.to_string_lossy()), None);
+
+        touch(&root.join("src/App/App.csproj"));
+        let found = find_csproj(&root.to_string_lossy()).unwrap();
+        assert!(found.ends_with("App.csproj"));
+    }
+
+    #[test]
+    fn resolve_csproj_from_project_solution_or_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let csproj = root.join("App.csproj");
+        let sln = root.join("App.sln");
+        touch(&csproj);
+        touch(&sln);
+
+        // A csproj path resolves to itself without touching the filesystem.
+        assert_eq!(resolve_csproj("C:/nowhere/Thing.csproj").as_deref(), Some("C:/nowhere/Thing.csproj"));
+        // A solution resolves to the project sitting next to it.
+        assert_eq!(
+            resolve_csproj(&sln.to_string_lossy()).as_deref(),
+            Some(&*csproj.to_string_lossy())
+        );
+        // A directory resolves to the project inside it.
+        assert_eq!(
+            resolve_csproj(&root.to_string_lossy()).as_deref(),
+            Some(&*csproj.to_string_lossy())
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_csproj(&empty.path().to_string_lossy()), None);
     }
 }

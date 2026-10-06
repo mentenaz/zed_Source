@@ -18,13 +18,15 @@
 //!   (see `set_script_runner`), so `dispatch_script` sends runs there for
 //!   real — script rows, quick actions (`dev`/`build`/`test`/`install`),
 //!   and the SPFx actions all go through it.
-//! - `open_npm_manager` / `open_task_chain_wizard` — these open whole
-//!   other unported (and, for the task-chain wizard, unrelated) features
-//!   with no near-term port planned, so those two quick-action buttons
-//!   were dropped rather than kept disabled. `npm install`'s own
-//!   dependency-counting progress UI (which ran through the script runner)
-//!   was dropped too; the "install" quick action just runs plain `npm
-//!   install` and streams its output like any other quick action.
+//! - `open_npm_manager` / `open_task_chain_wizard` — both were dropped in
+//!   the first port and have since been re-added now that their targets
+//!   exist: "Package Manager" opens the `npm_manager_panel` tab, and "Task
+//!   Chain" opens `flows_panel`'s wizard anchored to the active project
+//!   (through the `WeakEntity<FlowsPanel>` `set_flows_panel` receives).
+//!   `npm install`'s own dependency-counting progress UI (which ran through
+//!   the script runner) stays dropped; the "install" quick action just runs
+//!   plain `npm install` and streams its output like any other quick
+//!   action.
 //!
 //! The actual detection/scanning/NVM logic lives in `node_backend`, ported
 //! alongside this panel — see that crate's own doc comment.
@@ -63,6 +65,7 @@ use npm_backend::{
 };
 use flows_panel::FlowsPanel;
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_script_name};
 use serde::Deserialize;
 use sysinfo::System;
 use workspace::{
@@ -1047,20 +1050,15 @@ impl NodePanel {
         let PackagesState::Ready(list) = &self.outdated else {
             return;
         };
-        let targets: Vec<String> = list
-            .iter()
-            .filter(|pkg| {
-                let kind = classify_update(&pkg.current, &pkg.latest);
-                match kind_ceiling {
-                    UpdateKind::Patch => kind == UpdateKind::Patch,
-                    _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
-                }
-            })
-            .map(|pkg| pkg.name.clone())
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
+        let command = match update_command(list, kind_ceiling) {
+            Ok(Some(command)) => command,
+            Ok(None) => return,
+            Err(error) => {
+                self.script_output.push(error);
+                cx.notify();
+                return;
+            }
+        };
 
         // Guard against `dispatch_script`'s own busy check silently no-oping
         // and leaving `running_action` stuck set forever with no completion
@@ -1080,7 +1078,6 @@ impl NodePanel {
         };
         self.running_action = Some(label.to_string());
 
-        let command = format!("npm update {}", targets.join(" "));
         self.dispatch_script(&command, window, cx);
 
         if let Some(runner) = self.runner() {
@@ -2335,7 +2332,7 @@ impl NodePanel {
                     // it. Running `npm run <name>` instead lets npm own the
                     // entire chain in one process, exactly like typing it
                     // in a terminal does.
-                    let play_command = format!("npm run {name_c}");
+                    let play_command = run_script_command(&name_c);
 
                     let row = div()
                         .id(format!("script-{name_c}"))
@@ -2352,7 +2349,13 @@ impl NodePanel {
                                 .child("\u{25B6}")
                                 .tooltip("Run in Script Runner")
                                 .on_click(cx.listener(move |this, _e, window, cx| {
-                                    this.dispatch_script(&play_command, window, cx);
+                                    match &play_command {
+                                        Ok(command) => this.dispatch_script(command, window, cx),
+                                        Err(error) => {
+                                            this.script_output.push(error.clone());
+                                            cx.notify();
+                                        }
+                                    }
                                 })),
                         )
                         .child(
@@ -3025,4 +3028,204 @@ fn scan_sppkg(project_path: &str) -> Vec<String> {
         }
     }
     files
+}
+
+/// The `npm update …` command for the Outdated section's bulk buttons:
+/// every package whose update is no bigger than `kind_ceiling` (patch only
+/// for `Patch`, otherwise patch and minor). `Ok(None)` when nothing qualifies.
+///
+/// An error (and nothing run) if any qualifying name isn't shell-plain.
+fn update_command(
+    outdated: &[NpmOutdatedPkg],
+    kind_ceiling: UpdateKind,
+) -> Result<Option<String>, String> {
+    let mut targets = Vec::new();
+    for package in outdated.iter().filter(|pkg| {
+        let kind = classify_update(&pkg.current, &pkg.latest);
+        match kind_ceiling {
+            UpdateKind::Patch => kind == UpdateKind::Patch,
+            _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
+        }
+    }) {
+        check_package_name(&package.name)?;
+        targets.push(package.name.as_str());
+    }
+    Ok((!targets.is_empty()).then(|| format!("npm update {}", targets.join(" "))))
+}
+
+/// `npm run <script>` for a row in the Scripts section. Script names come
+/// straight from `package.json`, which can hold anything, so one that isn't
+/// shell-plain is refused rather than run.
+fn run_script_command(name: &str) -> Result<String, String> {
+    check_script_name(name)?;
+    Ok(format!("npm run {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(name: &str, current: &str, latest: &str) -> NpmOutdatedPkg {
+        NpmOutdatedPkg {
+            name: name.to_string(),
+            current: current.to_string(),
+            wanted: latest.to_string(),
+            latest: latest.to_string(),
+            location: None,
+        }
+    }
+
+    fn write(path: &std::path::Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn package_json_view_reads_fields_in_file_order() {
+        let view = parse_package_json_view(
+            r#"{
+                "name": "web",
+                "version": "1.2.3",
+                "description": "The site",
+                "scripts": { "dev": "vite", "build": "vite build", "broken": 5 },
+                "dependencies": { "react": "^18.2.0" },
+                "devDependencies": { "vite": "^5.0.0", "typescript": "^5.4.0" }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(view.name.as_deref(), Some("web"));
+        assert_eq!(view.version.as_deref(), Some("1.2.3"));
+        assert_eq!(view.description.as_deref(), Some("The site"));
+        // Scripts keep the order they have in package.json; a non-string
+        // value becomes an empty command rather than dropping the row.
+        let scripts: Vec<(&str, &str)> = view
+            .scripts
+            .iter()
+            .map(|(name, command)| (name.as_str(), command.as_str()))
+            .collect();
+        assert_eq!(scripts, vec![("dev", "vite"), ("build", "vite build"), ("broken", "")]);
+        assert_eq!(view.dependencies.get("react").map(String::as_str), Some("^18.2.0"));
+        assert_eq!(
+            view.dev_dependencies.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["vite", "typescript"]
+        );
+    }
+
+    #[test]
+    fn package_json_view_tolerates_missing_sections_but_not_bad_json() {
+        let view = parse_package_json_view("{}").unwrap();
+        assert_eq!(view.name, None);
+        assert!(view.scripts.is_empty());
+        assert!(view.dependencies.is_empty());
+        assert!(view.dev_dependencies.is_empty());
+
+        assert!(parse_package_json_view("{ not json").is_none());
+        assert!(parse_package_json_view("").is_none());
+    }
+
+    #[test]
+    fn path_file_name_is_the_last_component() {
+        assert_eq!(path_file_name("C:/work/apps/web"), "web");
+        assert_eq!(path_file_name("/home/me/api"), "api");
+        assert_eq!(path_file_name("single"), "single");
+        // No final component: fall back to the input.
+        assert_eq!(path_file_name("/"), "/");
+    }
+
+    #[test]
+    fn update_command_respects_the_ceiling() {
+        let list = [
+            outdated("a", "1.0.0", "1.0.5"),
+            outdated("b", "2.0.0", "2.3.0"),
+            outdated("c", "3.0.0", "4.0.0"),
+        ];
+        assert_eq!(update_command(&list, UpdateKind::Patch).unwrap().as_deref(), Some("npm update a"));
+        assert_eq!(update_command(&list, UpdateKind::Minor).unwrap().as_deref(), Some("npm update a b"));
+        // A major ceiling is still capped at minor: bulk updates never
+        // cross a major version.
+        assert_eq!(update_command(&list, UpdateKind::Major).unwrap().as_deref(), Some("npm update a b"));
+    }
+
+    #[test]
+    fn update_command_with_nothing_to_update() {
+        assert_eq!(update_command(&[outdated("c", "3.0.0", "4.0.0")], UpdateKind::Minor), Ok(None));
+        assert_eq!(update_command(&[], UpdateKind::Patch), Ok(None));
+    }
+
+    #[test]
+    fn update_command_runs_nothing_if_any_name_is_unsafe() {
+        let list = [outdated("a", "1.0.0", "1.0.5"), outdated("b && calc", "2.0.0", "2.0.1")];
+        assert!(update_command(&list, UpdateKind::Minor).is_err());
+    }
+
+    #[test]
+    fn script_commands() {
+        assert_eq!(run_script_command("dev").as_deref(), Ok("npm run dev"));
+        assert_eq!(run_script_command("build:prod").as_deref(), Ok("npm run build:prod"));
+        assert!(run_script_command("dev && calc").is_err());
+        assert!(run_script_command("say hi").is_err());
+        assert!(run_script_command("").is_err());
+    }
+
+    #[test]
+    fn spfx_detected_from_yeoman_config() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join(".yo-rc.json"),
+            r#"{ "@microsoft/generator-sharepoint": { "version": "1.18.2" } }"#,
+        );
+        let info = detect_spfx(&dir.path().to_string_lossy());
+        assert!(info.is_spfx);
+        assert_eq!(info.version.as_deref(), Some("1.18.2"));
+    }
+
+    #[test]
+    fn spfx_detected_from_package_solution_or_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("config/package-solution.json"), "{}");
+        let info = detect_spfx(&dir.path().to_string_lossy());
+        assert!(info.is_spfx);
+        assert_eq!(info.version, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("package.json"),
+            r#"{ "devDependencies": { "@microsoft/sp-build-web": "1.18.2", "gulp": "4.0.2" } }"#,
+        );
+        let info = detect_spfx(&dir.path().to_string_lossy());
+        assert!(info.is_spfx);
+        assert_eq!(info.version.as_deref(), Some("1.18.2"));
+    }
+
+    #[test]
+    fn ordinary_projects_are_not_spfx() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!detect_spfx(&dir.path().to_string_lossy()).is_spfx);
+
+        write(
+            &dir.path().join("package.json"),
+            r#"{ "dependencies": { "react": "18.2.0", "@microsoft/signalr": "8.0.0" } }"#,
+        );
+        write(&dir.path().join(".yo-rc.json"), r#"{ "generator-other": {} }"#);
+        assert!(!detect_spfx(&dir.path().to_string_lossy()).is_spfx);
+    }
+
+    #[test]
+    fn sppkg_files_are_listed_from_the_solution_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scan_sppkg(&dir.path().to_string_lossy()).is_empty());
+
+        write(&dir.path().join("sharepoint/solution/webpart.sppkg"), "");
+        write(&dir.path().join("sharepoint/solution/UPPER.SPPKG"), "");
+        write(&dir.path().join("sharepoint/solution/debug/notes.txt"), "");
+        write(&dir.path().join("sharepoint/solution/readme.md"), "");
+
+        let mut names: Vec<String> = scan_sppkg(&dir.path().to_string_lossy())
+            .iter()
+            .map(|path| path_file_name(path).to_lowercase())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["upper.sppkg", "webpart.sppkg"]);
+    }
 }

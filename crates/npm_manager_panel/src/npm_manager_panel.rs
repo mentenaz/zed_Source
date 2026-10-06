@@ -50,6 +50,7 @@ use npm_backend::{
     list_installed, list_outdated, run_npm_cli, version_from_output,
 };
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_version};
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 
 mod details;
@@ -625,13 +626,8 @@ impl NpmManagerPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let spec = format!("{name}@{version}");
         let label = format!("install {name}");
-        let mut args = vec!["install".to_string(), spec];
-        if dev {
-            args.push("--save-dev".to_string());
-        }
-        self.kick_run(&label, args, window, cx);
+        self.run_or_reject(&label, install_args(name, version, dev), window, cx);
     }
 
     /// Updates an installed package to the given version in the active project
@@ -667,7 +663,7 @@ impl NpmManagerPanel {
             }
             this.update_in(cx, |this, window, cx| {
                 let label = format!("remove {name}");
-                this.kick_run(&label, vec!["remove".to_string(), name.clone()], window, cx);
+                this.run_or_reject(&label, remove_args(&name), window, cx);
             })
             .ok();
         })
@@ -678,28 +674,32 @@ impl NpmManagerPanel {
     /// patch-only ones when `ty` is "patch", else every patch/minor — by
     /// installing each to its latest in a single Script Runner run.
     fn update_all(&mut self, ty: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let targets: Vec<(String, String)> = self
-            .active()
-            .outdated
-            .iter()
-            .filter(|o| {
-                let kind = classify_update(&o.current, &o.latest);
-                match ty {
-                    "patch" => kind == UpdateKind::Patch,
-                    _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
-                }
-            })
-            .map(|o| (o.name.clone(), o.latest.clone()))
-            .collect();
-        if targets.is_empty() {
-            return;
+        match update_all_args(&self.active().outdated, ty) {
+            Ok(Some(args)) => self.kick_run("update all", args, window, cx),
+            Ok(None) => {}
+            Err(error) => self.reject(error, cx),
         }
-        let mut args = Vec::new();
-        for (name, latest) in targets {
-            args.push("install".to_string());
-            args.push(format!("{name}@{latest}"));
+    }
+
+    /// Shows why a command was refused instead of running it.
+    fn reject(&mut self, error: String, cx: &mut Context<Self>) {
+        self.error = Some(error);
+        cx.notify();
+    }
+
+    /// Runs `args` if they were built successfully; otherwise shows the
+    /// refusal (see `script_runner_panel::command`).
+    fn run_or_reject(
+        &mut self,
+        label: &str,
+        args: Result<Vec<String>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match args {
+            Ok(args) => self.kick_run(label, args, window, cx),
+            Err(error) => self.reject(error, cx),
         }
-        self.kick_run("update all", args, window, cx);
     }
 
     /// Runs an npm command for the active project, streaming its output through
@@ -744,14 +744,7 @@ impl NpmManagerPanel {
             });
         }
 
-        let command = {
-            let mut cmd = cli.clone();
-            for arg in &args {
-                cmd.push(' ');
-                cmd.push_str(arg);
-            }
-            cmd
-        };
+        let command = command_line(&cli, &args);
         runner.update(cx, |runner, cx| runner.run_external(command, root, cx));
 
         // Reload the lists when the run finishes: the runner notifies on every
@@ -1005,5 +998,149 @@ impl Render for NpmManagerPanel {
                 this.child(self.project_tabs(&view))
             })
             .child(body)
+    }
+}
+
+/// The arguments that install one package pinned to an exact version,
+/// with `--save-dev` when it should land in `devDependencies`. Refuses a
+/// name or version that isn't shell-plain.
+fn install_args(name: &str, version: &str, dev: bool) -> Result<Vec<String>, String> {
+    check_package_name(name)?;
+    check_version(version)?;
+    let mut args = vec!["install".to_string(), format!("{name}@{version}")];
+    if dev {
+        args.push("--save-dev".to_string());
+    }
+    Ok(args)
+}
+
+/// The arguments that remove one package.
+fn remove_args(name: &str) -> Result<Vec<String>, String> {
+    check_package_name(name)?;
+    Ok(vec!["remove".to_string(), name.to_string()])
+}
+
+/// The arguments for "Update all": one `install` followed by a
+/// `name@latest` spec per qualifying package — patch-only updates when `ty`
+/// is `"patch"`, otherwise patch and minor. `Ok(None)` when nothing
+/// qualifies; an error (and nothing run) if any qualifying entry isn't
+/// shell-plain.
+///
+/// A single `install` verb, not one per package: `npm install a@1 install
+/// b@2` would ask npm for a package literally named `install`.
+fn update_all_args(outdated: &[NpmOutdatedPkg], ty: &str) -> Result<Option<Vec<String>>, String> {
+    let mut args = vec!["install".to_string()];
+    for package in outdated.iter().filter(|o| {
+        let kind = classify_update(&o.current, &o.latest);
+        match ty {
+            "patch" => kind == UpdateKind::Patch,
+            _ => matches!(kind, UpdateKind::Patch | UpdateKind::Minor),
+        }
+    }) {
+        check_package_name(&package.name)?;
+        check_version(&package.latest)?;
+        args.push(format!("{}@{}", package.name, package.latest));
+    }
+    Ok((args.len() > 1).then_some(args))
+}
+
+/// Joins a package-manager CLI and its arguments into the one command line
+/// the Script Runner executes.
+fn command_line(cli: &str, args: &[String]) -> String {
+    let mut command = cli.to_string();
+    for arg in args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(name: &str, current: &str, latest: &str) -> NpmOutdatedPkg {
+        NpmOutdatedPkg {
+            name: name.to_string(),
+            current: current.to_string(),
+            wanted: latest.to_string(),
+            latest: latest.to_string(),
+            location: None,
+        }
+    }
+
+    #[test]
+    fn install_pins_the_exact_version() {
+        assert_eq!(install_args("react", "18.2.0", false).unwrap(), vec!["install", "react@18.2.0"]);
+        assert_eq!(
+            install_args("@types/node", "20.11.0", true).unwrap(),
+            vec!["install", "@types/node@20.11.0", "--save-dev"]
+        );
+    }
+
+    #[test]
+    fn install_and_remove_refuse_shell_syntax() {
+        assert!(install_args("react; calc", "18.2.0", false).is_err());
+        assert!(install_args("react", "18.2.0 && calc", false).is_err());
+        assert!(install_args("--registry=http://evil.test", "1.0.0", false).is_err());
+        assert!(install_args("", "1.0.0", false).is_err());
+        assert!(remove_args("react|more").is_err());
+        assert_eq!(remove_args("@scope/widget").unwrap(), vec!["remove", "@scope/widget"]);
+    }
+
+    #[test]
+    fn update_all_uses_one_install_verb() {
+        let list = [
+            outdated("a", "1.0.0", "1.0.5"),
+            outdated("b", "2.0.0", "2.3.0"),
+            outdated("c", "3.0.0", "4.0.0"),
+        ];
+        let args = update_all_args(&list, "minor").unwrap().unwrap();
+        assert_eq!(args, vec!["install", "a@1.0.5", "b@2.3.0"]);
+        assert_eq!(args.iter().filter(|arg| *arg == "install").count(), 1);
+    }
+
+    #[test]
+    fn update_all_patch_only_skips_minor_and_major() {
+        let list = [
+            outdated("a", "1.0.0", "1.0.5"),
+            outdated("b", "2.0.0", "2.3.0"),
+            outdated("c", "3.0.0", "4.0.0"),
+        ];
+        assert_eq!(update_all_args(&list, "patch").unwrap().unwrap(), vec!["install", "a@1.0.5"]);
+    }
+
+    #[test]
+    fn update_all_never_includes_major_or_unparseable_versions() {
+        let list = [
+            outdated("major", "1.0.0", "2.0.0"),
+            outdated("git-dep", "github:user/repo", "1.0.0"),
+            outdated("current", "1.2.3", "1.2.3"),
+        ];
+        assert_eq!(update_all_args(&list, "minor"), Ok(None));
+        assert_eq!(update_all_args(&list, "patch"), Ok(None));
+        assert_eq!(update_all_args(&[], "minor"), Ok(None));
+    }
+
+    #[test]
+    fn update_all_runs_nothing_if_any_entry_is_unsafe() {
+        let list = [outdated("a", "1.0.0", "1.0.5"), outdated("b && calc", "2.0.0", "2.0.1")];
+        assert!(update_all_args(&list, "minor").is_err());
+        // An unsafe entry that wouldn't be updated anyway doesn't block the rest.
+        let list = [outdated("a", "1.0.0", "1.0.5"), outdated("b && calc", "2.0.0", "3.0.0")];
+        assert_eq!(update_all_args(&list, "minor").unwrap().unwrap(), vec!["install", "a@1.0.5"]);
+    }
+
+    #[test]
+    fn command_line_joins_cli_and_arguments() {
+        let args = install_args("react", "18.2.0", true).unwrap();
+        assert_eq!(command_line("pnpm", &args), "pnpm install react@18.2.0 --save-dev");
+        assert_eq!(command_line("npm", &[]), "npm");
+
+        let list = [outdated("a", "1.0.0", "1.0.5"), outdated("b", "2.0.0", "2.3.0")];
+        assert_eq!(
+            command_line("npm", &update_all_args(&list, "minor").unwrap().unwrap()),
+            "npm install a@1.0.5 b@2.3.0"
+        );
     }
 }

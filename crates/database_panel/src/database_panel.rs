@@ -1,14 +1,14 @@
 //! Database panel UI.
 //!
 //! See `crates/gpui_component/DATABASE_PANEL_SPEC.md` for the full
-//! architecture and phased delivery plan. This is the Phase 1 explorer shell:
-//! on top of the existing multi-driver connect/disconnect + database
-//! discovery/create/register flow, the connection body is now a proper
-//! `gpui_component` three-pane experience — a searchable schema explorer
-//! (left), Overview/Tables/Views/Relationships content tabs (center) and an
-//! object inspector (right) — all resizable via `h_resizable`/`resizable_panel`.
-//! The SQL workbench is deferred (backend support stays intact in
-//! `database_backend`). Passwords are never persisted on `ConnectionConfig` — they're
+//! architecture and phased delivery plan. On top of the multi-driver
+//! connect/disconnect + database discovery/create/register flow, the
+//! connection body is a `gpui_component` three-pane explorer — a searchable
+//! schema explorer (left), Overview/Tables/Views/Relationships content tabs
+//! (center) and an object inspector (right) — all resizable via
+//! `h_resizable`/`resizable_panel`. The SQL workbench (`workbench.rs`) and
+//! the schema graph (`graph.rs`) open from here as workspace tabs rather
+//! than living inside the dock. Passwords are never persisted on `ConnectionConfig` — they're
 //! read/written exclusively through `zed_credentials_provider`, keyed by
 //! `credential_url(db_type, host, port)`.
 

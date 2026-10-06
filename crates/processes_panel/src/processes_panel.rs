@@ -943,3 +943,170 @@ impl Render for ProcessesPanel {
             .child(self.render_footer(window, cx))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    fn entry(pid: u32, name: &str, cpu: f32, memory_mb: f64, source: &str, status: &str) -> ProcessEntry {
+        ProcessEntry {
+            pid,
+            name: name.to_string(),
+            cpu,
+            memory_mb,
+            source: source.to_string(),
+            status: status.to_string(),
+        }
+    }
+
+    fn sample() -> Vec<ProcessEntry> {
+        vec![
+            entry(300, "node.exe", 12.5, 250.0, "Managed", "Running"),
+            entry(42, "python.exe", 1.0, 80.0, "External", "Sleeping"),
+            entry(1234, "Code.exe", 30.0, 900.0, "External", "Running"),
+            entry(7, "dotnet.exe", 0.0, 120.0, "Managed", "Sleeping"),
+        ]
+    }
+
+    fn sort_column(delegate: &ProcessTableDelegate, key: &str) -> usize {
+        delegate
+            .columns
+            .iter()
+            .position(|column| column.key == key)
+            .unwrap()
+    }
+
+    fn pids(delegate: &ProcessTableDelegate) -> Vec<u32> {
+        delegate.entries.iter().map(|e| e.pid).collect()
+    }
+
+    #[test]
+    fn comparators_reverse_for_descending() {
+        assert_eq!(cmp_str("a", "b", ColumnSort::Ascending), Ordering::Less);
+        assert_eq!(cmp_str("a", "b", ColumnSort::Descending), Ordering::Greater);
+        assert_eq!(cmp_u32(1, 2, ColumnSort::Ascending), Ordering::Less);
+        assert_eq!(cmp_u32(1, 2, ColumnSort::Descending), Ordering::Greater);
+        assert_eq!(cmp_f32(1.5, 0.5, ColumnSort::Ascending), Ordering::Greater);
+        assert_eq!(cmp_f32(1.5, 0.5, ColumnSort::Descending), Ordering::Less);
+        assert_eq!(cmp_f64(2.0, 2.0, ColumnSort::Descending), Ordering::Equal);
+    }
+
+    #[test]
+    fn comparators_treat_nan_as_equal_instead_of_panicking() {
+        assert_eq!(cmp_f32(f32::NAN, 1.0, ColumnSort::Ascending), Ordering::Equal);
+        assert_eq!(cmp_f64(1.0, f64::NAN, ColumnSort::Descending), Ordering::Equal);
+    }
+
+    #[test]
+    fn rows_default_to_name_order() {
+        let mut delegate = ProcessTableDelegate::new();
+        delegate.set_data(sample());
+        let names: Vec<&str> = delegate.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Code.exe", "dotnet.exe", "node.exe", "python.exe"]);
+    }
+
+    #[test]
+    fn rows_sort_by_each_column_in_both_directions() {
+        let mut delegate = ProcessTableDelegate::new();
+        delegate.set_data(sample());
+
+        delegate.sort_col = sort_column(&delegate, "pid");
+        delegate.sort_dir = ColumnSort::Ascending;
+        delegate.apply();
+        assert_eq!(pids(&delegate), vec![7, 42, 300, 1234]);
+
+        delegate.sort_dir = ColumnSort::Descending;
+        delegate.apply();
+        assert_eq!(pids(&delegate), vec![1234, 300, 42, 7]);
+
+        delegate.sort_col = sort_column(&delegate, "cpu");
+        delegate.apply();
+        assert_eq!(pids(&delegate), vec![1234, 300, 42, 7]);
+
+        delegate.sort_col = sort_column(&delegate, "memory");
+        delegate.sort_dir = ColumnSort::Ascending;
+        delegate.apply();
+        assert_eq!(pids(&delegate), vec![42, 7, 300, 1234]);
+    }
+
+    #[test]
+    fn filter_matches_name_case_insensitively_or_pid_digits() {
+        let mut delegate = ProcessTableDelegate::new();
+        delegate.set_data(sample());
+
+        delegate.set_filter("  NODE ");
+        assert_eq!(pids(&delegate), vec![300]);
+
+        // "4" matches pids 42 and 1234; neither name contains it.
+        delegate.set_filter("4");
+        assert_eq!(pids(&delegate), vec![1234, 42]);
+
+        delegate.set_filter("no such process");
+        assert!(delegate.entries.is_empty());
+
+        delegate.set_filter("");
+        assert_eq!(delegate.entries.len(), 4);
+    }
+
+    #[test]
+    fn filter_survives_a_data_refresh() {
+        let mut delegate = ProcessTableDelegate::new();
+        delegate.set_filter("exe");
+        delegate.set_data(sample());
+        assert_eq!(delegate.entries.len(), 4);
+
+        delegate.set_filter("python");
+        delegate.set_data(vec![
+            entry(1, "python.exe", 0.0, 1.0, "External", "Running"),
+            entry(2, "pythonw.exe", 0.0, 1.0, "External", "Running"),
+            entry(3, "node.exe", 0.0, 1.0, "External", "Running"),
+        ]);
+        assert_eq!(pids(&delegate), vec![1, 2]);
+    }
+
+    #[test]
+    fn managed_count_reflects_visible_rows() {
+        let mut delegate = ProcessTableDelegate::new();
+        delegate.set_data(sample());
+        assert_eq!(delegate.managed_count(), 2);
+
+        delegate.set_filter("node");
+        assert_eq!(delegate.managed_count(), 1);
+
+        delegate.set_filter("python");
+        assert_eq!(delegate.managed_count(), 0);
+    }
+
+    #[test]
+    fn adopt_and_release_track_the_managed_set() {
+        let adopted: Adopted = Arc::new(Mutex::new(HashMap::new()));
+
+        adopt_process(&adopted, 42, "python.exe".into(), "Python".into()).unwrap();
+        adopt_process(&adopted, 7, "dotnet.exe".into(), "Dotnet".into()).unwrap();
+        assert_eq!(adopted.lock().unwrap().len(), 2);
+        assert_eq!(
+            adopted.lock().unwrap().get(&42),
+            Some(&("python.exe".to_string(), "Python".to_string()))
+        );
+
+        // Adopting again replaces the entry rather than duplicating it.
+        adopt_process(&adopted, 42, "python.exe".into(), "Other".into()).unwrap();
+        assert_eq!(adopted.lock().unwrap().len(), 2);
+        assert_eq!(adopted.lock().unwrap().get(&42).unwrap().1, "Other");
+
+        release_process(&adopted, 42).unwrap();
+        assert!(!adopted.lock().unwrap().contains_key(&42));
+        // Releasing something that isn't managed is not an error.
+        release_process(&adopted, 9999).unwrap();
+        assert_eq!(adopted.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn killing_an_unknown_pid_reports_it() {
+        // An empty `System` knows no processes, so nothing real is touched.
+        let system = Mutex::new(System::new());
+        let error = kill_process(&system, u32::MAX - 1).unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+    }
+}

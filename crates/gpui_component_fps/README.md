@@ -1,5 +1,14 @@
 # gpui-fps
 
+> **In this fork.** Vendored from
+> [longbridge/gpui-component](https://github.com/longbridge/gpui-component)
+> (package name `gpui-fps`). It is used only by the component gallery,
+> [`gpui_component_story`](../gpui_component_story/README.md); the editor
+> itself does not render it. It is available if you want a frame-time HUD
+> while profiling a panel. The rest of this file is the upstream README; its
+> git-dependency instructions do not apply here — depend on it with
+> `gpui-fps.workspace = true`.
+
 A realtime performance HUD for [GPUI](https://gpui.rs) applications: frames per
 second, frame time, dropped frame rate, and this process' GPU, CPU and memory
 usage.

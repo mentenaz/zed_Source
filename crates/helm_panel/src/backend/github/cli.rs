@@ -123,6 +123,9 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
         .arg(scope)
         .arg("--hostname")
         .arg("github.com")
+        // Same as `gh_login`: no console to answer a prompt from, so `gh`
+        // must print the device code instead of waiting on Enter.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -153,7 +156,13 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
     }
 
     let result = match child.wait().await {
-        Ok(status) if status.success() => Ok(()),
+        Ok(status) if status.success() => {
+            // A refresh issues a new token; drop the cached one so the next
+            // API call picks up the token that actually carries the new
+            // scope instead of replaying the old one.
+            *state.token.write().await = None;
+            Ok(())
+        }
         Ok(status) => Err(format!(
             "gh auth refresh exited with {}",
             status.code().unwrap_or(-1)
@@ -164,12 +173,10 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
     result
 }
 
-pub async fn gh_ensure_repo_scope(state: &GhState) -> Result<(), String> {
-    gh_refresh_scope("repo", state).await
-}
-
-pub async fn gh_ensure_user_scope(state: &GhState) -> Result<(), String> {
-    gh_refresh_scope("user", state).await
+/// Adds `scope` to the current login (`gh auth refresh -s <scope>`), keeping
+/// the scopes it already has.
+pub async fn gh_ensure_scope(scope: &str, state: &GhState) -> Result<(), String> {
+    gh_refresh_scope(scope, state).await
 }
 
 pub async fn gh_logout(state: &GhState) -> Result<(), String> {

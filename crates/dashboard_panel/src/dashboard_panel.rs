@@ -300,29 +300,53 @@ fn section(theme: &gpui_component::Theme, title: &str, body: impl IntoElement) -
         .child(body)
 }
 
-/// An advisory tag for a PyPI finding — "fixed in <v>" once a fix exists,
-/// plain "advisory" otherwise.
+/// The text of a PyPI finding's advisory tag — "fixed in <v>" once a fix
+/// exists, plain "advisory" otherwise.
+fn advisory_label(vuln: &PyPiVulnerability) -> String {
+    vuln.fixed_in
+        .first()
+        .map(|v| format!("fixed in {v}"))
+        .unwrap_or_else(|| "advisory".to_string())
+}
+
+/// An advisory tag for a PyPI finding, green once a fix exists.
 fn advisory_tag(vuln: &PyPiVulnerability) -> Tag {
     let tag = match vuln.fixed_in.first() {
         Some(_) => Tag::success(),
         None => Tag::info(),
     };
-    tag.xsmall().outline().child(
-        vuln.fixed_in
-            .first()
-            .map(|v| format!("fixed in {v}"))
-            .unwrap_or_else(|| "advisory".to_string()),
-    )
+    tag.xsmall().outline().child(advisory_label(vuln))
 }
 
-/// Severity tag with a per-severity accent. `poison`-style strings that
-/// don't match a known level just render secondary.
+/// The severity buckets the three ecosystems' findings are colored by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeverityLevel {
+    Critical,
+    High,
+    Moderate,
+    /// "low", and anything unrecognized.
+    Other,
+}
+
+/// Buckets a severity string, case-insensitively. npm says "moderate",
+/// NuGet "Moderate", OSV "MEDIUM" — all the same bucket.
+fn severity_level(severity: &str) -> SeverityLevel {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => SeverityLevel::Critical,
+        "high" => SeverityLevel::High,
+        "moderate" | "medium" => SeverityLevel::Moderate,
+        _ => SeverityLevel::Other,
+    }
+}
+
+/// Severity tag with a per-severity accent. Strings that don't match a
+/// known level just render secondary.
 fn severity_tag(severity: &str) -> Tag {
-    let tag = match severity.to_ascii_lowercase().as_str() {
-        "critical" => Tag::danger(),
-        "high" => Tag::warning(),
-        "moderate" | "medium" => Tag::info(),
-        _ => Tag::secondary(),
+    let tag = match severity_level(severity) {
+        SeverityLevel::Critical => Tag::danger(),
+        SeverityLevel::High => Tag::warning(),
+        SeverityLevel::Moderate => Tag::info(),
+        SeverityLevel::Other => Tag::secondary(),
     };
     tag.xsmall().outline().child(severity.to_string())
 }
@@ -982,5 +1006,39 @@ impl DashboardPanel {
                 .into_any_element(),
         };
         section(theme, "System", body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn severity_strings_are_bucketed_case_insensitively() {
+        assert_eq!(severity_level("critical"), SeverityLevel::Critical);
+        assert_eq!(severity_level("CRITICAL"), SeverityLevel::Critical);
+        assert_eq!(severity_level("High"), SeverityLevel::High);
+        assert_eq!(severity_level("moderate"), SeverityLevel::Moderate);
+        assert_eq!(severity_level("Moderate"), SeverityLevel::Moderate);
+        assert_eq!(severity_level("MEDIUM"), SeverityLevel::Moderate);
+    }
+
+    #[test]
+    fn low_and_unknown_severities_share_the_neutral_bucket() {
+        assert_eq!(severity_level("low"), SeverityLevel::Other);
+        assert_eq!(severity_level("info"), SeverityLevel::Other);
+        assert_eq!(severity_level("unknown"), SeverityLevel::Other);
+        assert_eq!(severity_level(""), SeverityLevel::Other);
+        // Not trimmed: a padded value is not silently promoted.
+        assert_eq!(severity_level(" high "), SeverityLevel::Other);
+    }
+
+    #[test]
+    fn advisory_label_names_the_first_fixed_version() {
+        let mut vuln = PyPiVulnerability::default();
+        assert_eq!(advisory_label(&vuln), "advisory");
+
+        vuln.fixed_in = vec!["2.31.0".to_string(), "3.0.0".to_string()];
+        assert_eq!(advisory_label(&vuln), "fixed in 2.31.0");
     }
 }

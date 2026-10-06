@@ -142,7 +142,11 @@ pub fn query_pip(exe: &str) -> Result<String, String> {
 /// List installed packages as JSON: `python -m pip list --format json`.
 pub fn list_packages(exe: &str) -> Result<Vec<PythonPackage>, String> {
     let output = run_captured(exe, &["-m", "pip", "list", "--format", "json"])?;
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(&output)
+    parse_pip_list(&output)
+}
+
+fn parse_pip_list(output: &str) -> Result<Vec<PythonPackage>, String> {
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(output)
         .map_err(|e| format!("Failed to parse pip output: {e}"))?;
 
     let packages = parsed
@@ -229,7 +233,11 @@ pub struct PythonOutdatedPkg {
 /// List outdated installed packages: `python -m pip list --outdated --format json`.
 pub fn list_outdated(exe: &str) -> Result<Vec<PythonOutdatedPkg>, String> {
     let output = run_captured(exe, &["-m", "pip", "list", "--outdated", "--format", "json"])?;
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(&output)
+    parse_pip_outdated(&output)
+}
+
+fn parse_pip_outdated(output: &str) -> Result<Vec<PythonOutdatedPkg>, String> {
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(output)
         .map_err(|e| format!("Failed to parse pip output: {e}"))?;
 
     let packages = parsed
@@ -407,15 +415,21 @@ impl EnvMarker {
     /// environment) from this marker file, run from the project directory
     /// with `exe` as the interpreter used to create the venv.
     pub fn create_command(self, exe: &str) -> String {
+        // Where a freshly created venv puts its interpreter differs by OS.
+        #[cfg(target_os = "windows")]
+        const VENV_PYTHON: &str = "venv\\Scripts\\python.exe";
+        #[cfg(not(target_os = "windows"))]
+        const VENV_PYTHON: &str = "venv/bin/python";
+
         match self {
             EnvMarker::Requirements => format!(
-                "{exe} -m venv venv && venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+                "{exe} -m venv venv && {VENV_PYTHON} -m pip install -r requirements.txt"
             ),
             // `pip install -e .` reads build-system deps straight out of
             // pyproject.toml without requiring Poetry/PDM/etc. to be
             // installed — works for any PEP 517 backend.
             EnvMarker::Pyproject => {
-                format!("{exe} -m venv venv && venv\\Scripts\\python.exe -m pip install -e .")
+                format!("{exe} -m venv venv && {VENV_PYTHON} -m pip install -e .")
             }
             // Pipenv manages its own venv (not this project's `venv\`
             // folder) — there's nothing else to scope pip/venv lookups to
@@ -688,5 +702,402 @@ pub fn count_requirements(path: Option<&str>) -> Result<usize, String> {
         Ok(count)
     } else {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn package(name: &str) -> PythonPackage {
+        PythonPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn pip_list_lowercases_names_and_skips_malformed_rows() {
+        let output = r#"[
+            {"name": "Flask", "version": "3.0.2"},
+            {"name": "requests", "version": "2.31.0"},
+            {"name": "no-version"},
+            {"version": "1.0.0"}
+        ]"#;
+        let packages = parse_pip_list(output).unwrap();
+        let summary: Vec<_> = packages
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str()))
+            .collect();
+        assert_eq!(summary, vec![("flask", "3.0.2"), ("requests", "2.31.0")]);
+
+        assert!(parse_pip_list("[]").unwrap().is_empty());
+        assert!(parse_pip_list("WARNING: pip is out of date").is_err());
+    }
+
+    #[test]
+    fn pip_outdated_classifies_each_row() {
+        let output = r#"[
+            {"name": "Django", "version": "4.2.0", "latest_version": "5.0.1", "latest_filetype": "wheel"},
+            {"name": "urllib3", "version": "2.1.0", "latest_version": "2.2.0"},
+            {"name": "idna", "version": "3.6", "latest_version": "3.6.1"},
+            {"name": "incomplete", "version": "1.0.0"}
+        ]"#;
+        let outdated = parse_pip_outdated(output).unwrap();
+        let summary: Vec<_> = outdated
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str(), p.latest_version.as_str(), p.kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("django", "4.2.0", "5.0.1", UpdateKind::Major),
+                ("urllib3", "2.1.0", "2.2.0", UpdateKind::Minor),
+                ("idna", "3.6", "3.6.1", UpdateKind::Patch),
+            ]
+        );
+        assert!(parse_pip_outdated("{").is_err());
+    }
+
+    #[test]
+    fn classify_update_by_changed_component() {
+        assert_eq!(classify_update("1.2.3", "2.0.0"), UpdateKind::Major);
+        assert_eq!(classify_update("1.2.3", "1.3.0"), UpdateKind::Minor);
+        assert_eq!(classify_update("1.2.3", "1.2.4"), UpdateKind::Patch);
+        assert_eq!(classify_update("1.2", "1.3"), UpdateKind::Minor);
+    }
+
+    #[test]
+    fn classify_update_ignores_pep440_suffixes() {
+        // `2.0.0rc1` and `1.0+local` compare as their numeric release part.
+        assert_eq!(classify_update("1.9.0", "2.0.0rc1"), UpdateKind::Major);
+        assert_eq!(classify_update("1.0+local", "1.1"), UpdateKind::Minor);
+        assert_eq!(classify_update("2.0.0rc1", "2.0.0"), UpdateKind::Patch);
+    }
+
+    #[test]
+    fn classify_update_falls_back_to_patch() {
+        assert_eq!(classify_update("1.2.3", "1.2.3"), UpdateKind::Patch);
+        assert_eq!(classify_update("unknown", "2.0.0"), UpdateKind::Patch);
+        assert_eq!(classify_update("1.0.0", ""), UpdateKind::Patch);
+    }
+
+    #[test]
+    fn update_kind_labels() {
+        assert_eq!(UpdateKind::Major.label(), "major");
+        assert_eq!(UpdateKind::Minor.label(), "minor");
+        assert_eq!(UpdateKind::Patch.label(), "patch");
+    }
+
+    #[test]
+    fn pypi_json_full_record() {
+        let body = json!({
+            "info": {
+                "name": "requests",
+                "version": "2.31.0",
+                "summary": "  Python HTTP for Humans.  ",
+                "description": "# Requests",
+                "description_content_type": "text/markdown",
+                "author": "Kenneth Reitz",
+                "license": "Apache 2.0",
+                "home_page": "https://requests.readthedocs.io",
+                "project_url": "https://pypi.org/project/requests/",
+                "requires_python": ">=3.7",
+                "project_urls": {
+                    "Source": "https://github.com/psf/requests",
+                    "Broken": null
+                },
+                "requires_dist": ["idna<4,>=2.5", "urllib3<3,>=1.21.1", 7],
+                "classifiers": [
+                    "License :: OSI Approved :: Apache Software License",
+                    "Programming Language :: Python :: 3",
+                    "Programming Language :: Python :: 3.11",
+                    "Programming Language :: Python :: 3.12",
+                    "Programming Language :: Python :: Implementation :: CPython"
+                ]
+            }
+        });
+
+        let info = parse_pypi_json(&body).unwrap();
+        assert_eq!(info.name, "requests");
+        assert_eq!(info.version, "2.31.0");
+        assert_eq!(info.summary.as_deref(), Some("Python HTTP for Humans."));
+        assert_eq!(info.readme.as_deref(), Some("# Requests"));
+        assert_eq!(info.readme_content_type.as_deref(), Some("text/markdown"));
+        assert_eq!(info.author.as_deref(), Some("Kenneth Reitz"));
+        assert_eq!(info.license.as_deref(), Some("Apache 2.0"));
+        assert_eq!(info.home_page.as_deref(), Some("https://requests.readthedocs.io"));
+        assert_eq!(info.requires_python.as_deref(), Some(">=3.7"));
+        assert_eq!(info.requires_dist, vec!["idna<4,>=2.5", "urllib3<3,>=1.21.1"]);
+        assert_eq!(info.python_versions, vec!["3.11", "3.12"]);
+        assert_eq!(info.project_urls.len(), 1);
+        assert!(
+            info.project_urls
+                .iter()
+                .any(|(label, url)| label == "Source" && url == "https://github.com/psf/requests")
+        );
+    }
+
+    #[test]
+    fn pypi_json_blank_fields_become_none() {
+        let body = json!({
+            "info": {
+                "name": "sparse",
+                "summary": "   ",
+                "description": "",
+                "author": null,
+                "home_page": "",
+                "project_url": "https://pypi.org/project/sparse/"
+            }
+        });
+
+        let info = parse_pypi_json(&body).unwrap();
+        assert_eq!(info.version, "");
+        assert_eq!(info.summary, None);
+        assert_eq!(info.readme, None);
+        assert_eq!(info.author, None);
+        assert_eq!(info.license, None);
+        // An empty `home_page` falls back to the PyPI project page.
+        assert_eq!(info.home_page.as_deref(), Some("https://pypi.org/project/sparse/"));
+        assert!(info.requires_dist.is_empty());
+        assert!(info.python_versions.is_empty());
+        assert!(info.project_urls.is_empty());
+    }
+
+    #[test]
+    fn pypi_json_requires_info_and_name() {
+        assert!(parse_pypi_json(&json!({ "message": "Not Found" })).is_err());
+        assert!(parse_pypi_json(&json!({ "info": { "version": "1.0.0" } })).is_err());
+    }
+
+    #[test]
+    fn pypi_vulnerabilities_drop_withdrawn_and_idless_entries() {
+        let body = json!({
+            "vulnerabilities": [
+                {
+                    "id": "PYSEC-2023-74",
+                    "summary": "Leaks Proxy-Authorization",
+                    "details": "  ",
+                    "aliases": ["CVE-2023-32681", "GHSA-j8r2-6x86-q33q"],
+                    "fixed_in": ["2.31.0"],
+                    "link": "https://osv.dev/vulnerability/PYSEC-2023-74",
+                    "source": "osv",
+                    "withdrawn": null
+                },
+                { "id": "PYSEC-RETRACTED", "withdrawn": "2024-01-01T00:00:00Z" },
+                { "summary": "no id" },
+                { "id": "GHSA-minimal" }
+            ]
+        });
+
+        let vulnerabilities = parse_pypi_vulnerabilities(&body);
+        let ids: Vec<_> = vulnerabilities.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["PYSEC-2023-74", "GHSA-minimal"]);
+
+        let first = &vulnerabilities[0];
+        assert_eq!(first.summary.as_deref(), Some("Leaks Proxy-Authorization"));
+        assert_eq!(first.details, None);
+        assert_eq!(first.aliases, vec!["CVE-2023-32681", "GHSA-j8r2-6x86-q33q"]);
+        assert_eq!(first.fixed_in, vec!["2.31.0"]);
+        assert_eq!(first.link.as_deref(), Some("https://osv.dev/vulnerability/PYSEC-2023-74"));
+        assert_eq!(first.source.as_deref(), Some("osv"));
+
+        let minimal = &vulnerabilities[1];
+        assert_eq!(minimal.summary, None);
+        assert!(minimal.aliases.is_empty());
+        assert!(minimal.fixed_in.is_empty());
+
+        assert!(parse_pypi_vulnerabilities(&json!({ "info": {} })).is_empty());
+        assert!(parse_pypi_vulnerabilities(&json!({ "vulnerabilities": [] })).is_empty());
+    }
+
+    #[test]
+    fn env_marker_files_and_commands() {
+        assert_eq!(EnvMarker::Requirements.file_name(), "requirements.txt");
+        assert_eq!(EnvMarker::Pyproject.file_name(), "pyproject.toml");
+        assert_eq!(EnvMarker::Pipfile.file_name(), "Pipfile");
+
+        let venv_python = if cfg!(target_os = "windows") {
+            "venv\\Scripts\\python.exe"
+        } else {
+            "venv/bin/python"
+        };
+        assert_eq!(
+            EnvMarker::Requirements.create_command("py"),
+            format!("py -m venv venv && {venv_python} -m pip install -r requirements.txt")
+        );
+        assert_eq!(
+            EnvMarker::Pyproject.create_command("py"),
+            format!("py -m venv venv && {venv_python} -m pip install -e .")
+        );
+        assert_eq!(
+            EnvMarker::Pipfile.create_command("py"),
+            "py -m pip install pipenv && py -m pipenv install"
+        );
+    }
+
+    #[test]
+    fn project_scan_picks_one_marker_per_directory_by_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("requirements.txt"), "");
+        write(&root.join("pyproject.toml"), "");
+        write(&root.join("services/api/pyproject.toml"), "");
+        write(&root.join("services/api/Pipfile"), "");
+        write(&root.join("services/worker/Pipfile"), "");
+        write(&root.join("docs/readme.md"), "");
+        // Environments and build output are never reported as projects.
+        write(&root.join("venv/requirements.txt"), "");
+        write(&root.join(".venv/pyproject.toml"), "");
+        write(&root.join("node_modules/pkg/requirements.txt"), "");
+
+        let mut projects = scan_python_projects(&root.to_string_lossy(), 0);
+        projects.sort_by(|a, b| a.path.cmp(&b.path));
+        let markers: Vec<_> = projects.iter().map(|p| p.marker).collect();
+        assert_eq!(
+            markers,
+            vec![EnvMarker::Requirements, EnvMarker::Pyproject, EnvMarker::Pipfile]
+        );
+
+        assert_eq!(projects[0].path, root.to_string_lossy());
+        assert_eq!(
+            projects[0].name,
+            root.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(projects[1].name, "api");
+        assert_eq!(projects[2].name, "worker");
+    }
+
+    #[test]
+    fn project_scan_respects_depth_and_missing_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("requirements.txt"), "");
+        let root = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(scan_python_projects(&root, PROJECT_SCAN_MAX_DEPTH).len(), 1);
+        assert!(scan_python_projects(&root, PROJECT_SCAN_MAX_DEPTH + 1).is_empty());
+        assert!(scan_python_projects(&dir.path().join("missing").to_string_lossy(), 0).is_empty());
+    }
+
+    #[test]
+    fn single_project_scan_collects_requirements_entry_points_and_venvs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("requirements.txt"), "flask\n");
+        write(&root.join("app.py"), "");
+        write(&root.join("helpers.py"), "");
+        write(&root.join("api/main.py"), "");
+        write(&root.join("api/requirements.txt"), "");
+        write(&root.join("venv/bin/python"), "");
+        // Nothing inside an environment or a skipped directory is collected.
+        write(&root.join("venv/lib/app.py"), "");
+        write(&root.join("__pycache__/main.py"), "");
+        write(&root.join("build/requirements.txt"), "");
+
+        let scan = scan_python_project(&root.to_string_lossy()).unwrap();
+
+        let mut requirements = scan.requirements.clone();
+        requirements.sort();
+        assert_eq!(
+            requirements,
+            {
+                let mut expected = vec![
+                    root.join("requirements.txt").to_string_lossy().into_owned(),
+                    root.join("api").join("requirements.txt").to_string_lossy().into_owned(),
+                ];
+                expected.sort();
+                expected
+            }
+        );
+
+        let mut entry_files: Vec<String> = scan
+            .entry_points
+            .iter()
+            .map(|(file, _)| {
+                Path::new(file)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entry_files.sort();
+        assert_eq!(entry_files, vec!["app.py", "main.py"]);
+        for (file, dir) in &scan.entry_points {
+            assert_eq!(Path::new(file).parent().unwrap(), Path::new(dir));
+        }
+
+        assert_eq!(scan.venvs.len(), 1);
+        assert!(scan.venvs[0].ends_with("/bin/python"));
+    }
+
+    #[test]
+    fn framework_detected_from_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let flask = dir.path().join("flask-requirements.txt");
+        let django = dir.path().join("django-requirements.txt");
+        let plain = dir.path().join("plain-requirements.txt");
+        write(&flask, "Flask==3.0.2\nrequests\n");
+        write(&django, "Django>=5.0\n");
+        write(&plain, "requests\nnumpy\n");
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+
+        let framework = detect_framework(&[path(&flask)], &[]).unwrap();
+        assert_eq!(framework.name, "Flask");
+        assert_eq!(framework.dev_command, "flask run --debug");
+        assert_eq!(framework.port, Some(5000));
+
+        let framework = detect_framework(&[path(&django)], &[]).unwrap();
+        assert_eq!(framework.name, "Django");
+        assert_eq!(framework.port, Some(8000));
+
+        // Markers are checked in table order, so Flask wins over Django.
+        let framework = detect_framework(&[path(&django), path(&flask)], &[]).unwrap();
+        assert_eq!(framework.name, "Flask");
+
+        assert!(detect_framework(&[path(&plain)], &[]).is_none());
+        assert!(detect_framework(&[], &[]).is_none());
+        // An unreadable requirements file is skipped rather than an error.
+        assert!(detect_framework(&[path(&dir.path().join("missing.txt"))], &[]).is_none());
+    }
+
+    #[test]
+    fn missing_dependencies_compare_names_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        write(
+            &requirements,
+            "# web\nFlask==3.0.2\n\nRequests>=2.31\nnumpy~=1.26\n  pandas  \nurllib3!=2.0.0\n",
+        );
+        let installed = [package("flask"), package("numpy"), package("urllib3")];
+
+        let missing =
+            find_missing_deps(Some(&requirements.to_string_lossy()), &installed).unwrap();
+        assert_eq!(missing, vec!["requests", "pandas"]);
+
+        assert!(find_missing_deps(None, &installed).unwrap().is_empty());
+        assert!(
+            find_missing_deps(Some(&dir.path().join("nope.txt").to_string_lossy()), &installed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn requirement_count_ignores_blanks_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        write(&requirements, "# pinned\nflask==3.0.2\n\n   \nrequests\n  # note\nnumpy\n");
+
+        assert_eq!(count_requirements(Some(&requirements.to_string_lossy())).unwrap(), 3);
+        assert_eq!(count_requirements(None).unwrap(), 0);
+        assert!(count_requirements(Some(&dir.path().join("nope.txt").to_string_lossy())).is_err());
     }
 }

@@ -1,5 +1,19 @@
 # gpui-flow
 
+> **In this fork.** Vendored from
+> [pacifio/gpui-flow](https://github.com/pacifio/gpui-flow) (MIT). It is the
+> node-graph canvas behind three features:
+>
+> - the workflow Designer ([`designer_panel`](../designer_panel/README.md)),
+> - the database schema graph ([`database_panel`](../database_panel/README.md)),
+> - the Actions job graph in Helm ([`helm_panel`](../helm_panel/README.md)).
+>
+> It depends only on `gpui` and has no notion of a theme: colours are raw
+> `u32` values, so callers convert from the active theme themselves. Depend
+> on it with `gpui_flow.workspace = true`. Run an example with
+> `cargo run -p gpui_flow --example basic -j 8`. The rest of this file is the
+> upstream README.
+
 A node-based flow graph editor for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), inspired by [React Flow / xyflow](https://reactflow.dev).
 
 Build interactive node graphs, mind maps, workflow editors, and data pipelines in Rust with the same GPU-accelerated framework that powers the [Zed editor](https://zed.dev).

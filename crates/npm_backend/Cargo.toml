@@ -13,8 +13,11 @@ doctest = false
 [dependencies]
 log.workspace = true
 semver.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-registry.workspace = true

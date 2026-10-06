@@ -541,8 +541,8 @@ struct LoadedFlow {
 
 pub struct DesignerPanel {
     focus_handle: FocusHandle,
-    /// Not read yet — reserved for wiring `flows_panel::persistence::DesignerDb`
-    /// (recording which flow this workspace had open) once that lands.
+    /// Not read yet — kept for workspace-level wiring. Which flows are open
+    /// is already persisted per item by `persistence::DesignerDb`.
     /// `None` when opened via `ProjectItem::for_project_item` (a bare
     /// `Entity<Project>`/`Option<&Pane>` don't expose the owning
     /// workspace — `Pane::workspace` is crate-private to `workspace`);

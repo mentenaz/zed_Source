@@ -1,0 +1,109 @@
+# flows_panel
+
+A left-dock panel listing every workflow (`.flow.json`) in the open
+workspace, with buttons to create, open and run them.
+
+## Why it exists
+
+Flows are files, and files get lost in a tree. This panel is the index: one
+place that shows which workflows a project has, when each last ran and how it
+went, and that can start one without opening it first.
+
+Ported from Forge, limited to the `.flow.json` format. Forge's older
+`.fdgn`/`.fwrk` ForgeFlow format was never brought into this tree.
+
+## Using it
+
+Open with `ctrl-k f` (`cmd-k f` on macOS), the status bar icon (tooltip
+"Flows"), or `flows panel: toggle focus`.
+
+### Toolbar
+
+| Button | Does |
+| --- | --- |
+| Refresh | Rescan the workflows directory |
+| New Workflow | Create a blank `.flow.json` and open it |
+| Add Task Chain | Scan the workspace for services and generate a flow that starts them |
+
+### Each row
+
+| Button | Does |
+| --- | --- |
+| Run | Run the flow now; the row shows the outcome of the last run |
+| Open | Open the flow through the normal file-open path |
+| Graph | Open the flow on the Designer canvas directly |
+
+Both buttons end up on the Designer canvas: the Designer claims every
+`.flow.json` file, so the normal file-open path leads there too. To see the
+raw JSON, use the **Raw** button in the Designer's toolbar.
+
+Rows are sorted by name.
+
+### Add Task Chain
+
+The wizard lists the services detected in the workspace. For each one you can
+adjust the Name, Command, Args, Working Dir and Port, tick or untick it, or
+remove it. **Add Custom Service** adds a blank row. **Create** writes a new
+flow that starts the selected services; **Cancel** discards it.
+
+The Node panel's **Task Chain** quick action opens this same wizard anchored
+to that project.
+
+## Where flows are stored
+
+In `.zed/workflows` under the workspace root by default. The directory is
+created on first use. Change it in `settings.json`:
+
+```json
+{
+  "flows": {
+    "workflows_dir": "automation/flows"
+  }
+}
+```
+
+The path is relative to the workspace root.
+
+## How it is wired
+
+- `flows_panel::init(cx)` registers `flows_panel::ToggleFocus`.
+- `FlowsPanel::load(workspace, cx)` is awaited in `initialize_panels`
+  (`crates/zed/src/zed.rs`), which also hands a `WeakEntity<FlowsPanel>` to
+  the Node panel.
+- Implements `workspace::dock::Panel`, fixed to the left dock,
+  `activation_priority() = 13`.
+- `open_task_chain_wizard_anchored(...)` is the public entry point other
+  panels use to open the wizard for a specific project.
+
+## Layout
+
+| File | Contents |
+| --- | --- |
+| `src/flows_panel.rs` | Panel, flow list, task-chain wizard, run handling |
+| `src/flows_settings.rs` | The `"flows"` settings key (`FlowsSettings`) |
+| `src/persistence.rs` | Per-project run history |
+
+Running a flow calls `workflow_engine::run_workflow` directly and records the
+result. History is kept in Zed's scoped key-value store under the workspace
+root, as `history:<flow_id>`, capped at `MAX_HISTORY_ENTRIES` per flow.
+
+Related crates: [`workflow_engine`](../workflow_engine/README.md) (execution)
+and [`designer_panel`](../designer_panel/README.md) (the canvas).
+
+## Differences from Forge
+
+- No favourites, tags or separate flows index table.
+- Runs started here record final per-action outcomes only. For live
+  per-action status, run the flow from the Designer.
+
+## Development
+
+```sh
+cargo check -p flows_panel -j 8
+cargo test -p flows_panel -j 8
+```
+
+The tests cover run-history persistence, and that the Designer's database
+table has a single owner (`designer_panel`).
+
+To run the tests of every fork crate at once: `script/test-fork-crates.ps1`.

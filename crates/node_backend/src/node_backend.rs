@@ -254,7 +254,14 @@ pub fn query_runtime(exe: String) -> Result<String, String> {
 /// List installed NVM Node versions (`nvm list`), marking the current one.
 pub fn nvm_list() -> Result<Vec<NvmVersion>, String> {
     let stdout = run_captured("nvm", &["list"])?;
-    let versions = stdout
+    Ok(parse_nvm_list(&stdout))
+}
+
+/// Parses `nvm list` output: one version per line, the active one prefixed
+/// with `*`. Lines that don't start with a version number (banners, "No
+/// installations recognized.") are ignored.
+fn parse_nvm_list(stdout: &str) -> Vec<NvmVersion> {
+    stdout
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -273,13 +280,18 @@ pub fn nvm_list() -> Result<Vec<NvmVersion>, String> {
                 None
             }
         })
-        .collect();
-    Ok(versions)
+        .collect()
 }
 
 /// List NVM versions available to install (`nvm list available`).
 pub fn nvm_list_available() -> Result<Vec<String>, String> {
     let stdout = run_captured("nvm", &["list", "available"])?;
+    Ok(parse_nvm_list_available(&stdout))
+}
+
+/// Parses the `|`-delimited table `nvm list available` prints, keeping every
+/// cell that starts with a digit (the header and separator rows don't).
+fn parse_nvm_list_available(stdout: &str) -> Vec<String> {
     let mut versions: Vec<String> = Vec::new();
     for line in stdout.lines() {
         if !line.contains('|') {
@@ -296,7 +308,7 @@ pub fn nvm_list_available() -> Result<Vec<String>, String> {
             }
         }
     }
-    Ok(versions)
+    versions
 }
 
 /// Switch NVM to a specific version (`nvm use <version>`).
@@ -313,4 +325,165 @@ pub fn nvm_install(version: &str) -> Result<String, String> {
 /// an exact, already-installed version — no "latest"/"lts" aliases.
 pub fn nvm_uninstall(version: &str) -> Result<String, String> {
     run_captured("nvm", &["uninstall", version])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, content: &str) {
+        write_file(path.to_string_lossy().into_owned(), content.to_string()).unwrap();
+    }
+
+    fn sorted_names(projects: &[DetectedNodeProject]) -> Vec<String> {
+        let mut names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn nvm_list_marks_the_current_version() {
+        let stdout = "\n    21.6.1\n  * 20.11.0 (Currently using 64-bit executable)\n    18.19.0\n";
+        let versions = parse_nvm_list(stdout);
+        let summary: Vec<_> = versions
+            .iter()
+            .map(|v| (v.version.as_str(), v.current))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("21.6.1", false), ("20.11.0", true), ("18.19.0", false)]
+        );
+    }
+
+    #[test]
+    fn nvm_list_ignores_lines_that_are_not_versions() {
+        assert!(parse_nvm_list("").is_empty());
+        assert!(parse_nvm_list("No installations recognized.\n").is_empty());
+        assert!(parse_nvm_list("'nvm' is not recognized as an internal or external command").is_empty());
+    }
+
+    #[test]
+    fn nvm_list_available_reads_every_version_cell() {
+        let stdout = "
+|   CURRENT    |     LTS      |  OLD STABLE  | OLD UNSTABLE |
+|--------------|--------------|--------------|--------------|
+|    21.6.1    |   20.11.0    |   0.12.18    |   0.11.16    |
+|    21.6.0    |   20.10.0    |   0.12.17    |   0.11.15    |
+
+This is a partial list. For a complete list, visit https://nodejs.org/en/download/releases
+";
+        assert_eq!(
+            parse_nvm_list_available(stdout),
+            vec![
+                "21.6.1", "20.11.0", "0.12.18", "0.11.16", "21.6.0", "20.10.0", "0.12.17", "0.11.15"
+            ]
+        );
+        assert!(parse_nvm_list_available("no table here").is_empty());
+    }
+
+    #[test]
+    fn write_file_creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/c/package.json");
+        let path_string = path.to_string_lossy().into_owned();
+
+        write_file(path_string.clone(), "{\"name\":\"x\"}".to_string()).unwrap();
+        assert_eq!(read_text_file(path_string.clone()).unwrap(), "{\"name\":\"x\"}");
+
+        // Overwrites in place.
+        write_file(path_string.clone(), "{}".to_string()).unwrap();
+        assert_eq!(read_text_file(path_string).unwrap(), "{}");
+    }
+
+    #[test]
+    fn read_text_file_reports_the_path_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt").to_string_lossy().into_owned();
+        let error = read_text_file(missing.clone()).unwrap_err();
+        assert!(error.contains(&missing), "{error}");
+    }
+
+    #[test]
+    fn read_dir_lists_directories_first_and_hides_flow_layout_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("zeta.txt"), "");
+        write(&root.join("Alpha.txt"), "");
+        write(&root.join("build.flow.json"), "");
+        write(&root.join("build.flow.layout.json"), "");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("Docs")).unwrap();
+
+        let entries = read_dir(root.to_string_lossy().into_owned()).unwrap();
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Docs", true),
+                ("src", true),
+                ("Alpha.txt", false),
+                ("build.flow.json", false),
+                ("zeta.txt", false),
+            ]
+        );
+        assert!(entries.iter().all(|e| Path::new(&e.path).exists()));
+
+        assert!(read_dir(root.join("missing").to_string_lossy().into_owned()).is_err());
+    }
+
+    #[test]
+    fn scan_finds_every_package_json_outside_skipped_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("package.json"), "{}");
+        write(&root.join("apps/web/package.json"), "{}");
+        write(&root.join("apps/api/package.json"), "{}");
+        write(&root.join("apps/api/src/index.js"), "");
+        write(&root.join("node_modules/react/package.json"), "{}");
+        write(&root.join("apps/web/dist/package.json"), "{}");
+        write(&root.join("apps/web/.next/package.json"), "{}");
+
+        let projects = scan_node_projects(&root.to_string_lossy(), 0);
+        let root_name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let mut expected = vec!["api".to_string(), "web".to_string(), root_name];
+        expected.sort();
+        assert_eq!(sorted_names(&projects), expected);
+
+        let web = projects.iter().find(|p| p.name == "web").unwrap();
+        assert!(Path::new(&web.path).join("package.json").is_file());
+    }
+
+    #[test]
+    fn scan_treats_a_nested_git_directory_as_a_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        write(&root.join("package.json"), "{}");
+        std::fs::create_dir_all(root.join("vendor/.git")).unwrap();
+        write(&root.join("vendor/package.json"), "{}");
+        write(&root.join("vendor/inner/package.json"), "{}");
+        write(&root.join("mine/package.json"), "{}");
+
+        // The root's own `.git` doesn't stop the scan; a nested repository
+        // is reported itself but not descended into.
+        let projects = scan_node_projects(&root.to_string_lossy(), 0);
+        let root_name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let mut expected = vec!["mine".to_string(), "vendor".to_string(), root_name];
+        expected.sort();
+        assert_eq!(sorted_names(&projects), expected);
+    }
+
+    #[test]
+    fn scan_stops_past_the_depth_limit_and_on_missing_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("package.json"), "{}");
+        let root = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(scan_node_projects(&root, MAX_SCAN_DEPTH).len(), 1);
+        assert!(scan_node_projects(&root, MAX_SCAN_DEPTH + 1).is_empty());
+        assert!(scan_node_projects(&dir.path().join("missing").to_string_lossy(), 0).is_empty());
+    }
 }

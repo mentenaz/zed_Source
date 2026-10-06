@@ -14,7 +14,10 @@ doctest = false
 dunce.workspace = true
 gpui_util.workspace = true
 log.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry.workspace = true

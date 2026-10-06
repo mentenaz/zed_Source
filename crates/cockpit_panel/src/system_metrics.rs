@@ -481,3 +481,20 @@ impl CockpitPanel {
             .child(div().h_px().w_full().bg(border))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_pick_the_largest_fitting_unit() {
+        assert_eq!(fmt_bytes(0), "0 KB");
+        assert_eq!(fmt_bytes(1_024), "1 KB");
+        assert_eq!(fmt_bytes(1_048_575), "1024 KB");
+        assert_eq!(fmt_bytes(1_048_576), "1 MB");
+        assert_eq!(fmt_bytes(500 * 1_048_576), "500 MB");
+        assert_eq!(fmt_bytes(1_073_741_824), "1.0 GB");
+        assert_eq!(fmt_bytes(1_610_612_736), "1.5 GB");
+        assert_eq!(fmt_bytes(512 * 1_073_741_824), "512.0 GB");
+    }
+}

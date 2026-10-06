@@ -56,6 +56,7 @@ use python_backend::{
     query_python, scan_python_project, scan_python_projects,
 };
 use script_runner_panel::ScriptRunnerPanel;
+use script_runner_panel::command::{check_package_name, check_version, shell_program};
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 
 mod details;
@@ -560,17 +561,41 @@ impl PythonManagerPanel {
         if self.selected_project.is_none() {
             return;
         }
-        let exe = self.pip_bin();
-        self.kick_run("create environment", marker.create_command(&exe), window, cx);
+        let command = self.pip_program().map(|exe| marker.create_command(&exe));
+        self.run_or_reject("create environment", command, window, cx);
+    }
+
+    /// The interpreter as it can be written into a command run in the
+    /// selected project's directory — relative when it's the project's own
+    /// venv, so a project under a path with spaces still works.
+    fn pip_program(&self) -> Result<String, String> {
+        let cwd = self.selected_project.clone().unwrap_or_else(|| self.root.clone());
+        shell_program(&self.pip_bin(), &cwd)
+    }
+
+    /// Runs `command` if it was built successfully; otherwise shows the
+    /// refusal (see `script_runner_panel::command`).
+    fn run_or_reject(
+        &mut self,
+        label: &str,
+        command: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            Ok(command) => self.kick_run(label, command, window, cx),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     fn install_pkg(&mut self, name: &str, version: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        let exe = self.pip_bin();
-        let cmd = match version {
-            Some(v) => format!("{exe} -m pip install {name}=={v}"),
-            None => format!("{exe} -m pip install {name}"),
-        };
-        self.kick_run(&format!("install {name}"), cmd, window, cx);
+        let command = self
+            .pip_program()
+            .and_then(|exe| pip_install_command(&exe, name, version));
+        self.run_or_reject(&format!("install {name}"), command, window, cx);
     }
 
     /// Confirms before uninstalling — irreversible from here (no undo, and
@@ -593,13 +618,10 @@ impl PythonManagerPanel {
                 return;
             }
             this.update_in(cx, |this, window, cx| {
-                let exe = this.pip_bin();
-                this.kick_run(
-                    &format!("uninstall {name}"),
-                    format!("{exe} -m pip uninstall -y {name}"),
-                    window,
-                    cx,
-                );
+                let command = this
+                    .pip_program()
+                    .and_then(|exe| pip_uninstall_command(&exe, &name));
+                this.run_or_reject(&format!("uninstall {name}"), command, window, cx);
             })
             .ok();
         })
@@ -610,13 +632,10 @@ impl PythonManagerPanel {
         if self.outdated.is_empty() {
             return;
         }
-        let exe = self.pip_bin();
-        let parts: Vec<String> = self
-            .outdated
-            .iter()
-            .map(|o| format!("{exe} -m pip install --upgrade {}", o.name))
-            .collect();
-        self.kick_run("update all", parts.join(" && "), window, cx);
+        let command = self
+            .pip_program()
+            .and_then(|exe| pip_update_all_command(&exe, &self.outdated));
+        self.run_or_reject("update all", command, window, cx);
     }
 
     fn latest_for(&self, name: &str) -> Option<&str> {
@@ -988,5 +1007,107 @@ impl Render for PythonManagerPanel {
             .child(self.render_project_picker(cx))
             .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
+    }
+}
+
+/// `<exe> -m pip install <name>`, pinned with `==<version>` when one is
+/// given. Going through `-m pip` rather than a bare `pip` keeps the install
+/// tied to the interpreter the panel is showing. `exe` must already be
+/// shell-ready (see `PythonManagerPanel::pip_program`); the name and version
+/// are checked here.
+fn pip_install_command(exe: &str, name: &str, version: Option<&str>) -> Result<String, String> {
+    check_package_name(name)?;
+    Ok(match version {
+        Some(version) => {
+            check_version(version)?;
+            format!("{exe} -m pip install {name}=={version}")
+        }
+        None => format!("{exe} -m pip install {name}"),
+    })
+}
+
+/// `<exe> -m pip uninstall -y <name>` — `-y` because the panel has already
+/// asked for confirmation and the runner has no stdin to answer pip's prompt.
+fn pip_uninstall_command(exe: &str, name: &str) -> Result<String, String> {
+    check_package_name(name)?;
+    Ok(format!("{exe} -m pip uninstall -y {name}"))
+}
+
+/// One `pip install --upgrade` per outdated package, chained with `&&` so a
+/// failure stops the rest. An error (and nothing run) if any name isn't
+/// shell-plain.
+fn pip_update_all_command(exe: &str, outdated: &[PythonOutdatedPkg]) -> Result<String, String> {
+    let mut segments = Vec::new();
+    for package in outdated {
+        check_package_name(&package.name)?;
+        segments.push(format!("{exe} -m pip install --upgrade {}", package.name));
+    }
+    Ok(segments.join(" && "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outdated(name: &str) -> PythonOutdatedPkg {
+        PythonOutdatedPkg {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            latest_version: "1.0.1".to_string(),
+            kind: python_backend::classify_update("1.0.0", "1.0.1"),
+        }
+    }
+
+    #[test]
+    fn install_command_pins_a_version_only_when_given() {
+        assert_eq!(
+            pip_install_command("python", "requests", None).as_deref(),
+            Ok("python -m pip install requests")
+        );
+        assert_eq!(
+            pip_install_command("python", "requests", Some("2.31.0")).as_deref(),
+            Ok("python -m pip install requests==2.31.0")
+        );
+    }
+
+    #[test]
+    fn commands_run_through_the_given_interpreter() {
+        let exe = "venv\\Scripts\\python.exe";
+        assert!(
+            pip_install_command(exe, "flask", None)
+                .unwrap()
+                .starts_with("venv\\Scripts\\python.exe -m pip ")
+        );
+        assert!(
+            pip_uninstall_command(exe, "flask")
+                .unwrap()
+                .starts_with("venv\\Scripts\\python.exe -m pip ")
+        );
+    }
+
+    #[test]
+    fn uninstall_command_never_prompts() {
+        assert_eq!(
+            pip_uninstall_command("python", "flask").as_deref(),
+            Ok("python -m pip uninstall -y flask")
+        );
+    }
+
+    #[test]
+    fn commands_refuse_shell_syntax() {
+        assert!(pip_install_command("python", "requests; calc", None).is_err());
+        assert!(pip_install_command("python", "requests", Some("1.0 && calc")).is_err());
+        assert!(pip_install_command("python", "--index-url=http://evil.test", None).is_err());
+        assert!(pip_uninstall_command("python", "flask|more").is_err());
+        assert!(pip_update_all_command("python", &[outdated("flask"), outdated("x && calc")]).is_err());
+    }
+
+    #[test]
+    fn update_all_chains_one_upgrade_per_package() {
+        assert_eq!(
+            pip_update_all_command("py", &[outdated("flask"), outdated("requests")]).as_deref(),
+            Ok("py -m pip install --upgrade flask && py -m pip install --upgrade requests")
+        );
+        assert_eq!(pip_update_all_command("py", &[]).as_deref(), Ok(""));
     }
 }

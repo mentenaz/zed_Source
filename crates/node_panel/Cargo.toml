@@ -27,3 +27,6 @@ sysinfo.workspace = true
 ui.workspace = true
 workspace.workspace = true
 worktree.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

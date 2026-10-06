@@ -13,8 +13,11 @@ doctest = false
 [dependencies]
 gpui_util.workspace = true
 log.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry.workspace = true

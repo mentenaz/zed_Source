@@ -461,3 +461,16 @@ impl Render for CockpitPanel {
             )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kbps_converts_bytes_to_kilobytes() {
+        assert_eq!(kbps(0.), 0.);
+        assert_eq!(kbps(1024.), 1.);
+        assert_eq!(kbps(1536.), 1.5);
+        assert_eq!(kbps(1_048_576.), 1024.);
+    }
+}

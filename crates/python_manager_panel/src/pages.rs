@@ -44,8 +44,24 @@ fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<u
     if len == 0 {
         return None;
     }
-    let ix = selected.unwrap_or(0);
-    Some(if forward { (ix + 1) % len } else { (ix + len - 1) % len })
+    Some(match selected {
+        // Nothing selected yet: the first press lands on the nearest end
+        // rather than stepping past it.
+        None => {
+            if forward {
+                0
+            } else {
+                len - 1
+            }
+        }
+        Some(ix) => {
+            if forward {
+                (ix + 1) % len
+            } else {
+                (ix + len - 1) % len
+            }
+        }
+    })
 }
 
 pub(crate) fn build_all(
@@ -949,4 +965,34 @@ fn colored_count_badge(count: usize, loading: bool, color: Hsla) -> AnyElement {
             .when(count == 0 && loading, |this| this.child(Spinner::new().with_size(Size::XSmall))),
     )
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_selected_starts_at_the_nearest_end() {
+        assert_eq!(step_selected(None, 3, true), Some(0));
+        assert_eq!(step_selected(None, 3, false), Some(2));
+    }
+
+    #[test]
+    fn step_selected_wraps_at_both_ends() {
+        assert_eq!(step_selected(Some(0), 3, true), Some(1));
+        assert_eq!(step_selected(Some(2), 3, true), Some(0));
+        assert_eq!(step_selected(Some(0), 3, false), Some(2));
+        assert_eq!(step_selected(Some(1), 3, false), Some(0));
+        assert_eq!(step_selected(Some(0), 1, true), Some(0));
+        assert_eq!(step_selected(Some(0), 1, false), Some(0));
+    }
+
+    #[test]
+    fn step_selected_handles_empty_and_shrunken_lists() {
+        assert_eq!(step_selected(None, 0, true), None);
+        assert_eq!(step_selected(Some(4), 0, false), None);
+        // A selection left over from a longer list still lands in range.
+        assert!(step_selected(Some(9), 3, true).is_some_and(|ix| ix < 3));
+        assert!(step_selected(Some(9), 3, false).is_some_and(|ix| ix < 3));
+    }
 }

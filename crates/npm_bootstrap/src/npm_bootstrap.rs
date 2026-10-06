@@ -56,11 +56,11 @@ fn check_worktree(
     cx: &mut Context<Workspace>,
 ) {
     let root = worktree.read(cx).abs_path();
-    if !root.join("package.json").is_file() || root.join("node_modules").exists() {
+    if !needs_install(&root) {
         return;
     }
 
-    let key = format!("npm-bootstrap-asked:{}", root.display());
+    let key = prompt_key(&root);
     if KeyValueStore::global(cx)
         .read_kvp(&key)
         .ok()
@@ -138,5 +138,71 @@ async fn install(root: PathBuf) -> anyhow::Result<()> {
         Err(anyhow::anyhow!(
             String::from_utf8_lossy(&output.stderr).into_owned()
         ))
+    }
+}
+
+/// Whether `root` looks like a JavaScript project whose dependencies were
+/// never installed: it has a `package.json` file and no `node_modules`.
+fn needs_install(root: &Path) -> bool {
+    root.join("package.json").is_file() && !root.join("node_modules").exists()
+}
+
+/// The key-value store key recording that the install prompt was already
+/// shown for `root`, so it is offered once per project directory.
+fn prompt_key(root: &Path) -> String {
+    format!("npm-bootstrap-asked:{}", root.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_is_offered_only_for_uninstalled_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Not a JavaScript project at all.
+        assert!(!needs_install(root));
+
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert!(needs_install(root));
+
+        // Dependencies already installed.
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        assert!(!needs_install(root));
+    }
+
+    #[test]
+    fn a_directory_named_package_json_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("package.json")).unwrap();
+        assert!(!needs_install(dir.path()));
+    }
+
+    #[test]
+    fn a_node_modules_file_still_counts_as_installed() {
+        // `exists`, not `is_dir`: a symlink or stray file named
+        // `node_modules` means something else is managing it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("node_modules"), "").unwrap();
+        assert!(!needs_install(dir.path()));
+    }
+
+    #[test]
+    fn missing_directories_need_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!needs_install(&dir.path().join("does-not-exist")));
+    }
+
+    #[test]
+    fn prompt_key_is_distinct_per_project() {
+        let a = prompt_key(Path::new("/work/a"));
+        let b = prompt_key(Path::new("/work/b"));
+        assert!(a.starts_with("npm-bootstrap-asked:"));
+        assert!(a.ends_with("a"));
+        assert_ne!(a, b);
+        assert_eq!(a, prompt_key(Path::new("/work/a")));
     }
 }
