@@ -1,6 +1,6 @@
 # Rust (Cargo) Manager: Design Note
 
-**Status:** design only, nothing built. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
+**Status:** the backend for steps 1 to 3 (`cargo_backend`) is built and tested; no panel yet. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
 **Pattern to follow:** the existing runtime panel plus manager pairs, each with a GPUI-free backend (`node_panel` + `npm_manager_panel` + `node_backend`/`npm_backend`, `dotnet_panel` + `nuget_manager_panel` + `dotnet_backend`, `python_panel` + `python_manager_panel` + `python_backend`).
 
 ---
@@ -48,6 +48,9 @@ Consequences:
 | 9 | Offline | Show the **last cached results with their age** ("as of 2 hours ago") | A blank panel is worse than a stale, labelled one. The timestamp is needed for cache expiry anyway. | Show nothing |
 | 10 | Path and git dependencies | **Hidden** from the Installed and Updates lists. A single footer line states how many were left out. | The lean option. They have no registry release to compare against, and on this fork they are most of any crate's dependencies (workspace siblings), so listing them would bury the registry packages the manager exists for. The footer keeps the omission visible rather than silent. | Show them with a "path"/"git" tag (later, if wanted) |
 | 11 | A crate reachable at more than one version | Installed and Updates show the version the selected crate depends on **directly** (always one per dependency). Vulnerabilities shows **one row per name-and-version pair**. | An advisory applies to specific versions, so merging two versions would hide which one is affected. Nothing extra to build: this is the shape the data already has. | A combined row (rejected) |
+| 12 | Advisory details | Fetched **for every advisory found**, several at a time, and cached by id and `modified` stamp | Supersedes "fetch lazily when a row is opened". Without the details two ids cannot be recognised as one advisory, and a notice cannot be told from a vulnerability, so the list and its counts would be wrong until every row had been opened. The cost is bounded: 40 records for `zed`. | Lazy fetch (rejected: wrong counts) |
+| 13 | Advisories that are not vulnerabilities | **Kept apart**: Vulnerabilities, Unsound, Unmaintained, Notices, each with its own count. Only vulnerabilities feed the Vulnerabilities badge. | RustSec publishes *unmaintained* and *unsound* notices alongside vulnerabilities. For `zed`, 15 of 41 findings are notices. Counting an abandoned crate as a security hole would make the number meaningless. | One combined list (rejected) |
+| 14 | Severity when the record has no label | **Computed from the CVSS v3 vector** when there is one; otherwise unknown | Only GitHub records carry a label; RustSec records carry a vector. For `zed` a label alone rates 6 of 26 vulnerabilities, computing rates 18. CVSS v4 is a lookup table, not a formula, so v4-only records stay unknown rather than approximated. | Label only (leaves most rows unknown) |
 
 ## 5. Data sources
 
@@ -59,7 +62,7 @@ Consequences:
 | Latest versions, MSRV, yanked flag | Sparse index (`index.crates.io`) | One small request per registry dependency, returning one JSON line per published version. Each line carries `rust_version` and `yanked`, so MSRV filtering needs no extra requests; older versions often have no `rust_version` (46 of 135 for `time`). Responses are served with `Cache-Control: max-age=600` and an `ETag`, so revalidate with `If-None-Match` rather than refetching. Path and git dependencies need no lookup. |
 | Search | crates.io Web API (`crates.io/api/v1/crates?q=`) | A descriptive `User-Agent` is mandatory: a request without one gets HTTP 403. Paginates with a `seek` token in `meta.next_page`. Keep request volume low and cache results. **Verify** the published rate limit; assume one request per second until then. |
 | README | `crates.io/api/v1/crates/<name>/<version>/readme` | Answers with a 302 redirect to `static.crates.io/readmes/...html`. The body is **rendered HTML, not Markdown**, so the flyout needs `gpui_component`'s HTML rendering, and the HTTP client must follow a redirect to a different host. |
-| Vulnerabilities | OSV.dev, `POST https://api.osv.dev/v1/querybatch` | At most **1,000 queries per request** (1,001 is rejected with "too many queries"), so chunk the reachable set. The batch response holds only an `id` and `modified` date per advisory. Severity, summary and fixed-in versions need a second request per advisory (`GET /v1/vulns/<id>`), so fetch details lazily when a row is opened. Results paginate past 1,000 per query or 3,000 in total. The ecosystem must be exactly `crates.io`; anything else is rejected as "invalid ecosystem". **One advisory can come back twice**, once under its GitHub id and once under its RustSec id, each listing the other in `aliases`: merge them into one row. Only the GitHub record carries a severity. |
+| Vulnerabilities | OSV.dev, `POST https://api.osv.dev/v1/querybatch` | At most **1,000 queries per request** (1,001 is rejected with "too many queries"), so chunk the reachable set. The batch response holds only an `id` and `modified` date per advisory. Severity, summary, fixed-in versions, aliases and the notice marker all need a second request per advisory (`GET /v1/vulns/<id>`). Fetch them for every advisory found (decision 12), several at once: one at a time they take about 0.7 s each. Each id arrives with a `modified` stamp to cache by. Results paginate past 1,000 per query or 3,000 in total. The ecosystem must be exactly `crates.io`; anything else is rejected as "invalid ecosystem". **One advisory can come back twice**, once under its GitHub id and once under its RustSec id, each listing the other in `aliases`: merge them into one row. Only the GitHub record carries a severity. |
 | Add | `cargo add <name> -p <crate>` | Edits the member's `Cargo.toml` and `Cargo.lock`. Does not compile. |
 | Remove | `cargo remove <name> -p <crate>` | Edits the member's `Cargo.toml` and `Cargo.lock`, **and may edit the root `Cargo.toml`** (see section 7). Does not compile. |
 | Update within the declared range | `cargo update <name>` | Only changes `Cargo.lock`. **Always pass a package name** (see section 7). Does not compile. |
@@ -79,7 +82,7 @@ Consequences:
 
 **Updates page.** Classify each row as patch, minor or major, as the other managers do, and make clear which action it gets:
 
-- *Within the declared range:* `cargo update <name>`. Lockfile only.
+- *Within the declared range:* `cargo update <name>`. Lockfile only. Shown as "up to <version>", because the version is the newest this crate's requirement allows and another package in the workspace can hold Cargo lower. Found on this fork: `clap` is `^4.4` and 4.6.7 exists, but `cargo update clap` settles on 4.6.1. The confirmation step runs `cargo update --dry-run <name>` and shows the exact result.
 - *Outside the declared range* (usually a major version): `cargo add <name>@<version>`. Changes the requirement, and for a workspace-inherited dependency that means the root manifest.
 
 "Update all" only ever covers the first kind.
@@ -98,7 +101,11 @@ The "compatible versions only" filter hides the second state and keeps the other
 
 **Yanked versions** are left out of every version list. If the version currently locked is yanked, the Installed page flags that row as a warning.
 
-**Vulnerability rows** merge an advisory's GitHub and RustSec records into one. A row with no severity shows "unknown" in the warning colour.
+**Vulnerability rows** merge an advisory's GitHub and RustSec records into one. A vulnerability with no severity shows "unknown" in the warning colour.
+
+**The Vulnerabilities page has sections**, in this order: Vulnerabilities (most severe first), Unsound, Unmaintained, Notices. Notices show no severity; for them a missing one is not "unknown", there simply isn't one. The page's badge counts vulnerabilities only.
+
+**A note under the list** says the scan covers every package in the lockfile reachable from the crate, on any platform, so a finding may concern a package that is never built here. Found on this fork: `npm_backend` is reported as reaching the unmaintained `tokio-io`, through a chain that only exists when building for WebAssembly. `cargo audit` reports the same set.
 
 **Honest states, same as the Dashboard:** *not scanned yet*, *Cargo.toml not found*, *waiting for Cargo*, *offline (showing results as of …)*. Unknown must never look like healthy. Vulnerability badges use the warning colour, not the neutral one.
 
@@ -120,7 +127,7 @@ The "compatible versions only" filter hides the second state and keeps the other
 - **Idle:** nothing runs. Load when the panel opens, refresh when a manifest or the lockfile changes. No polling.
 - **Local:** one `cargo metadata --no-deps` (about 1.2 s on the fork) per refresh, plus a lockfile parse.
 - **Network, outdated check:** one index request per registry dependency. Typically 20 to 50, but not always: `zed` has 214 direct dependencies. Many of those are local path crates that need no lookup, so count registry dependencies only, cap concurrency, and show progress.
-- **Network, vulnerabilities:** one batched OSV request (or a few chunks) for the IDs, then one request per advisory for details, fetched only when a row is opened.
+- **Network, vulnerabilities:** one batched OSV request per 1,000 reachable packages (2 for `zed`, about 4 s), then one request per distinct advisory (40 for `zed`). Fetch those several at a time and cache them by id and `modified` stamp, so a repeat scan costs only the batch requests.
 - **UI:** virtualised lists, lazy loading.
 - **Stress test:** the Zed fork itself (286 workspace crates, 1,964 locked packages).
 
@@ -158,8 +165,11 @@ Fork conventions that apply to all three:
 ## 11. Build order (each step shippable)
 
 1. Detect the crate, list its direct dependencies. *Done when:* the list matches `Cargo.toml` on a scratch crate and on one Zed crate.
+   - **Backend done (6 October 2026):** `crates/cargo_backend`. Checked on a scratch workspace, on `npm_backend` (6 listed) and on `zed` (37 listed, 160 hidden); the counts match Cargo's own output. The reachable-set walk for step 3 is included. The panel is not started.
 2. Outdated versions from the sparse index.
+   - **Backend done (6 October 2026):** index paths and parsing, in-range and out-of-range targets, the three minimum-Rust-version states, yanked handling and the version picker. Checked against live data: of seven dependencies compared with `cargo update --dry-run`, six matched exactly. The request itself is left to the panel.
 3. Vulnerabilities via OSV.
+   - **Backend done (6 October 2026):** batch requests, advisory records, CVSS v3 scoring, and merging into findings. Checked against live data for `zed`: 1,425 reachable packages, 2 batch requests, 40 records, giving 26 vulnerabilities, 5 unsound and 10 unmaintained. The requests themselves are left to the panel. See decisions 12 to 14 for what the real data changed.
 4. Add, remove and update through Cargo.
 5. Search and README viewing.
 
@@ -175,6 +185,8 @@ Timebox steps 1 to 3 to a couple of evenings. Do not add it to the CV, README or
 - [x] crates.io requires a `User-Agent` (403 without one; tested)
 - [x] Sparse index carries `rust_version` and `yanked` per version (tested)
 - [x] README endpoint format (302 redirect to rendered HTML; tested)
+- [x] In-range targets against Cargo's own resolution (six of seven matched; `clap` is held back by another package, hence "up to")
+- [x] OSV record shapes, on live data for this fork (GitHub and RustSec records, informational notices, CVSS v3 and v4 vectors, several fixed versions per advisory)
 - [ ] crates.io published rate limit, and whether the sparse index is exempt from it (no rate-limit headers are returned, so this needs the policy page)
 - [ ] Whether a lighter "reload" action than a full language-server restart exists in the fork (only needed if the hint proves annoying)
 
