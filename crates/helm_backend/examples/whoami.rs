@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use helm_backend::github::{
-    GhError, GhState, gh_get_current_user, gh_get_org_logins, gh_get_repo, gh_get_repos,
+    GhError, GhState, Page, fetch_page, gh_get_current_user, gh_get_org_logins, gh_get_repo,
+    gh_get_repos, requests,
 };
 
 fn main() -> Result<(), String> {
@@ -24,7 +25,20 @@ fn main() -> Result<(), String> {
             println!("{} organisation(s)", orgs.len());
 
             let repos = gh_get_repos("self".to_string(), &state).await?;
-            println!("{} repositories on the first page", repos.len());
+            println!("{} repositories in all", repos.len());
+
+            // One page of ten, to see paging against a real list.
+            if let Some(repo) = repos.first() {
+                let request = requests::recent_commits(&repo.owner.login, &repo.name);
+                let commits: Page<serde_json::Value> = fetch_page(&state, request, 1, 10).await?;
+                println!(
+                    "{}: {} commits on page {} of {}",
+                    repo.name,
+                    commits.items.len(),
+                    commits.page,
+                    commits.last_page
+                );
+            }
 
             // A request that must fail, to see an error arrive as its type.
             let missing = "this-repository-does-not-exist-helm-backend".to_string();

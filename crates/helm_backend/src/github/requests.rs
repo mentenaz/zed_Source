@@ -20,6 +20,27 @@ pub struct ApiRequest {
     pub body: Option<Value>,
 }
 
+impl ApiRequest {
+    /// The same request for page `page` (counting from 1) at `per_page`
+    /// items a page, replacing any paging the request already asked for.
+    pub fn page(mut self, page: u32, per_page: u32) -> ApiRequest {
+        let (path, query) = match self.path.split_once('?') {
+            Some((path, query)) => (path.to_string(), query.to_string()),
+            None => (self.path.clone(), String::new()),
+        };
+        let mut params: Vec<String> = query
+            .split('&')
+            .filter(|param| !param.is_empty())
+            .filter(|param| !param.starts_with("per_page=") && !param.starts_with("page="))
+            .map(str::to_string)
+            .collect();
+        params.push(format!("per_page={per_page}"));
+        params.push(format!("page={}", page.max(1)));
+        self.path = format!("{path}?{}", params.join("&"));
+        self
+    }
+}
+
 fn get(path: String) -> ApiRequest {
     ApiRequest {
         method: "GET",
@@ -353,6 +374,27 @@ mod tests {
 
     fn line(request: &ApiRequest) -> String {
         format!("{} {}", request.method, request.path)
+    }
+
+    #[test]
+    fn a_request_can_be_asked_for_one_page() {
+        // Paging already in the request is replaced, other parameters kept.
+        assert_eq!(
+            line(&issues("o", "r", "open").page(3, 10)),
+            "GET /repos/o/r/issues?state=open&sort=updated&direction=desc&per_page=10&page=3"
+        );
+        assert_eq!(
+            line(&workflow_runs("o", "r").page(2, 10)),
+            "GET /repos/o/r/actions/runs?per_page=10&page=2"
+        );
+        // A request with no query string gets one.
+        assert_eq!(line(&repo("o", "r").page(1, 10)), "GET /repos/o/r?per_page=10&page=1");
+        // Pages count from 1.
+        assert_eq!(line(&tags("o", "r").page(0, 10)), "GET /repos/o/r/tags?per_page=10&page=1");
+        // The body and method are untouched.
+        let paged = update_user(json!({ "bio": "x" })).page(2, 5);
+        assert_eq!(paged.method, "PATCH");
+        assert_eq!(paged.body, Some(json!({ "bio": "x" })));
     }
 
     #[test]

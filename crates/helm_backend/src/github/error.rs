@@ -146,6 +146,8 @@ pub struct RawResponse {
     pub rate_reset: Option<u64>,
     /// `retry-after`, in seconds.
     pub retry_after: Option<u64>,
+    /// `link`: where the next, previous and last pages of a list are.
+    pub link: Option<String>,
 }
 
 /// What GitHub said was wrong: the `message` of its JSON error body, with
@@ -302,6 +304,7 @@ mod tests {
             rate_remaining: Some(0),
             rate_reset: Some(1_800_000_600),
             retry_after: None,
+            link: None,
         };
         let error = interpret::<serde_json::Value>(&limited).unwrap_err();
         assert_eq!(
@@ -327,6 +330,7 @@ mod tests {
             rate_remaining: Some(4_000),
             rate_reset: None,
             retry_after: Some(30),
+            link: None,
         };
         assert_eq!(
             interpret::<serde_json::Value>(&secondary).unwrap_err(),

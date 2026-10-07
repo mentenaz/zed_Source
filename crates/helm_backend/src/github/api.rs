@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 
 use super::error::{GhError, RawResponse, interpret, interpret_empty};
 use super::gh_cmd;
+use super::paging::{Page, interpret_page, interpret_page_under};
 use super::requests::{self, ApiRequest};
 use super::types::{
     Branch, Collaborator, Comment, CommitSummary, Deployment, GhState, GitHubUser,
@@ -93,6 +94,11 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
     let rate_remaining = number("x-ratelimit-remaining");
     let rate_reset = number("x-ratelimit-reset");
     let retry_after = number("retry-after");
+    let link = response
+        .headers()
+        .get("link")
+        .and_then(|link| link.to_str().ok())
+        .map(str::to_string);
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -105,6 +111,7 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
         rate_remaining,
         rate_reset,
         retry_after,
+        link,
     })
 }
 
@@ -117,6 +124,56 @@ async fn fetch<T: DeserializeOwned>(state: &GhState, request: ApiRequest) -> Res
 /// replies 204 with an empty body to most deletes and some updates.
 async fn perform(state: &GhState, request: ApiRequest) -> Result<(), GhError> {
     interpret_empty(&send(state, request).await?)
+}
+
+/// One page of a list: page `page` (counting from 1) of `request`, at
+/// `per_page` items a page. The result says which page is the last.
+pub async fn fetch_page<T: DeserializeOwned>(
+    state: &GhState,
+    request: ApiRequest,
+    page: u32,
+    per_page: u32,
+) -> Result<Page<T>, GhError> {
+    let page = page.max(1);
+    interpret_page(&send(state, request.page(page, per_page)).await?, page)
+}
+
+/// [`fetch_page`] for a list GitHub wraps in an object under `key`, as it
+/// does for workflow runs.
+pub async fn fetch_page_under<T: DeserializeOwned>(
+    state: &GhState,
+    request: ApiRequest,
+    key: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<Page<T>, GhError> {
+    let page = page.max(1);
+    interpret_page_under(&send(state, request.page(page, per_page)).await?, key, page)
+}
+
+/// The most GitHub returns in one page.
+const MAX_PER_PAGE: u32 = 100;
+/// A stop for [`fetch_all`], so that a list that never ends cannot keep it
+/// asking forever: 5,000 items.
+const MAX_PAGES: u32 = 50;
+
+/// Every page of a list, joined. For a list that has to be complete before
+/// it is useful, such as one that is filtered locally. Stops after
+/// [`MAX_PAGES`] pages.
+pub async fn fetch_all<T: DeserializeOwned>(
+    state: &GhState,
+    request: ApiRequest,
+) -> Result<Vec<T>, GhError> {
+    let mut items = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let fetched: Page<T> = fetch_page(state, request.clone(), page, MAX_PER_PAGE).await?;
+        let more = fetched.has_next();
+        items.extend(fetched.items);
+        if !more {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 /// The list GitHub wraps in an object, as it does for workflow runs
@@ -158,7 +215,9 @@ pub async fn gh_get_current_user(state: &GhState) -> Result<GitHubUser, GhError>
 }
 
 pub async fn gh_get_repos(owner: String, state: &GhState) -> Result<Vec<Repo>, GhError> {
-    fetch(state, requests::repos(&owner)).await
+    // Every page: the repository list is filtered by a search box, which
+    // only works over the whole list.
+    fetch_all(state, requests::repos(&owner)).await
 }
 
 pub async fn gh_get_repo(owner: String, name: String, state: &GhState) -> Result<Repo, GhError> {
