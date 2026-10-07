@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** phase A's split is done in code (7 October 2026) and checked by build, tests and a line-for-line comparison; the manual checklist in section 9 has **not** been run in the app yet. Phases B to E are not started.
+**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is in progress. Phases C to E are not started.
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
