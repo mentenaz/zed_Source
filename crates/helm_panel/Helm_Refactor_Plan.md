@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** plan only, nothing started.
+**Written:** 7 October 2026. **Status:** phase A's split is done in code (7 October 2026) and checked by build, tests and a line-for-line comparison; the manual checklist in section 9 has **not** been run in the app yet. Phases B to E are not started.
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
@@ -60,6 +60,21 @@ Line counts are today's, taken from the file's outline, so they are estimates of
 ### Steps
 
 One commit per row above, smallest and most self-contained first: `widgets`, `state`, `workflow_run_tab`, `repository_modal`, then the screen groups, then `actions`, `auth` and `navigation` last because everything else calls into them. After each: build, tests, and the part of the checklist that covers what moved.
+
+### As done (7 October 2026)
+
+20 files, in 19 commits, one per module. `src/helm_panel.rs` went from 7,989 lines to 675; the largest file is `src/repos.rs` at 799.
+
+Where it differs from the table above:
+
+- `actions.rs` is named **`changes.rs`**, to keep clear of GPUI's `actions!` macro and of GitHub Actions.
+- `issues_pulls.rs` came to 935 lines, so it is two files: **`issues.rs`** (which also holds the state filter and comment thread both use) and **`pulls.rs`**.
+- `people.rs` is three files, as this section said it might be: **`branches.rs`**, **`collaborators.rs`** and **`invitations.rs`**.
+- Moved methods and items are `pub(super)`. A method written in a child module is private to that module unless marked, so this was needed for the screens to call each other. It widens nothing outside the crate.
+
+Checked for the phase as a whole against the commit before it: no line of the old file was lost, and the only lines added are the 19 `mod` declarations, 6 re-exports, and each new file's `use super::*;` and `impl HelmPanel { }` wrapper. The 8 tests pass after every commit.
+
+Found while moving, and left as it was: a doc comment about repository visibility ("Mirrors the old TS `visLabel`") sits on `step_selected` in `widgets.rs` instead of on `repo_vis_label`. It was misplaced in the original file.
 
 ### Done when
 

@@ -124,9 +124,32 @@ In the `helm_panel` namespace: `ToggleFocus`, `SelectNextRow`,
 
 ## Layout
 
+Every screen's code is an `impl HelmPanel` block in its own file. The struct
+itself, with all of its fields, stays in `src/helm_panel.rs`. See
+`Helm_Refactor_Plan.md` for why it is laid out this way and what comes next.
+
 | File | Contents |
 | --- | --- |
-| `src/helm_panel.rs` | The panel, every screen and modal, and the workflow-run tab |
+| `src/helm_panel.rs` | `init`, the actions, the `HelmPanel` struct, `load`, and its `Panel` and `Render` impls |
+| `src/state.rs` | Which screen is showing, load state, menu rows |
+| `src/navigation.rs` | Switching screens, back and forward, the navigation bar |
+| `src/auth.rs` | The `gh` check, sign-in, scope authorization, sign-out, and the gate and auth screens |
+| `src/changes.rs` | `HelmAction` and `run_action`: the one path every change to GitHub goes through |
+| `src/profile.rs` | Your profile and menu, the identity header, other users' profiles, edit profile |
+| `src/orgs.rs` | Organisation list and detail |
+| `src/repos.rs` | Repository list and detail, create and edit dialogs |
+| `src/clone.rs` | The clone dialog, progress, and opening the result |
+| `src/branches.rs` | Branches |
+| `src/collaborators.rs` | Collaborators and their dialogs |
+| `src/invitations.rs` | Repository and organisation invitations |
+| `src/issues.rs` | Issues, plus the state filter and comment thread shared with pull requests |
+| `src/pulls.rs` | Pull requests and creating one |
+| `src/releases_packages.rs` | Releases, packages and tags |
+| `src/activity.rs` | Commits, Actions runs and deployments |
+| `src/insights.rs` | Traffic and security alerts |
+| `src/repository_modal.rs` | The modal used for Helm's forms and confirmations |
+| `src/workflow_run_tab.rs` | A workflow run as its own tab, with its jobs as a graph |
+| `src/widgets.rs` | Small shared helpers |
 | `src/backend.rs` | `on_tokio`, bridging tokio futures onto GPUI's `cx.spawn` |
 | `src/backend/github/mod.rs` | Types, `GhState`, the `gh_cmd` helper |
 | `src/backend/github/cli.rs` | `gh auth` — check, status, login, scopes, logout |
