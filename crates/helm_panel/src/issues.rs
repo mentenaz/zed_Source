@@ -9,36 +9,17 @@ impl HelmPanel {
     /// `issues_filter`. The Issues tab drops PR-shaped items (the `/issues`
     /// endpoint mixes issues and PRs).
     pub(super) fn load_issues(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
         let filter = self.issues_filter.clone();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_list_issues(repo.owner.login, repo.name, filter, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(mut issues) => {
-                        issues.retain(|issue| issue.pull_request.is_none());
-                        this.issues = issues;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, mut issues| {
+                issues.retain(|issue| issue.pull_request.is_none());
+                this.issues = issues;
+            },
+        );
     }
 
     /// User clicked an issue row: shows it in-panel instead of opening

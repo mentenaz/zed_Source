@@ -6,37 +6,17 @@ impl HelmPanel {
     /// Loads the branch list for `self.selected_repo` — mirrors `load_repos`'s
     /// shape.
     pub(super) fn load_branches(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
+        if self.selected_repo.is_none() {
             return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
+        }
         self.branches.clear();
-        cx.notify();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result =
-                on_tokio(
-                    async move { gh_get_branches(repo.owner.login, repo.name, &gh_state).await },
-                )
-                .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(branches) => {
-                        this.branches = branches;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
+                gh_get_branches(repo.owner.login, repo.name, &gh_state).await
+            },
+            |this, branches| this.branches = branches,
+        );
     }
 
     /// The branches list — read-only, mirrors `render_repo_list`'s

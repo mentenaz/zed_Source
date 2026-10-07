@@ -9,17 +9,11 @@ impl HelmPanel {
     /// traffic data yet (202/404); referrers/paths just stay empty on
     /// failure.
     pub(super) fn load_traffic(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        let owner = repo.owner.login;
-        let name = repo.name;
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
+                let owner = repo.owner.login;
+                let name = repo.name;
                 let views = gh_get_traffic_views(owner.clone(), name.clone(), &gh_state)
                     .await
                     .ok();
@@ -32,58 +26,39 @@ impl HelmPanel {
                 let paths = gh_get_traffic_paths(owner.clone(), name.clone(), &gh_state)
                     .await
                     .unwrap_or_default();
-                RepoTraffic {
+                Ok(RepoTraffic {
                     views,
                     clones,
                     referrers,
                     paths,
-                }
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                this.traffic = Some(result);
-                this.load_state = LoadState::Idle;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+                })
+            },
+            |this, traffic| this.traffic = Some(traffic),
+        );
     }
 
     /// Loads `self.selected_repo`'s dependabot and secret-scanning alerts for
     /// the Security screen — like `load_traffic`, each endpoint's failure is
     /// independent (a repo can have one feature enabled and not the other).
     pub(super) fn load_security(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        let owner = repo.owner.login;
-        let name = repo.name;
-        cx.spawn(async move |this, cx| {
-            let (dependabot, secret_scanning) = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
+                let owner = repo.owner.login;
+                let name = repo.name;
                 let dependabot = gh_list_dependabot_alerts(owner.clone(), name.clone(), &gh_state)
                     .await
                     .unwrap_or_default();
-                let secret_scanning =
-                    gh_list_secret_scanning_alerts(owner, name, &gh_state)
-                        .await
-                        .unwrap_or_default();
-                (dependabot, secret_scanning)
-            })
-            .await;
-            this.update(cx, |this, cx| {
+                let secret_scanning = gh_list_secret_scanning_alerts(owner, name, &gh_state)
+                    .await
+                    .unwrap_or_default();
+                Ok((dependabot, secret_scanning))
+            },
+            |this, (dependabot, secret_scanning)| {
                 this.dependabot_alerts = dependabot;
                 this.secret_scanning_alerts = secret_scanning;
-                this.load_state = LoadState::Idle;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+        );
     }
 
     /// The Traffic tab — view/clone totals plus the last week of daily data,

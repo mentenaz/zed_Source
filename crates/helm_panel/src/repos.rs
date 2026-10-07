@@ -17,29 +17,11 @@ impl HelmPanel {
     }
 
     pub(super) fn load_repos(&mut self, owner: String, cx: &mut Context<Self>) {
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_get_repos(owner, &gh_state).await }).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(repos) => {
-                        this.repos = repos;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_with(
+            cx,
+            |gh_state| async move { gh_get_repos(owner, &gh_state).await },
+            |this, repos| this.repos = repos,
+        );
     }
 
     /// User picked a repo from `RepoList` — mirrors the old TS

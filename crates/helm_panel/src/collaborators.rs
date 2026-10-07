@@ -11,35 +11,13 @@ impl HelmPanel {
     /// Loads the collaborator list for `self.selected_repo` — mirrors
     /// `load_repos`'s shape.
     pub(super) fn load_collaborators(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_get_collaborators(repo.owner.login, repo.name, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(collaborators) => {
-                        this.collaborators = collaborators;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, collaborators| this.collaborators = collaborators,
+        );
     }
 
     /// Sets `login`'s permission on `self.selected_repo` — GitHub's

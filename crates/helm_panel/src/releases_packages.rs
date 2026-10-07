@@ -6,69 +6,29 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s releases.
     pub(super) fn load_releases(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result =
-                on_tokio(
-                    async move { gh_list_releases(repo.owner.login, repo.name, &gh_state).await },
-                )
-                .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(releases) => {
-                        this.releases = releases;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
+                gh_list_releases(repo.owner.login, repo.name, &gh_state).await
+            },
+            |this, releases| this.releases = releases,
+        );
     }
 
     /// Loads `self.selected_repo`'s packages (owner-scoped: either the repo's
     /// org or the user's own account).
     pub(super) fn load_packages(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
+        if self.selected_repo.is_none() {
             return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
+        }
         self.package_versions.clear();
         self.package_versions_error = None;
         self.expanded_package = None;
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_list_packages(repo.owner.login, &gh_state).await }).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(packages) => {
-                        this.packages = packages;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move { gh_list_packages(repo.owner.login, &gh_state).await },
+            |this, packages| this.packages = packages,
+        );
     }
 
     /// Expands `pkg` to show its versions (loading them on first tap) — a
@@ -107,33 +67,13 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s tags.
     pub(super) fn load_tags(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result =
-                on_tokio(async move { gh_list_tags(repo.owner.login, repo.name, &gh_state).await })
-                    .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(tags) => {
-                        this.tags = tags;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
+                gh_list_tags(repo.owner.login, repo.name, &gh_state).await
+            },
+            |this, tags| this.tags = tags,
+        );
     }
 
     /// Opens the "Create release" modal.

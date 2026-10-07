@@ -7,35 +7,14 @@ impl HelmPanel {
     /// Loads `self.selected_repo`'s pull requests for the current
     /// `pulls_filter`.
     pub(super) fn load_pulls(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
         let filter = self.pulls_filter.clone();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_list_pulls(repo.owner.login, repo.name, filter, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(pulls) => {
-                        this.pulls = pulls;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, pulls| this.pulls = pulls,
+        );
     }
 
     /// Same as [`Self::open_issue_detail`], for a PR row.

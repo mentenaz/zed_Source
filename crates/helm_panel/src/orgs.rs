@@ -15,29 +15,11 @@ impl HelmPanel {
     }
 
     pub(super) fn load_org(&mut self, org: String, cx: &mut Context<Self>) {
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_get_org_detail(org, &gh_state).await }).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(detail) => {
-                        this.org_detail = Some(detail);
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_with(
+            cx,
+            |gh_state| async move { gh_get_org_detail(org, &gh_state).await },
+            |this, detail| this.org_detail = Some(detail),
+        );
     }
 
     /// The org list — mirrors the old `OrgListScreen`.

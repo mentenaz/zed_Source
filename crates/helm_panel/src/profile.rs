@@ -12,29 +12,12 @@ impl HelmPanel {
     }
 
     pub(super) fn load_user_profile(&mut self, username: String, cx: &mut Context<Self>) {
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
         self.viewed_user = None;
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move { gh_get_user(username, &gh_state).await }).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(user) => {
-                        this.viewed_user = Some(user);
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_with(
+            cx,
+            |gh_state| async move { gh_get_user(username, &gh_state).await },
+            |this, user| this.viewed_user = Some(user),
+        );
     }
 
     /// Opens the "Edit profile" modal, prefilled from `self.user`.

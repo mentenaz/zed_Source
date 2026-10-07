@@ -6,66 +6,24 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s recent commits (Commits screen).
     pub(super) fn load_commits(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_list_recent_commits(repo.owner.login, repo.name, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(commits) => {
-                        this.commits = commits;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, commits| this.commits = commits,
+        );
     }
 
     /// Loads `self.selected_repo`'s recent Actions/CI workflow runs.
     pub(super) fn load_workflow_runs(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_list_workflow_runs(repo.owner.login, repo.name, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(runs) => {
-                        this.workflow_runs = runs;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, runs| this.workflow_runs = runs,
+        );
     }
 
     /// User opened a row on `WorkflowRuns`: opens the run's live job-status
@@ -90,34 +48,13 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s deployments.
     pub(super) fn load_deployments(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
+        self.load_for_repo(
+            cx,
+            |repo, gh_state| async move {
                 gh_list_deployments(repo.owner.login, repo.name, &gh_state).await
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(deployments) => {
-                        this.deployments = deployments;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+            |this, deployments| this.deployments = deployments,
+        );
     }
 
     /// Shared loading/error/empty states for the read-only repo-activity

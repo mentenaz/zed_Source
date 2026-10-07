@@ -19,6 +19,7 @@ mod collaborators;
 mod branches;
 mod pulls;
 mod issues;
+mod loading;
 mod releases_packages;
 mod insights;
 mod activity;
