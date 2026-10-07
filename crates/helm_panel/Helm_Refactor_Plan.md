@@ -106,7 +106,7 @@ Phase A moves the lines; this is the phase that removes them.
   - The widget draws every row of a list at one height, so three rows were redesigned: a release's and a package's row are always two lines, and a package's versions open in a block above the list in place of unfolding inside its row.
   - Security and Invitations are each one list with two headed sections. An empty section is left out, so Security's header states both counts.
   - Invitations are accepted and declined only with their buttons. Enter used to accept and Space to decline; the widget treats a click on a row as Enter, so keeping that would let a stray click accept one.
-- **Line count:** the crate is at about 7,500 lines, down from 7,989. The plan's estimate of about 5,000 was too optimistic: each screen keeps its own row-drawing code, which is most of its bulk. What changed is the shape. The largest file is about 720 lines, and loading, list scaffolding and keyboard handling each exist once.
+- **Line count:** the crate is at 7,773 lines, against 7,989 at the start, and that now includes about 300 lines of new tests. The plan's estimate of about 5,000 was too optimistic: each screen keeps its own row-drawing code, which is most of its bulk. What changed is the shape. The largest file is about 720 lines, and loading, list scaffolding and keyboard handling each exist once.
 - **Checked by:** build and the crate's tests (16) after every commit. Tags, issues and the first eight lists were tried by hand in the app; the last five (organisations, security, repositories, collaborators, invitations, packages) have **not** been yet.
 
 ### Done when
