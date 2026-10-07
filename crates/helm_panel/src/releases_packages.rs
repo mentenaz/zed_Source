@@ -24,10 +24,10 @@ impl HelmPanel {
         self.package_versions.clear();
         self.package_versions_error = None;
         self.expanded_package = None;
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.packages,
             |repo, gh_state| async move { gh_list_packages(repo.owner.login, &gh_state).await },
-            |this, packages| this.packages = packages,
         );
     }
 
@@ -336,7 +336,7 @@ impl HelmPanel {
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
 
-        if self.load_state == LoadState::Loading {
+        if self.packages.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -357,7 +357,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.packages.state == LoadState::Error {
             return v_flex()
                 .gap_3()
                 .p_4()
@@ -376,7 +376,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.packages.is_empty() {
+        if self.packages.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -399,36 +399,36 @@ impl HelmPanel {
         let expanded = self.expanded_package.clone();
         let version_error = self.package_versions_error.clone();
         let view = cx.entity();
-        let packages_len = self.packages.len();
-        let packages_cursor = self.packages_list_cursor;
-        let packages_for_open = self.packages.clone();
+        let packages_len = self.packages.items.len();
+        let packages_cursor = self.packages.cursor;
+        let packages_for_open = self.packages.items.clone();
         let owner_for_open = owner.clone();
 
         v_flex()
             .id("helm-packages-list")
-            .track_focus(&self.packages_list_focus)
+            .track_focus(&self.packages.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.packages_list_focus, cx);
+                window.focus(&this.packages.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.packages_list_cursor = step_selected(this.packages_list_cursor, packages_len, true);
+                this.packages.cursor = step_selected(this.packages.cursor, packages_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.packages_list_cursor =
-                    step_selected(this.packages_list_cursor, packages_len, false);
+                this.packages.cursor =
+                    step_selected(this.packages.cursor, packages_len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(pkg) = this.packages_list_cursor.and_then(|ix| packages_for_open.get(ix))
+                let Some(pkg) = this.packages.cursor.and_then(|ix| packages_for_open.get(ix))
                 else {
                     return;
                 };
                 this.toggle_package_versions(owner_for_open.clone(), pkg.clone(), cx);
             }))
             .py_1()
-            .children(self.packages.iter().enumerate().map(|(ix, pkg)| {
+            .children(self.packages.items.iter().enumerate().map(|(ix, pkg)| {
                 let pkg_name = pkg.name.clone();
                 let is_expanded = expanded.as_deref() == Some(pkg_name.as_str());
                 let is_selected = packages_cursor == Some(ix);
@@ -501,7 +501,7 @@ impl HelmPanel {
                         let package_clone = package_clone.clone();
                         move |_, _window, cx| {
                             view.update(cx, |this, cx| {
-                                this.packages_list_cursor = Some(ix);
+                                this.packages.cursor = Some(ix);
                                 this.toggle_package_versions(
                                     owner_clone.clone(),
                                     package_clone.clone(),
