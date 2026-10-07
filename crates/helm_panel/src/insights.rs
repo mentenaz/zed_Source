@@ -41,9 +41,16 @@ impl HelmPanel {
     /// the Security screen — like `load_traffic`, each endpoint's failure is
     /// independent (a repo can have one feature enabled and not the other).
     pub(super) fn load_security(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
-            cx,
-            |repo, gh_state| async move {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        // One request each, shown on one screen, so they load as a pair.
+        self.dependabot_alerts.begin();
+        self.secret_scanning_alerts.begin();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let (dependabot, secret_scanning) = on_tokio(async move {
                 let owner = repo.owner.login;
                 let name = repo.name;
                 let dependabot = gh_list_dependabot_alerts(owner.clone(), name.clone(), &gh_state)
@@ -52,13 +59,19 @@ impl HelmPanel {
                 let secret_scanning = gh_list_secret_scanning_alerts(owner, name, &gh_state)
                     .await
                     .unwrap_or_default();
-                Ok((dependabot, secret_scanning))
-            },
-            |this, (dependabot, secret_scanning)| {
-                this.dependabot_alerts = dependabot;
-                this.secret_scanning_alerts = secret_scanning;
-            },
-        );
+                (dependabot, secret_scanning)
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                // Neither list fails the screen: an alert type that is turned
+                // off, or that the token may not read, is shown as empty.
+                this.dependabot_alerts.finish(Ok(dependabot));
+                this.secret_scanning_alerts.finish(Ok(secret_scanning));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The Traffic tab — view/clone totals plus the last week of daily data,
@@ -262,7 +275,7 @@ impl HelmPanel {
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
 
-        if self.load_state == LoadState::Loading {
+        if self.dependabot_alerts.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -297,9 +310,9 @@ impl HelmPanel {
         // Both are read-only (no click action), so each gets its own
         // up/down + selection highlight and no `OpenSelectedRow` handler,
         // same reasoning as `render_branches`.
-        let dependabot_len = self.dependabot_alerts.len();
-        let dependabot_cursor = self.dependabot_list_cursor;
-        let dependabot_rows = self.dependabot_alerts.iter().enumerate().map(|(i, alert)| {
+        let dependabot_len = self.dependabot_alerts.items.len();
+        let dependabot_cursor = self.dependabot_alerts.cursor;
+        let dependabot_rows = self.dependabot_alerts.items.iter().enumerate().map(|(i, alert)| {
             let package = alert
                 .pointer("/dependency/package/name")
                 .and_then(|v| v.as_str())
@@ -326,9 +339,9 @@ impl HelmPanel {
                 })
         });
 
-        let secret_len = self.secret_scanning_alerts.len();
-        let secret_cursor = self.secret_scanning_list_cursor;
-        let secret_rows = self.secret_scanning_alerts.iter().enumerate().map(|(i, alert)| {
+        let secret_len = self.secret_scanning_alerts.items.len();
+        let secret_cursor = self.secret_scanning_alerts.cursor;
+        let secret_rows = self.secret_scanning_alerts.items.iter().enumerate().map(|(i, alert)| {
             let secret_type = alert
                 .get("secret_type_display_name")
                 .or_else(|| alert.get("secret_type"))
@@ -348,7 +361,7 @@ impl HelmPanel {
 
         v_flex()
             .child(section_label("Dependabot alerts"))
-            .child(if self.dependabot_alerts.is_empty() {
+            .child(if self.dependabot_alerts.items.is_empty() {
                 div()
                     .px_3()
                     .py_2()
@@ -359,19 +372,19 @@ impl HelmPanel {
             } else {
                 v_flex()
                     .id("helm-dependabot-list")
-                    .track_focus(&self.dependabot_list_focus)
+                    .track_focus(&self.dependabot_alerts.focus)
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        window.focus(&this.dependabot_list_focus, cx);
+                        window.focus(&this.dependabot_alerts.focus, cx);
                     }))
                     .key_context("HelmRowList")
                     .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                        this.dependabot_list_cursor =
-                            step_selected(this.dependabot_list_cursor, dependabot_len, true);
+                        this.dependabot_alerts.cursor =
+                            step_selected(this.dependabot_alerts.cursor, dependabot_len, true);
                         cx.notify();
                     }))
                     .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                        this.dependabot_list_cursor =
-                            step_selected(this.dependabot_list_cursor, dependabot_len, false);
+                        this.dependabot_alerts.cursor =
+                            step_selected(this.dependabot_alerts.cursor, dependabot_len, false);
                         cx.notify();
                     }))
                     .children(dependabot_rows)
@@ -379,7 +392,7 @@ impl HelmPanel {
             })
             .child(div().h_px().w_full().bg(border))
             .child(section_label("Secret scanning alerts"))
-            .child(if self.secret_scanning_alerts.is_empty() {
+            .child(if self.secret_scanning_alerts.items.is_empty() {
                 div()
                     .px_3()
                     .py_2()
@@ -390,19 +403,19 @@ impl HelmPanel {
             } else {
                 v_flex()
                     .id("helm-secret-scanning-list")
-                    .track_focus(&self.secret_scanning_list_focus)
+                    .track_focus(&self.secret_scanning_alerts.focus)
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        window.focus(&this.secret_scanning_list_focus, cx);
+                        window.focus(&this.secret_scanning_alerts.focus, cx);
                     }))
                     .key_context("HelmRowList")
                     .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                        this.secret_scanning_list_cursor =
-                            step_selected(this.secret_scanning_list_cursor, secret_len, true);
+                        this.secret_scanning_alerts.cursor =
+                            step_selected(this.secret_scanning_alerts.cursor, secret_len, true);
                         cx.notify();
                     }))
                     .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                        this.secret_scanning_list_cursor =
-                            step_selected(this.secret_scanning_list_cursor, secret_len, false);
+                        this.secret_scanning_alerts.cursor =
+                            step_selected(this.secret_scanning_alerts.cursor, secret_len, false);
                         cx.notify();
                     }))
                     .children(secret_rows)
