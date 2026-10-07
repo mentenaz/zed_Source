@@ -43,6 +43,19 @@ if ! command -v pwsh >/dev/null 2>&1; then
 fi
 
 root=$(git rev-parse --show-toplevel) || exit 1
+
+# The tests build the working folder, not the commits being pushed. Building
+# a clean checkout of the pushed commit instead would mean a full rebuild on
+# every push, so the difference is reported rather than removed: if the
+# folder has uncommitted changes, what is tested is not exactly what is
+# sent. Don't edit tracked files while a push is running.
+dirty=$(git status --porcelain --untracked-files=no)
+if [ -n "$dirty" ]; then
+    echo "pre-push: warning: uncommitted changes in the working folder are included in" >&2
+    echo "pre-push: what is tested, but not in what is pushed:" >&2
+    echo "$dirty" | sed 's/^/pre-push:   /' >&2
+fi
+
 echo "pre-push: running the fork's tests (script/test-fork-crates.ps1)."
 
 # The tests need no input, and stdin still belongs to git here.
