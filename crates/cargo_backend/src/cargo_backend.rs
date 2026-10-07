@@ -26,9 +26,16 @@
 //! every crates.io package reachable from the selected crate
 //! ([`osv_batches`], [`parse_advisory`], [`merge_findings`]). Again the
 //! requests are the host's.
+//!
+//! Changing things is the last part: the `cargo add`, `cargo remove` and
+//! `cargo update` command lines ([`add_args`], [`remove_args`],
+//! [`update_args`]) and what each does to the manifests beyond the obvious
+//! ([`add_effect`], [`declaration`], [`remove_effect`]). The host runs the
+//! commands; the only one run here is the dry run ([`update_dry_run`]).
 
 use std::path::Path;
 
+mod actions;
 mod advisories;
 mod index;
 mod lockfile;
@@ -36,6 +43,13 @@ mod metadata;
 mod outdated;
 mod path_env;
 
+pub use actions::{
+    AddEffect, Declaration, LockChange, LockChangeKind, Manifest, RemoveEffect, UpdateSpec,
+    add_args, add_effect, check_crate_name, check_exact_version, command_line, declaration,
+    parse_manifest, parse_update_output, read_crate_manifest, read_manifest,
+    read_member_manifests, read_root_manifest, remove_args, remove_effect, update_args,
+    update_dry_run,
+};
 pub use advisories::{
     AdvisoryRecord, AdvisoryRef, AffectedPackage, Finding, FindingCounts, FindingKind,
     OSV_BATCH_LIMIT, OSV_BATCH_URL, OSV_ECOSYSTEM, OsvBatch, PackageAdvisories, Severity,
@@ -68,8 +82,14 @@ pub fn is_cargo_project(dir: &str) -> bool {
 /// Blocks until Cargo exits, which is the contract of this crate's public
 /// functions that call it: they are documented as blocking and are meant to
 /// be run on a background task, like the other fork backends.
-#[allow(clippy::disallowed_methods)]
 fn run_cargo(args: &[&str], cwd: Option<&str>) -> Result<String, String> {
+    run_cargo_output(args, cwd).map(|(stdout, _)| stdout)
+}
+
+/// [`run_cargo`], also returning stderr from a successful run: Cargo
+/// reports what it did there, not on stdout.
+#[allow(clippy::disallowed_methods)]
+fn run_cargo_output(args: &[&str], cwd: Option<&str>) -> Result<(String, String), String> {
     let mut command = gpui_util::new_std_command("cargo");
     command.args(args);
     if let Some(cwd) = cwd {
@@ -80,10 +100,14 @@ fn run_cargo(args: &[&str], cwd: Option<&str>) -> Result<String, String> {
     let output = command
         .output()
         .map_err(|error| format!("Could not run cargo: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        return Ok((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr.into_owned(),
+        ));
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = stderr.trim().to_string();
     Err(if stderr.is_empty() {
         format!("cargo {} failed ({})", args.join(" "), output.status)
     } else {

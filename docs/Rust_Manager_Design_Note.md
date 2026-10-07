@@ -1,6 +1,6 @@
 # Rust (Cargo) Manager: Design Note
 
-**Status:** the backend for steps 1 to 3 (`cargo_backend`) and the left panel (`rust_panel`) are built and tested. Step 4 (add, remove, update) and the manager tab are not started. The panel has not yet been tried in the running app. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
+**Status:** the backend for steps 1 to 3 (`cargo_backend`) and the left panel (`rust_panel`) are built and tested. The backend for step 4 (add, remove, update) is built and tested; nothing in the UI uses it yet. The manager tab is not started. The panel has not yet been tried in the running app. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
 **Pattern to follow:** the existing runtime panel plus manager pairs, each with a GPUI-free backend (`node_panel` + `npm_manager_panel` + `node_backend`/`npm_backend`, `dotnet_panel` + `nuget_manager_panel` + `dotnet_backend`, `python_panel` + `python_manager_panel` + `python_backend`).
 
 ---
@@ -66,7 +66,7 @@ Consequences:
 | Add | `cargo add <name> -p <crate>` | Edits the member's `Cargo.toml` and `Cargo.lock`. Does not compile. |
 | Remove | `cargo remove <name> -p <crate>` | Edits the member's `Cargo.toml` and `Cargo.lock`, **and may edit the root `Cargo.toml`** (see section 7). Does not compile. |
 | Update within the declared range | `cargo update <name>` | Only changes `Cargo.lock`. **Always pass a package name** (see section 7). Does not compile. |
-| Move to a version outside the declared range | `cargo add <name>@<version> -p <crate>` | `cargo update` cannot do this; the requirement itself has to change. |
+| Move to a version outside the declared range | `cargo add <name>@<version> -p <crate>` | `cargo update` cannot do this; the requirement itself has to change. **Only for a requirement written in the member.** On a dependency the member inherits (`workspace = true`), this command writes a literal version into the member and leaves the root manifest alone (tested, Cargo 1.98.1). No Cargo command edits `[workspace.dependencies]`, so for an inherited dependency the manager shows the newer version and says the requirement is in the root manifest; it does not offer the action. |
 | Does it still build? | `cargo check` | On demand only, via an explicit button. Output goes to the Script Runner. |
 
 ## 6. UI
@@ -84,9 +84,9 @@ Consequences:
 **Updates page.** Classify each row as patch, minor or major, as the other managers do, and make clear which action it gets:
 
 - *Within the declared range:* `cargo update <name>`. Lockfile only. Shown as "up to <version>", because the version is the newest this crate's requirement allows and another package in the workspace can hold Cargo lower. Found on this fork: `clap` is `^4.4` and 4.6.7 exists, but `cargo update clap` settles on 4.6.1. The confirmation step runs `cargo update --dry-run <name>` and shows the exact result.
-- *Outside the declared range* (usually a major version): `cargo add <name>@<version>`. Changes the requirement, and for a workspace-inherited dependency that means the root manifest.
+- *Outside the declared range* (usually a major version): `cargo add <name>@<version>`. Changes the requirement. Offered only when the requirement is written in the crate's own manifest. For a workspace-inherited dependency the requirement is in the root manifest, which no Cargo command edits, so the row shows the newer version with a note instead of a button (see section 5).
 
-"Update all" only ever covers the first kind.
+"Update all" only ever covers the first kind, as one command naming every row.
 
 **Minimum Rust version, three states.** Applied wherever a version is listed or chosen:
 
@@ -115,12 +115,13 @@ The "compatible versions only" filter hides the second state and keeps the other
 1. **One Cargo action at a time.** Disable the other buttons while one runs.
 2. **Waiting state.** A running build holds the build-directory lock, which `cargo add` mostly doesn't need, but the package-cache lock can still make a command wait. Show "waiting for Cargo".
 3. **Refresh by re-reading files** after each action: the member manifest, the root manifest and the lockfile.
-4. **`cargo update` always names a package.** Run with no package on this fork, it would change 621 lockfile entries (dry-run, October 2026). The panel must never issue a bare `cargo update`. "Update all" issues one named update per listed row.
+4. **`cargo update` always names a package.** Run with no package on this fork, it would change 621 lockfile entries (dry-run, October 2026). The panel must never issue a bare `cargo update`. "Update all" names every listed row in one command (`cargo update a@1.0.0 b@2.1.0`), each with its locked version, because a name alone is rejected when the lockfile holds two versions of it.
 5. **Removing can touch the root manifest.** When the removed dependency was the last user of a `[workspace.dependencies]` entry, `cargo remove` deletes that entry from the root `Cargo.toml` as well (confirmed in a scratch workspace). The confirmation dialog says so before running.
 6. **Adding respects the workspace convention.** If the dependency already exists in `[workspace.dependencies]`, `cargo add` writes `name.workspace = true`, which is correct. If it does not, `cargo add` writes a literal version into the member crate. Per decision 5, warn and ask first.
 7. **Hint after a change, only when it is true.** If no Rust file is open: "Cargo.toml updated. rust-analyzer will pick it up when you next open a Rust file." If one is open, the analyzer notices the change by itself, so show nothing.
 8. **Cache** crates.io and index lookups, each with the time it was fetched. Honour the index's own ten-minute lifetime and revalidate with its `ETag`; keep API results for about an hour. When offline, keep showing the cached results and state their age instead of clearing them.
 9. **Destructive actions** (remove, update) get the same confirmation pattern as the other panels.
+   - **Not removable from the manager:** a dependency under a `cfg(...)` target table (`[target.'cfg(windows)'.dependencies]`). `cargo remove` needs the expression passed as `--target`, and its quotes and spaces are not safe on a shell command line. The row says to edit `Cargo.toml` by hand. Plain target triples work.
 10. **Validate before running.** Crate names and versions go through `script_runner_panel::command` (`check_package_name`, `check_version`) before being placed in a command, like the other managers. A refused value shows its message instead of running.
 
 ## 8. Performance budget
@@ -172,6 +173,7 @@ Fork conventions that apply to all three:
 3. Vulnerabilities via OSV.
    - **Backend done (6 October 2026):** batch requests, advisory records, CVSS v3 scoring, and merging into findings. Checked against live data for `zed`: 1,425 reachable packages, 2 batch requests, 40 records, giving 26 vulnerabilities, 5 unsound and 10 unmaintained. The requests themselves are left to the panel. See decisions 12 to 14 for what the real data changed.
 4. Add, remove and update through Cargo.
+   - **Backend done (7 October 2026):** `cargo_backend::actions`. Validated command lines for add, remove and update, reading `cargo update --dry-run`, and the manifest side effects (inherited or literal, what adding writes, whether removing deletes the root entry). Checked in a scratch workspace: the predicted root-manifest removal matched what `cargo remove` did. Checked read-only on this fork: `cargo update --dry-run clap` moves six lockfile entries, so the confirmation lists every change. The UI is not started.
 5. Search and README viewing.
 
 Timebox steps 1 to 3 to a couple of evenings. Do not add it to the CV, README or site until it works.

@@ -81,6 +81,30 @@ VULNERABILITIES
 26 vulnerabilities, 5 unsound, 10 unmaintained, 0 other notices
 ```
 
+To see how each dependency is declared and what removing it would do, and
+what updating one would change (nothing is modified: no `cargo add` or
+`cargo remove` runs, and the update is a dry run):
+
+```sh
+cargo run -p cargo_backend --example changes -j 8 -- . npm_backend log
+```
+
+```text
+crate: npm_backend 0.1.0
+288 member manifests read
+  log                          workspace  normal
+      cargo remove log -p npm_backend
+  tempfile                     workspace  dev
+      cargo remove tempfile -p npm_backend --dev
+  windows-registry             workspace  normal
+      windows-registry is declared under [target.'cfg(windows)'], which can't be passed on a command line safely. Edit Cargo.toml by hand.
+  ...
+adding serde: written as workspace = true
+adding a-crate-nobody-has: a literal version in this crate, outside [workspace.dependencies]: warn first
+cargo update log@0.4.29 would change:
+  Update log 0.4.29 -> 0.4.34
+```
+
 ## Using it
 
 ```rust
@@ -168,6 +192,11 @@ until the stamp changes.
 | Findings | `merge_findings(hits, records)` → `Vec<Finding>` (`package`, `version`, `id`, `other_ids`, `kind`, `severity`, `summary`, `fixed_in`, `url`, `details_missing`), `FindingKind`, `FindingCounts` |
 | Severity | `Severity` (low/moderate/high/critical), `cvss3_base_tenths(vector)` |
 | Parsers | `parse_metadata(json)`, `parse_lockfile(toml)` |
+| Command lines | `add_args(name, version, member, kind)`, `remove_args(name, member, kind, target)`, `update_args(specs, dry_run)` → `Option` (never a bare `cargo update`), `UpdateSpec`, `command_line(args)` |
+| Validation | `check_crate_name(name)`, `check_exact_version(version)` |
+| What an update would change | `update_dry_run(root, specs)` / `parse_update_output(text)` → `Vec<LockChange>` (`kind`, `name`, `from`, `to`) |
+| Manifests | `read_root_manifest(workspace)`, `read_crate_manifest(crate)`, `read_member_manifests(workspace)`, `parse_manifest(toml)` → `Manifest` |
+| Side effects | `declaration(root, member, package, kind, target)` → `Declaration` (inherited/literal), `add_effect(root, package)` → `AddEffect`, `remove_effect(root, members, member, package, kind, target)` → `RemoveEffect` |
 
 ## Where the data comes from
 
@@ -271,6 +300,45 @@ different commands:
   only exists when building for WebAssembly. `cargo audit` reads the
   lockfile the same way and reports the same set.
 
+### Adding, removing and updating
+
+The crate builds the command lines; the host runs them. Checked with Cargo
+1.98.1 in a scratch workspace:
+
+- **Every value is validated first.** The arguments end up in a shell
+  command line, so a crate name is letters, digits, `-` and `_` only, and a
+  version must parse as one exact version. Anything else is refused with a
+  message and nothing is built.
+- **`update_args` cannot produce a bare `cargo update`.** With nothing to
+  update it returns `None`. A bare `cargo update` would change 621 lockfile
+  entries on this fork. "Update all" is one command naming every row.
+- **Updates name the locked version** (`clap@4.5.49`). With several versions
+  of a package in the lockfile, the name alone is rejected by Cargo as
+  ambiguous.
+- **One update moves several packages.** `cargo update clap` here changes
+  six lockfile entries. `update_dry_run` returns the full list, which is
+  what a confirmation should show.
+- **The table matters.** Cargo will not search: removing a dev-dependency
+  needs `--dev`, and a target-specific one needs `--target`. Both come from
+  the dependency's own `kind` and `target`.
+- **`cfg(...)` targets are refused.** A dependency under
+  `[target.'cfg(windows)'.dependencies]` cannot be removed from here: the
+  expression's parentheses, quotes and spaces are read differently by each
+  shell. Plain target triples work.
+- **Adding follows the workspace table** (`add_effect`). If the root
+  manifest's `[workspace.dependencies]` has the package, Cargo writes
+  `name.workspace = true`. If the table exists without it, Cargo writes a
+  literal version into the member; the host should warn first.
+- **An inherited dependency's version cannot be changed by a command**
+  (`declaration`). `cargo add name@version` on one replaces
+  `workspace = true` with a literal version in the member and leaves the
+  root manifest alone. No Cargo command edits `[workspace.dependencies]`, so
+  the host should not offer this for an inherited dependency.
+- **Removing can edit the root manifest** (`remove_effect`). When the
+  removed dependency was the last one inheriting a `[workspace.dependencies]`
+  entry, Cargo deletes that entry too. A literal version elsewhere does not
+  keep it; another table in the same crate does.
+
 ### When running the fork with `cargo run`
 
 `rustup` sets `RUSTUP_TOOLCHAIN` for anything started through `cargo run`,
@@ -288,10 +356,12 @@ that pins a different one. An installed build is not affected.
 | `src/index.rs` | Sparse-index paths and parsing |
 | `src/outdated.rs` | In-range and out-of-range updates, minimum Rust version, version picker |
 | `src/advisories.rs` | OSV batch requests, advisory records, CVSS scoring, merging into findings |
+| `src/actions.rs` | `cargo add`/`remove`/`update` command lines, dry-run output, manifest side effects |
 | `src/path_env.rs` | PATH enrichment on Windows, as in the other backends |
 | `examples/list.rs` | Lists a crate's dependencies |
 | `examples/outdated.rs` | Shows what is behind the registry (uses the network) |
 | `examples/advisories.rs` | Shows the advisories that apply (uses the network) |
+| `examples/changes.rs` | Shows how dependencies are declared and what removing or updating would do (changes nothing) |
 
 ## Development
 
@@ -305,8 +375,11 @@ locked-version lookup with several versions of one package, the reachable
 set (including cycles), the listed/hidden split, in-range and out-of-range
 updates (including 0.x versions, exact and wildcard requirements, yanked
 versions and pre-releases), the three minimum-Rust-version states, OSV batch
-splitting and answer matching, CVSS v3 scores against published values, and
-merging advisories into findings. They use inline fixtures and temporary
+splitting and answer matching, CVSS v3 scores against published values,
+merging advisories into findings, the add, remove and update command lines
+(including that values with shell syntax are refused and that an update
+always names a package), reading `cargo update` output, and the manifest
+side effects of adding and removing. They use inline fixtures and temporary
 directories; none of them runs Cargo or touches the network.
 
 One further test does run Cargo, against this repo, and is ignored by
