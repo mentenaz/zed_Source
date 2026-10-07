@@ -312,7 +312,7 @@ impl HelmPanel {
 
             let mut this = Self {
                 focus_handle: cx.focus_handle(),
-                gh_state: Arc::new(GhState::default()),
+                gh_state: Arc::new(GhState::new(cx.http_client())),
                 screen: HelmScreen::Gate,
                 back_stack: Vec::new(),
                 forward_stack: Vec::new(),

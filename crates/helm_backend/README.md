@@ -10,8 +10,7 @@ GitHub, moved into its own crate so that it can be tested without a window,
 and so that the planned Helm Workspace can use it too. It plays the role
 `npm_backend`, `dotnet_backend` and `cargo_backend` play for their panels.
 
-This is phase C of `crates/helm_panel/Helm_Refactor_Plan.md`, and it is in
-progress. See "Status" below for what has and has not been done.
+This is phase C of `crates/helm_panel/Helm_Refactor_Plan.md`.
 
 ## Requirements
 
@@ -19,18 +18,45 @@ The [GitHub CLI](https://cli.github.com/) (`gh`) must be installed and on
 PATH. This crate uses it to sign in and to get the access token; it does not
 handle credentials itself.
 
+## Trying it
+
+```sh
+cargo run -p helm_backend --example whoami -j 8
+```
+
+It uses the `gh` CLI's existing sign-in and only reads:
+
+```text
+signed in as mentenaz
+1 organisation(s)
+58 repositories on the first page
+a missing repository: GitHub API 404: Not Found (permission-like: true)
+```
+
 ## Using it
 
-Everything is under `helm_backend::github`. Functions are `async` and need a
-tokio runtime, because `reqwest` and the `gh` child processes do. A GPUI host
-awaits them through `helm_backend::on_tokio`:
+Everything is under `helm_backend::github`. A call has three parts, each in
+its own file:
+
+| Part | Where | Network |
+| --- | --- | --- |
+| What to ask for: method, path, body | `requests.rs` | no |
+| Sending it | `send` in `api.rs` | yes, the only place |
+| What the answer means | `error.rs` | no |
+
+HTTP goes through the host application's client, handed in when the state is
+created, so requests use the same proxy settings as the rest of the app:
 
 ```rust
-let gh_state = Arc::new(GhState::default());
+let gh_state = Arc::new(GhState::new(cx.http_client()));
 let repos = on_tokio(async move { gh_get_repos("self".into(), &gh_state).await }).await?;
 ```
 
-`GhState` holds the cached token, the API base URL, and two broadcast
+The functions are `async` and still need a tokio runtime, because the `gh`
+child processes do; a GPUI host awaits them through
+`helm_backend::on_tokio`.
+
+`GhState` also holds the cached token, the API base URL, and two broadcast
 channels that the streaming operations (sign-in, clone) report progress on.
 
 | Area | Functions |
@@ -81,8 +107,11 @@ what lets them be tested without a network.
 - **A request that returns nothing is not parsed.** GitHub answers most
   deletes and some updates with 204 and an empty body. These used to be
   read as JSON, which an empty body is not.
-- **One HTTP client is shared** by every request, on `GhState`, so
-  connections are reused.
+- **Names are percent-encoded** wherever they go into a path or a query, so
+  a name containing `/`, `?` or `#` cannot change which endpoint is called.
+  A container package named `owner/image` is sent with `%2F`.
+- **Requests time out after 30 seconds** and follow up to 10 redirects
+  (GitHub redirects a renamed or moved repository).
 - **Sign-in and clone report progress on channels.** `gh_login` and
   `gh_clone_repo` send each line of `gh`'s output to `GhState::auth_tx` and
   `clone_tx`. A host subscribes before starting them.
@@ -94,28 +123,30 @@ what lets them be tested without a network.
 | `src/helm_backend.rs` | `on_tokio`, and the event error a host matches on |
 | `src/github/mod.rs` | What the crate exports, and `gh_cmd` |
 | `src/github/cli.rs` | `gh auth`: check, status, login, scopes, logout |
-| `src/github/api.rs` | The REST endpoints, over one request function |
+| `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
+| `src/github/api.rs` | The endpoint functions, and `send` |
 | `src/github/error.rs` | `GhError`, and turning an HTTP answer into a value or an error |
 | `src/github/clone.rs` | `gh repo clone` with streamed output |
 | `src/github/types.rs` | Response types and `GhState` |
+| `examples/whoami.rs` | Asks GitHub who you are (read-only, uses the network) |
 
 ## Status
 
-Done:
+Phase C is done:
 
 - The code is in its own crate, and `helm_panel` no longer depends on
   `reqwest` or tokio directly.
-- Typed errors, with the answer-to-error rule tested without a network.
-- One HTTP client reused across requests.
+- Typed errors.
+- Every request is built as data, and every answer is interpreted by a pure
+  function; both are unit-tested.
+- HTTP goes through the host's client. `reqwest` is no longer a dependency.
 
-Not done yet:
+Still on tokio: running `gh` (sign-in, the token, cloning) and the two
+progress channels. Moving those off it would mean rewriting the sign-in
+flow, which cannot be tested without signing in by hand, so it was left.
 
-- Splitting each endpoint into "build the request" and "send it", so the
-  paths and bodies of the forty or so endpoints can be unit-tested too.
-  Today only the answer side is.
-- The decision on whether to keep `reqwest` and tokio or move to the app's
-  shared HTTP client. Sending is now one function (`send` in `api.rs`), so
-  that change would be confined to it and to the two places that run `gh`.
+Next, in the plan: pagination (phase D), then rate limits and caching
+(phase E).
 
 ## Development
 
@@ -124,8 +155,11 @@ cargo check -p helm_backend -j 8
 cargo test -p helm_backend -j 8
 ```
 
-The tests cover `error.rs`: each status to its error, telling a used-up
-rate limit from a missing scope, the rate-limit message, GitHub's field
-errors, and empty answers. None of them uses the network.
+The tests cover every endpoint's request (method, path and body, and that a
+name cannot change the endpoint), and every kind of answer: each status to
+its error, telling a used-up rate limit from a missing scope, the
+rate-limit message, GitHub's field errors, empty answers, and the lists
+GitHub wraps in an object. None of them uses the network; `send` is the one
+function they do not reach, and the `whoami` example exercises it.
 
 To run the tests of every fork crate at once: `script/test-fork-crates.ps1`.

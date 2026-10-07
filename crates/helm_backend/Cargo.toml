@@ -11,7 +11,8 @@ path = "src/helm_backend.rs"
 doctest = false
 
 [dependencies]
-reqwest = { workspace = true, features = ["json"] }
+futures.workspace = true
+http_client.workspace = true
 reqwest_client.workspace = true
 serde.workspace = true
 serde_json.workspace = true

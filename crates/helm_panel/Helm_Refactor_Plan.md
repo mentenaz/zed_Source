@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is in progress. Phases D and E are not started.
+**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is done in code and checked against the live API from a terminal, but not yet tried in the app. Phases D and E are not started.
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
@@ -130,7 +130,9 @@ Move `src/backend/` into a new `helm_backend` crate, in the role `npm_backend`, 
 - **Typed errors: done.** `GhError` replaces strings in every API function, and the panel's scope retry asks `error.is_permission()` in place of matching on "GitHub API 403". The request function is split into `send` (the only network code) and `interpret` (pure, with nine tests).
 - **One HTTP client: done.** It lives on `GhState`.
 - **Found and fixed on the way:** a used-up rate limit arrives as a 403 and used to send the user to re-authorize; requests answered with an empty 204 were parsed as JSON.
-- **Not done:** splitting each endpoint into "build the request" and "send it", so paths and bodies can be tested; and decision 3 below (the HTTP stack), which is now confined to `send` and the two places that run `gh`.
+- **Requests as data: done.** `requests.rs` builds each of the forty endpoints' requests without sending them, and percent-encodes every name placed in a path or query. 23 tests in the crate, none using the network.
+- **HTTP stack (decision 3): switched.** `send` goes through the app's shared HTTP client, handed in as `GhState::http`; `reqwest` is no longer a dependency of either Helm crate. Checked against the live API with the read-only `whoami` example: sign-in token, a list, and a 404 arriving as `NotFound`.
+- **Left on tokio, deliberately:** running `gh` (sign-in, token, cloning) and the two progress channels. Rewriting the sign-in flow cannot be tested without signing in by hand.
 - **Not yet tried in the running app.**
 
 ### Done when

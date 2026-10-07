@@ -9084,12 +9084,13 @@ dependencies = [
 name = "helm_backend"
 version = "0.1.0"
 dependencies = [
+ "futures 0.3.34",
+ "http_client",
  "reqwest_client",
  "serde",
  "serde_json",
  "tokio",
  "urlencoding",
- "zed-reqwest",
 ]
 
 [[package]]

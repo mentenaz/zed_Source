@@ -1,9 +1,10 @@
 //! GitHub backend for the Helm panel: sign-in through the `gh` CLI, the
 //! REST API, and cloning.
 //!
-//! No GPUI and no UI state. The functions here are async and run on a tokio
-//! runtime, because `reqwest` and the `gh` child processes need one; a GPUI
-//! host bridges to them with [`on_tokio`].
+//! No GPUI and no UI state. HTTP goes through the host's client, handed in
+//! as `GhState::http`. The functions are async and run on a tokio runtime,
+//! because the `gh` child processes need one; a GPUI host bridges to them
+//! with [`on_tokio`].
 
 pub mod github;
 

@@ -4,6 +4,10 @@
 //! request; `error::interpret` turns the answer into a value or a
 //! [`GhError`]. All endpoint functions are thin wrappers over those two.
 
+use std::time::Duration;
+
+use futures::AsyncReadExt as _;
+use http_client::{AsyncBody, HttpRequestExt as _, RedirectPolicy};
 use serde::de::DeserializeOwned;
 
 use super::error::{GhError, RawResponse, interpret, interpret_empty};
@@ -35,26 +39,44 @@ async fn token(state: &GhState) -> Result<String, GhError> {
     }
 }
 
+/// How long a request may take, answer included, before it is given up on.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// GitHub answers a renamed or moved repository with a redirect.
+const MAX_REDIRECTS: u32 = 10;
+
 /// Sends one request and returns what came back, whatever its status. This
 /// is the only function in the crate that touches the network. What to ask
 /// for is `requests.rs`; what the answer means is `error::interpret`.
+///
+/// It goes through the host application's HTTP client (`GhState::http`),
+/// so it uses the same proxy settings as everything else the app sends.
 async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhError> {
     let token = token(state).await?;
     let base = state.base_url.read().await.clone();
     let url = format!("{base}{}", request.path);
 
-    let mut builder = state
-        .client
-        .request(request.method.parse().unwrap_or(reqwest::Method::GET), &url)
+    let mut builder = http_client::Request::builder()
+        .method(request.method)
+        .uri(url.as_str())
+        .follow_redirects(RedirectPolicy::FollowLimit(MAX_REDIRECTS))
+        .timeout(REQUEST_TIMEOUT)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "mentenaz-forge");
-    if let Some(body) = request.body {
-        builder = builder.json(&body);
-    }
+    let body = match &request.body {
+        Some(body) => {
+            builder = builder.header("Content-Type", "application/json");
+            AsyncBody::from(body.to_string())
+        }
+        None => AsyncBody::default(),
+    };
+    let http_request = builder
+        .body(body)
+        .map_err(|e| GhError::Other(format!("Could not build the request to {url}: {e}")))?;
 
-    let response = builder
-        .send()
+    let mut response = state
+        .http
+        .send(http_request)
         .await
         .map_err(|e| GhError::Network(e.to_string()))?;
     let number = |name: &str| -> Option<u64> {
@@ -71,13 +93,15 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
     let rate_remaining = number("x-ratelimit-remaining");
     let rate_reset = number("x-ratelimit-reset");
     let retry_after = number("retry-after");
-    let body = response
-        .text()
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut bytes)
         .await
         .map_err(|e| GhError::Network(e.to_string()))?;
     Ok(RawResponse {
         status,
-        body,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
         rate_remaining,
         rate_reset,
         retry_after,
