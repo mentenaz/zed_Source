@@ -10,7 +10,8 @@ use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpRequestExt as _, RedirectPolicy};
 use serde::de::DeserializeOwned;
 
-use super::error::{GhError, RawResponse, interpret, interpret_empty};
+use super::cache::{CachedResponse, RateLimit};
+use super::error::{GhError, RawResponse, interpret, interpret_empty, unix_now};
 use super::gh_cmd;
 use super::paging::{Page, interpret_page, interpret_page_under};
 use super::requests::{self, ApiRequest};
@@ -45,13 +46,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// GitHub answers a renamed or moved repository with a redirect.
 const MAX_REDIRECTS: u32 = 10;
 
-/// Sends one request and returns what came back, whatever its status. This
-/// is the only function in the crate that touches the network. What to ask
-/// for is `requests.rs`; what the answer means is `error::interpret`.
+/// Makes one HTTP request and returns what came back, whatever its status,
+/// together with the answer's `ETag`. This is the only function in the
+/// crate that touches the network. What to ask for is `requests.rs`; what
+/// the answer means is `error::interpret`.
 ///
 /// It goes through the host application's HTTP client (`GhState::http`),
 /// so it uses the same proxy settings as everything else the app sends.
-async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhError> {
+/// `if_none_match` is sent as that header: GitHub then answers 304 with no
+/// body when the data has not changed.
+async fn send_once(
+    state: &GhState,
+    request: &ApiRequest,
+    if_none_match: Option<&str>,
+) -> Result<(RawResponse, Option<String>), GhError> {
     let token = token(state).await?;
     let base = state.base_url.read().await.clone();
     let url = format!("{base}{}", request.path);
@@ -64,6 +72,9 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "mentenaz-forge");
+    if let Some(etag) = if_none_match {
+        builder = builder.header("If-None-Match", etag);
+    }
     let body = match &request.body {
         Some(body) => {
             builder = builder.header("Content-Type", "application/json");
@@ -80,39 +91,100 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
         .send(http_request)
         .await
         .map_err(|e| GhError::Network(e.to_string()))?;
-    let number = |name: &str| -> Option<u64> {
-        response
-            .headers()
-            .get(name)?
-            .to_str()
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+    let text = |name: &str| -> Option<String> {
+        Some(response.headers().get(name)?.to_str().ok()?.trim().to_string())
     };
+    let number = |name: &str| -> Option<u64> { text(name)?.parse().ok() };
     let status = response.status().as_u16();
     let rate_remaining = number("x-ratelimit-remaining");
     let rate_reset = number("x-ratelimit-reset");
     let retry_after = number("retry-after");
-    let link = response
-        .headers()
-        .get("link")
-        .and_then(|link| link.to_str().ok())
-        .map(str::to_string);
+    let link = text("link");
+    let etag = text("etag");
+    if let Some(rate) = RateLimit::from_headers(
+        number("x-ratelimit-limit"),
+        rate_remaining,
+        rate_reset,
+        text("x-ratelimit-resource").as_deref(),
+    ) {
+        state.record_rate_limit(rate);
+    }
+
     let mut bytes = Vec::new();
     response
         .body_mut()
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| GhError::Network(e.to_string()))?;
-    Ok(RawResponse {
-        status,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
-        rate_remaining,
-        rate_reset,
-        retry_after,
-        link,
-    })
+    Ok((
+        RawResponse {
+            status,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            rate_remaining,
+            rate_reset,
+            retry_after,
+            link,
+        },
+        etag,
+    ))
+}
+
+/// Sends a request, using and keeping the remembered answer for it.
+///
+/// A `GET` whose answer is remembered is sent with that answer's tag. If
+/// GitHub says nothing changed, the remembered answer is returned, and the
+/// request did not count against the rate limit. Any other request that
+/// succeeds changed something, so everything remembered is forgotten.
+async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhError> {
+    // Once GitHub has said the allowance is used up, asking again before it
+    // resets can only fail, and repeated failures can get a token blocked.
+    if let Some(rate) = state.rate_limit()
+        && rate.is_used_up(unix_now())
+    {
+        return Err(GhError::RateLimited {
+            reset_at: Some(rate.reset_at),
+            retry_after: None,
+        });
+    }
+
+    let cacheable = request.method == "GET";
+    let known = if cacheable {
+        state.cache().etag(&request.path)
+    } else {
+        None
+    };
+
+    let (mut response, mut etag) = send_once(state, &request, known.as_deref()).await?;
+    if response.status == 304 {
+        let cached = state.cache().get(&request.path);
+        if let Some(cached) = cached {
+            return Ok(RawResponse {
+                status: 200,
+                body: cached.body,
+                link: cached.link,
+                ..response
+            });
+        }
+        // The answer was forgotten while the request was out (a change was
+        // sent in the meantime): ask again without the tag.
+        (response, etag) = send_once(state, &request, None).await?;
+    }
+
+    if cacheable {
+        if let (200, Some(etag)) = (response.status, etag) {
+            state.cache().put(
+                &request.path,
+                CachedResponse {
+                    etag,
+                    body: response.body.clone(),
+                    link: response.link.clone(),
+                },
+            );
+        }
+    } else if response.status < 400 {
+        state.forget_answers();
+    }
+    Ok(response)
 }
 
 /// Sends a request and reads its answer as `T`.
@@ -149,6 +221,33 @@ pub async fn fetch_page_under<T: DeserializeOwned>(
 ) -> Result<Page<T>, GhError> {
     let page = page.max(1);
     interpret_page_under(&send(state, request.page(page, per_page)).await?, key, page)
+}
+
+/// Page `page` of `request` as it was last answered, if that is remembered.
+/// Nothing is sent. For showing a list at once while [`fetch_page`] checks
+/// whether it has changed.
+pub fn peek_page<T: DeserializeOwned>(
+    state: &GhState,
+    request: ApiRequest,
+    page: u32,
+    per_page: u32,
+) -> Option<Page<T>> {
+    let page = page.max(1);
+    let remembered = state.remembered(&request.page(page, per_page))?;
+    interpret_page(&remembered, page).ok()
+}
+
+/// [`peek_page`] for a list GitHub wraps in an object under `key`.
+pub fn peek_page_under<T: DeserializeOwned>(
+    state: &GhState,
+    request: ApiRequest,
+    key: &str,
+    page: u32,
+    per_page: u32,
+) -> Option<Page<T>> {
+    let page = page.max(1);
+    let remembered = state.remembered(&request.page(page, per_page))?;
+    interpret_page_under(&remembered, key, page).ok()
 }
 
 /// The most GitHub returns in one page.

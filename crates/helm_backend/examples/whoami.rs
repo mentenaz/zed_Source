@@ -40,6 +40,19 @@ fn main() -> Result<(), String> {
                 );
             }
 
+            // The same question twice: the second answer comes from memory
+            // (GitHub replies "not modified"), so it costs nothing.
+            let before = state.rate_limit().map(|rate| rate.remaining);
+            gh_get_current_user(&state).await?;
+            let after = state.rate_limit().map(|rate| rate.remaining);
+            println!("asking again: requests left {before:?} -> {after:?}");
+            if let Some(rate) = state.rate_limit() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                println!("{}", rate.summary(now));
+            }
+
             // A request that must fail, to see an error arrive as its type.
             let missing = "this-repository-does-not-exist-helm-backend".to_string();
             match gh_get_repo(user.login.clone(), missing, &state).await {

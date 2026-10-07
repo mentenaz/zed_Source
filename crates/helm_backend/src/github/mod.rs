@@ -5,11 +5,13 @@
 //! - `cli`: gh CLI auth (login/logout/token/status/scopes)
 //! - `api`: REST API fetch helpers + endpoint functions
 //! - `requests`: what each endpoint asks for, as data (method, path, body)
+//! - `cache`: remembered answers (`ETag`s) and the rate limit
 //! - `paging`: one page of a list, and reading the `Link` header
 //! - `error`: `GhError`, and turning an HTTP answer into a value or an error
 //! - `clone`: `gh repo clone` with streaming (event-log) output
 
 mod api;
+mod cache;
 mod cli;
 mod clone;
 mod error;
@@ -33,7 +35,8 @@ pub use cli::{
     gh_auth_status, gh_check_cli, gh_ensure_scope, gh_login, gh_logout,
 };
 pub use clone::gh_clone_repo;
-pub use api::{fetch_all, fetch_page, fetch_page_under};
+pub use api::{fetch_all, fetch_page, fetch_page_under, peek_page, peek_page_under};
+pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
 pub use paging::{Page, PageLinks, interpret_page, interpret_page_under, last_page, parse_link};
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
 

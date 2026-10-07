@@ -161,6 +161,8 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
             // API call picks up the token that actually carries the new
             // scope instead of replaying the old one.
             *state.token.write().await = None;
+            // Answers remembered under the old sign-in are not this one's.
+            state.forget_answers();
             Ok(())
         }
         Ok(status) => Err(format!(
@@ -190,6 +192,8 @@ pub async fn gh_logout(state: &GhState) -> Result<(), String> {
     {
         Ok(out) if out.status.success() => {
             *state.token.write().await = None;
+            // Answers remembered under the old sign-in are not this one's.
+            state.forget_answers();
             Ok(())
         }
         Ok(out) => Err(format!(

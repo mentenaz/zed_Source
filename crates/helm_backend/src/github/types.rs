@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::cache::{RateLimit, ResponseCache};
+use super::error::RawResponse;
+use super::requests::ApiRequest;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthInfo {
     pub account: String,
@@ -522,6 +526,10 @@ pub struct GhState {
     pub base_url: tokio::sync::RwLock<String>,
     pub auth_tx: tokio::sync::broadcast::Sender<GhAuthEvent>,
     pub clone_tx: tokio::sync::broadcast::Sender<CloneEvent>,
+    /// Answers to earlier requests, by path, with their `ETag`s.
+    cache: std::sync::Mutex<ResponseCache>,
+    /// What the last answer said about the rate limit.
+    rate: std::sync::Mutex<Option<RateLimit>>,
 }
 
 impl GhState {
@@ -534,6 +542,54 @@ impl GhState {
             base_url: tokio::sync::RwLock::new("https://api.github.com".to_string()),
             auth_tx,
             clone_tx,
+            cache: std::sync::Mutex::default(),
+            rate: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The remembered answers. A lock poisoned by a panic elsewhere is
+    /// still usable: no half-finished update can leave the cache wrong in
+    /// a way that matters.
+    pub(crate) fn cache(&self) -> std::sync::MutexGuard<'_, ResponseCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The answer last given to `request`, if it is remembered, as a
+    /// successful response. Nothing is sent.
+    pub(crate) fn remembered(&self, request: &ApiRequest) -> Option<RawResponse> {
+        if request.method != "GET" {
+            return None;
+        }
+        let cached = self.cache().get(&request.path)?;
+        Some(RawResponse {
+            status: 200,
+            body: cached.body,
+            link: cached.link,
+            ..RawResponse::default()
+        })
+    }
+
+    /// Forgets every remembered answer. Done automatically after a change
+    /// is sent to GitHub and when the sign-in changes.
+    pub fn forget_answers(&self) {
+        self.cache().clear();
+    }
+
+    /// How much of the rate limit is left, as of the last answer. `None`
+    /// until a request has been answered.
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        *self
+            .rate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn record_rate_limit(&self, rate: RateLimit) {
+        *self
+            .rate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rate);
     }
 }

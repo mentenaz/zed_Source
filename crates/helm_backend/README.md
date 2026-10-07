@@ -107,9 +107,27 @@ what lets them be tested without a network.
   `gh_get_repos` uses `fetch_all`. The other `gh_list_*` functions still
   return a single page of up to 100, for callers that have not moved to
   `fetch_page`.
-- **Nothing is cached** except the token. The rate-limit headers are read
-  only to recognise a used-up limit; nothing tracks how much is left. Both
-  are phase E.
+- **Answers are remembered, and checked for free.** Every answer to a
+  `GET` is kept with its `ETag` (up to 200 of them; the one used longest ago
+  makes room). The next time the same thing is asked, the tag goes along as
+  `If-None-Match`. If nothing changed GitHub answers 304 with no body, which
+  does not count against the rate limit, and the remembered answer is
+  returned. A remembered answer is never returned without asking GitHub
+  first, except through `peek_page` and `peek_page_under`, which send
+  nothing and exist so that a host can show a list at once while
+  `fetch_page` checks it.
+- **Any change forgets everything remembered.** A request that is not a
+  `GET` and succeeds clears every remembered answer, and so do signing in
+  with a new scope and signing out. This is deliberately blunt: working out
+  which lists a change affects is easy to get wrong, and asking again costs
+  one request per list.
+- **The rate limit is tracked.** `GhState::rate_limit()` gives what the last
+  answer said: the allowance, how much is left and when it resets.
+  `RateLimit::summary` is that as one line. Search has its own smaller
+  allowance, which is not mixed in.
+- **Nothing is sent while the limit is used up.** Once GitHub has said none
+  is left, requests fail at once with `GhError::RateLimited` until the reset
+  time, instead of being sent to be refused.
 - **A request that returns nothing is not parsed.** GitHub answers most
   deletes and some updates with 204 and an empty body. These used to be
   read as JSON, which an empty body is not.
@@ -132,6 +150,7 @@ what lets them be tested without a network.
 | `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
 | `src/github/api.rs` | The endpoint functions, and `send` |
 | `src/github/paging.rs` | `Page`, and reading the `Link` header |
+| `src/github/cache.rs` | Remembered answers (`ResponseCache`) and `RateLimit` |
 | `src/github/error.rs` | `GhError`, and turning an HTTP answer into a value or an error |
 | `src/github/clone.rs` | `gh repo clone` with streamed output |
 | `src/github/types.rs` | Response types and `GhState` |
@@ -152,8 +171,9 @@ Still on tokio: running `gh` (sign-in, the token, cloning) and the two
 progress channels. Moving those off it would mean rewriting the sign-in
 flow, which cannot be tested without signing in by hand, so it was left.
 
-Pagination (phase D) is done too. Next in the plan: rate limits and caching
-(phase E).
+Pagination (phase D) and rate limits and caching (phase E) are done too.
+Not done from phase E: two callers asking for the same thing at the same
+moment still send two requests.
 
 ## Development
 
