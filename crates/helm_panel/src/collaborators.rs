@@ -51,9 +51,7 @@ impl HelmPanel {
 
     /// The collaborators list — add/remove and per-row permission changes.
     pub(super) fn render_collaborators(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         let header = h_flex()
             .items_center()
@@ -78,196 +76,18 @@ impl HelmPanel {
                     })),
             );
 
-        if self.collaborators.state == LoadState::Loading {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(border))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .p_4()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(Spinner::new().small())
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted_foreground)
-                                        .child("Loading collaborators…"),
-                                ),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.collaborators.state == LoadState::Error {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(border))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Failed to load collaborators"),
-                        )
-                        .child(
-                            Button::new("collaborators-retry")
-                                .outline()
-                                .label("Retry")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.load_collaborators(cx)),
-                                ),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.collaborators.items.is_empty() {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(border))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .p_4()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("No collaborators"),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        let view = cx.entity();
-        let collab_len = self.collaborators.items.len();
-        let collab_cursor = self.collaborators.cursor;
-
-        v_flex()
-            .child(header)
-            .child(div().h_px().w_full().bg(border))
-            .child(
-                v_flex()
-                    .id("helm-collaborators-list")
-                    .track_focus(&self.collaborators.focus)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        window.focus(&this.collaborators.focus, cx);
-                    }))
-                    .key_context("HelmRowList")
-                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                        this.collaborators.cursor =
-                            step_selected(this.collaborators.cursor, collab_len, true);
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                        this.collaborators.cursor =
-                            step_selected(this.collaborators.cursor, collab_len, false);
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                        let Some(login) = this
-                            .collaborators.cursor
-                            .and_then(|ix| this.collaborators.items.get(ix))
-                            .map(|c| c.login.clone())
-                        else {
-                            return;
-                        };
-                        this.open_user_profile(login, cx);
-                    }))
-                    .py_1()
-                    .children(self.collaborators.items.iter().enumerate().map(|(ix, collab)| {
-                        let login = collab.login.clone();
-                        let role_name = collab.role_name.clone();
-
-                        ListItem::new(format!("helm-collaborator-{}", collab.id))
-                            .selected(collab_cursor == Some(ix))
-                            .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Avatar::new()
-                                    .src(collab.avatar_url.clone())
-                                    .name(login.clone())
-                                    .with_size(px(48.)),
-                            )
-                            .child(div().text_color(foreground).child(login.clone())),
-                    )
-                    .suffix({
-                        let view = view.clone();
-                        let role_login = login.clone();
-                        let remove_login = login.clone();
-                        let collab_id = collab.id;
-                        move |_, _| {
-                            let role_view = view.clone();
-                            let role_login = role_login.clone();
-                            let remove_view = view.clone();
-                            let remove_login = remove_login.clone();
-
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Button::new(("helm-collaborator-role", collab_id))
-                                        .ghost()
-                                        .xsmall()
-                                        .label(role_name.clone())
-                                        .dropdown_menu(move |menu, _, _| {
-                                            COLLABORATOR_PERMISSIONS.iter().fold(menu, |menu, perm| {
-                                                let role_view = role_view.clone();
-                                                let role_login = role_login.clone();
-                                                let perm = perm.to_string();
-                                                menu.item(PopupMenuItem::new(perm.clone()).on_click(
-                                                    move |_, window, cx| {
-                                                        role_view.update(cx, |this, cx| {
-                                                            this.handle_set_collaborator_permission(
-                                                                role_login.clone(),
-                                                                perm.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    },
-                                                ))
-                                            })
-                                        }),
-                                )
-                                .child(
-                                    Button::new(("helm-collaborator-remove", collab_id))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Delete)
-                                        .tooltip("Remove collaborator")
-                                        .on_click(move |_, window, cx| {
-                                            remove_view.update(cx, |this, cx| {
-                                                this.open_remove_collaborator_confirm(
-                                                    remove_login.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                )
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.collaborators.cursor = Some(ix);
-                        this.open_user_profile(login.clone(), cx);
-                    }))
-                    }))
-            )
-            .into_any_element()
+        self.list_screen(
+            self.collaborators.status(),
+            &self.collaborators_list,
+            Some(header.into_any_element()),
+            ListLabels {
+                loading: "Loading collaborators…",
+                error: "Failed to load collaborators",
+                empty: "No collaborators",
+            },
+            |this, cx| this.load_collaborators(cx),
+            cx,
+        )
     }
 
     /// Opens the "Add collaborator" dialog: a username input plus a
@@ -385,4 +205,92 @@ impl HelmPanel {
         });
         */
     }
+}
+
+/// One row of the Collaborators screen: avatar and login, a dropdown to
+/// change the permission, and a remove button.
+///
+/// The dropdown and the button act on the panel, which a row is not given
+/// (it is drawn by the list, not by the panel), so they reach it through
+/// `panel`.
+pub(super) fn collaborator_row(
+    ix: usize,
+    collab: &Collaborator,
+    panel: &WeakEntity<HelmPanel>,
+    cx: &App,
+) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let login = collab.login.clone();
+    let role_name = collab.role_name.clone();
+    let collab_id = collab.id;
+    let panel = panel.clone();
+
+    ListItem::new(("helm-collaborator", ix))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Avatar::new()
+                        .src(collab.avatar_url.clone())
+                        .name(login.clone())
+                        .with_size(px(48.)),
+                )
+                .child(div().text_color(foreground).child(login.clone())),
+        )
+        .suffix(move |_, _| {
+            let role_panel = panel.clone();
+            let role_login = login.clone();
+            let remove_panel = panel.clone();
+            let remove_login = login.clone();
+
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(("helm-collaborator-role", collab_id))
+                        .ghost()
+                        .xsmall()
+                        .label(role_name.clone())
+                        .dropdown_menu(move |menu, _, _| {
+                            COLLABORATOR_PERMISSIONS.iter().fold(menu, |menu, perm| {
+                                let role_panel = role_panel.clone();
+                                let role_login = role_login.clone();
+                                let perm = perm.to_string();
+                                menu.item(PopupMenuItem::new(perm.clone()).on_click(
+                                    move |_, window, cx| {
+                                        role_panel
+                                            .update(cx, |this, cx| {
+                                                this.handle_set_collaborator_permission(
+                                                    role_login.clone(),
+                                                    perm.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    },
+                                ))
+                            })
+                        }),
+                )
+                .child(
+                    Button::new(("helm-collaborator-remove", collab_id))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Delete)
+                        .tooltip("Remove collaborator")
+                        .on_click(move |_, window, cx| {
+                            remove_panel
+                                .update(cx, |this, cx| {
+                                    this.open_remove_collaborator_confirm(
+                                        remove_login.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        }),
+                )
+        })
 }

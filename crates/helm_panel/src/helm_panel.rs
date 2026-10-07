@@ -227,6 +227,7 @@ pub struct HelmPanel {
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
     collaborators: Section<Collaborator>,
+    collaborators_list: ListView,
 
     // Repo-detail tab caches (Issues/Pulls/Releases/Packages/Traffic) —
     // loaded on screen entry and kept while drilling; `set_screen` clears
@@ -400,6 +401,23 @@ impl HelmPanel {
                     cx,
                 ),
                 collaborators: Section::new(cx),
+                collaborators_list: ListView::new(
+                    |panel| &panel.collaborators,
+                    {
+                        let panel: WeakEntity<Self> = cx.weak_entity();
+                        move |ix: usize, collab: &Collaborator, cx: &App| {
+                            collaborators::collaborator_row(ix, collab, &panel, cx)
+                        }
+                    },
+                    |this, ix, _, cx| {
+                        if let Some(collab) = this.collaborators.items.get(ix) {
+                            let login = collab.login.clone();
+                            this.open_user_profile(login, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 issues: Section::new(cx),
                 issues_list: ListView::new(
                     |panel| &panel.issues,
