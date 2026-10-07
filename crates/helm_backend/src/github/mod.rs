@@ -4,6 +4,7 @@
 //! - `mod`: types, `GhState`, `gh_cmd` helper
 //! - `cli`: gh CLI auth (login/logout/token/status/scopes)
 //! - `api`: REST API fetch helpers + endpoint functions
+//! - `requests`: what each endpoint asks for, as data (method, path, body)
 //! - `error`: `GhError`, and turning an HTTP answer into a value or an error
 //! - `clone`: `gh repo clone` with streaming (event-log) output
 
@@ -11,6 +12,7 @@ mod api;
 mod cli;
 mod clone;
 mod error;
+pub mod requests;
 mod types;
 
 pub use api::{
