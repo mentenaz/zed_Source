@@ -45,6 +45,7 @@ use gpui_component::{
     avatar::Avatar,
     button::{Button, ButtonGroup, ButtonVariants as _},
     description_list::{DescriptionItem, DescriptionList},
+    form::{field, v_form},
     group_box::GroupBox,
     h_flex,
     input::{Input, InputEvent, InputState},

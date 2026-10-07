@@ -164,7 +164,6 @@ impl Render for HelmRepositoryModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
-        let visibility_warning = cx.theme().warning;
         let parent = self.parent.clone();
         let title = self.title();
         let kind = self.kind.clone();
@@ -172,115 +171,103 @@ impl Render for HelmRepositoryModal {
         let show_footer = !matches!(confirm_kind, HelmModalKind::CloneRepo);
 
         let content = match &kind {
-            HelmModalKind::CreateRepo => v_flex()
-                .gap_3()
-                .child(labeled_field("Name", Input::new(&self.name), muted))
-                .child(labeled_field(
-                    "Description",
-                    Input::new(&self.description),
-                    muted,
-                ))
-                .child(labeled_field(
-                    "Owner",
-                    Input::new(&self.organization),
-                    muted,
-                ))
+            HelmModalKind::CreateRepo => v_form()
+                .child(field().label("Name").child(Input::new(&self.name)))
+                .child(field().label("Description").child(Input::new(&self.description)))
+                .child(field().label("Owner").child(Input::new(&self.organization)))
                 .child(
-                    Switch::new("helm-modal-private")
+                    field().child(
+                        Switch::new("helm-modal-private")
                         .label("Private")
                         .checked(self.private)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.private = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .into_any_element(),
-            HelmModalKind::EditRepo(repo) => v_flex()
-                .gap_3()
-                .child(labeled_field("Name", Input::new(&self.name), muted))
-                .child(labeled_field(
-                    "Description",
-                    Input::new(&self.description),
-                    muted,
-                ))
-                .child(labeled_field(
-                    "Homepage",
-                    Input::new(&self.homepage),
-                    muted,
-                ))
-                .child(labeled_field("Topics", Input::new(&self.topics), muted))
+            HelmModalKind::EditRepo(repo) => v_form()
+                .child(field().label("Name").child(Input::new(&self.name)))
+                .child(field().label("Description").child(Input::new(&self.description)))
+                .child(field().label("Homepage").child(Input::new(&self.homepage)))
+                .child(field().label("Topics").child(Input::new(&self.topics)))
                 .child(
-                    Switch::new("helm-modal-edit-private")
+                    field().child(
+                        Switch::new("helm-modal-edit-private")
                         .label("Private")
                         .checked(self.private)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.private = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .children((self.private != repo.private).then(|| {
-                    div().text_xs().text_color(visibility_warning).child(if self.private {
-                        "Saving will make this repository private."
-                    } else {
-                        "Saving will make this repository public — anyone will be able to see it."
-                    })
+                    field().child(Alert::warning(
+                        "helm-modal-visibility",
+                        if self.private {
+                            "Saving will make this repository private."
+                        } else {
+                            "Saving will make this repository public — anyone will be able to see it."
+                        },
+                    ))
                 }))
                 .child(
-                    Switch::new("helm-modal-issues")
+                    field().child(
+                        Switch::new("helm-modal-issues")
                         .label("Issues")
                         .checked(self.has_issues)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.has_issues = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .child(
-                    Switch::new("helm-modal-projects")
+                    field().child(
+                        Switch::new("helm-modal-projects")
                         .label("Projects")
                         .checked(self.has_projects)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.has_projects = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .child(
-                    Switch::new("helm-modal-wiki")
+                    field().child(
+                        Switch::new("helm-modal-wiki")
                         .label("Wiki")
                         .checked(self.has_wiki)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.has_wiki = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .child(
-                    Switch::new("helm-modal-discussions")
+                    field().child(
+                        Switch::new("helm-modal-discussions")
                         .label("Discussions")
                         .checked(self.has_discussions)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.has_discussions = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .into_any_element(),
-            HelmModalKind::AddCollaborator => v_flex()
-                .gap_3()
-                .child(labeled_field(
-                    "Username",
-                    Input::new(&self.username),
-                    muted,
-                ))
-                .child(labeled_field(
-                    "Permission",
-                    Button::new("helm-modal-permission")
+            HelmModalKind::AddCollaborator => v_form()
+                .child(field().label("Username").child(Input::new(&self.username)))
+                .child(field().label("Permission").child(Button::new("helm-modal-permission")
                         .outline()
                         .label(COLLABORATOR_PERMISSIONS[self.permission])
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.permission =
                                 (this.permission + 1) % COLLABORATOR_PERMISSIONS.len();
                             cx.notify();
-                        })),
-                    muted,
-                ))
+                        }))))
                 .into_any_element(),
             HelmModalKind::RemoveCollaborator(login) => v_flex()
                 .gap_2()
@@ -288,64 +275,45 @@ impl Render for HelmRepositoryModal {
                     "{login} will lose access to this repository immediately."
                 )))
                 .into_any_element(),
-            HelmModalKind::CreatePull(_) => v_flex()
-                .gap_3()
-                .child(labeled_field("Title", Input::new(&self.name), muted))
-                .child(labeled_field(
-                    "Description",
-                    Input::new(&self.description),
-                    muted,
-                ))
-                .child(labeled_field(
-                    "Head branch",
-                    Input::new(&self.head_branch),
-                    muted,
-                ))
-                .child(labeled_field(
-                    "Base branch",
-                    Input::new(&self.base_branch),
-                    muted,
-                ))
+            HelmModalKind::CreatePull(_) => v_form()
+                .child(field().label("Title").child(Input::new(&self.name)))
+                .child(field().label("Description").child(Input::new(&self.description)))
+                .child(field().label("Head branch").child(Input::new(&self.head_branch)))
+                .child(field().label("Base branch").child(Input::new(&self.base_branch)))
                 .into_any_element(),
-            HelmModalKind::CreateRelease => v_flex()
-                .gap_3()
-                .child(labeled_field("Tag", Input::new(&self.tag_name), muted))
-                .child(labeled_field("Title", Input::new(&self.name), muted))
-                .child(labeled_field(
-                    "Description",
-                    Input::new(&self.description),
-                    muted,
-                ))
+            HelmModalKind::CreateRelease => v_form()
+                .child(field().label("Tag").child(Input::new(&self.tag_name)))
+                .child(field().label("Title").child(Input::new(&self.name)))
+                .child(field().label("Description").child(Input::new(&self.description)))
                 .child(
-                    Switch::new("helm-modal-draft")
+                    field().child(
+                        Switch::new("helm-modal-draft")
                         .label("Draft")
                         .checked(self.draft)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.draft = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .child(
-                    Switch::new("helm-modal-prerelease")
+                    field().child(
+                        Switch::new("helm-modal-prerelease")
                         .label("Pre-release")
                         .checked(self.prerelease)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.prerelease = *checked;
                             cx.notify();
                         })),
+                    ),
                 )
                 .into_any_element(),
-            HelmModalKind::EditProfile(_) => v_flex()
-                .gap_3()
-                .child(labeled_field("Name", Input::new(&self.name), muted))
-                .child(labeled_field("Bio", Input::new(&self.description), muted))
-                .child(labeled_field("Company", Input::new(&self.company), muted))
-                .child(labeled_field("Location", Input::new(&self.location), muted))
-                .child(labeled_field(
-                    "Blog / website",
-                    Input::new(&self.homepage),
-                    muted,
-                ))
+            HelmModalKind::EditProfile(_) => v_form()
+                .child(field().label("Name").child(Input::new(&self.name)))
+                .child(field().label("Bio").child(Input::new(&self.description)))
+                .child(field().label("Company").child(Input::new(&self.company)))
+                .child(field().label("Location").child(Input::new(&self.location)))
+                .child(field().label("Blog / website").child(Input::new(&self.homepage)))
                 .into_any_element(),
             HelmModalKind::CloneRepo => {
                 let panel = parent.read(cx);

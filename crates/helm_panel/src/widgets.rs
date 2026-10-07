@@ -1,20 +1,7 @@
-//! Small helpers shared by Helm's screens: a labelled form field, a
-//! loading line, a chip, and number, date and colour formatting.
+//! Small helpers shared by Helm's screens: a loading
+//! line, a chip, and number, date and colour formatting.
 
 use super::*;
-
-/// A small label above an `Input` — for the modal forms whose fields (unlike
-/// `CreateRepo`'s) have no distinguishing placeholder text of their own.
-pub(super) fn labeled_field(
-    label: &'static str,
-    input: impl IntoElement,
-    muted: gpui::Hsla,
-) -> impl IntoElement {
-    v_flex()
-        .gap_1()
-        .child(div().text_xs().text_color(muted).child(label))
-        .child(input)
-}
 
 /// A spinner beside a line of text, in the middle of the space a screen has.
 /// What a screen shows while the one thing it is about is being fetched.
