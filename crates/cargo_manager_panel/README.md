@@ -2,8 +2,8 @@
 
 The Cargo Manager: a workspace tab for one crate's crates.io dependencies.
 It shows what is installed, what is behind the registry and which security
-advisories apply, and removes, updates and re-versions dependencies through
-Cargo.
+advisories apply, searches crates.io, and adds, removes, updates and
+re-versions dependencies through Cargo.
 
 ## Why it exists
 
@@ -14,8 +14,7 @@ in the left dock shows the same lists in brief; this tab is where they are
 acted on.
 
 The design is in [`docs/Rust_Manager_Design_Note.md`](../../docs/Rust_Manager_Design_Note.md).
-This crate is steps 1 to 4 of its build order. Search and README viewing
-(step 5), and with them adding a new dependency, are not built yet.
+This crate is all five steps of its build order.
 
 ## Using it
 
@@ -25,24 +24,30 @@ opens it on the crate selected there, or with the
 opens it on the workspace's default crate. To switch crates, select another
 one in the Rust panel and press **Package Manager** again.
 
-Four pages in the left sidebar:
+Five pages in the left sidebar:
 
 | Page | What it does |
 | --- | --- |
 | General | The crate, its workspace, the toolchain, and the status of the last action |
+| Search | Search crates.io; **Add** from the results, **Load more** to page |
 | Installed | Direct crates.io dependencies with their locked versions; **Remove** |
 | Updates | Dependencies with a newer version; **Update**, **Update all**, **Change to** |
 | Vulnerabilities | Advisories from OSV.dev, on demand; **Scan** |
 
-Selecting a dependency opens a resizable details pane on the right: how the
-crate declares it, links to crates.io and docs.rs, and the versions
-available, each marked with its minimum Rust version.
+Selecting a dependency or a search result opens a resizable details pane on
+the right: how the crate declares it (or, for a search result, its
+description and download counts), links to crates.io and docs.rs, the
+**README**, and the versions available, each marked with its minimum Rust
+version. For a search result every version has its own **Add**.
 
 | Key (list focused) | Action |
 | --- | --- |
 | `up` / `down` | Move the selection |
 | `enter` | Open the dependency's details, or the advisory's page in the browser |
 | `space` | Run the page's action: Remove (Installed) or Update (Updates) |
+
+The Search page's results are not keyboard-navigable yet; `enter` in the
+search box runs the search.
 
 Commands run in the **Script Runner** panel so the output is visible. When
 one finishes, the tab re-reads `Cargo.toml` and `Cargo.lock` from disk.
@@ -60,6 +65,13 @@ one finishes, the tab re-reads `Cargo.toml` and `Cargo.lock` from disk.
 - **Remove** says when the root manifest will change too. Removing the last
   crate that inherits a `[workspace.dependencies]` entry makes Cargo delete
   that entry from the root `Cargo.toml`.
+- **Add** says what Cargo will write. If the root manifest's
+  `[workspace.dependencies]` has the package, that is
+  `name.workspace = true`, and no version is passed (with one, Cargo would
+  write it into the crate instead). If that table exists without the
+  package, Cargo writes a version into the crate's own manifest, which is
+  not how such a workspace declares dependencies: the confirmation is a
+  warning, with **Add anyway**.
 - **Update all** is one `cargo update` naming every dependency that has a
   newer version inside its declared range. It never runs a bare
   `cargo update`, which on this fork would change 621 lockfile entries.
@@ -81,7 +93,12 @@ one finishes, the tab re-reads `Cargo.toml` and `Cargo.lock` from disk.
 - **Change the version of a target-specific dependency.** `cargo add` would
   add a second entry to `[dependencies]` rather than change the one under
   the target.
-- **Add a dependency.** That needs Search, which is the next step.
+- **Add a dependency the crate already has.** `cargo add` would rewrite the
+  existing one; changing a version is the Updates page's job, with its own
+  checks. The same package can still be added to the other table (as a
+  dev-dependency when it is already a normal one).
+- **Add to a target-specific or build table.** Search adds to
+  `[dependencies]`, or to `[dev-dependencies]` with the switch on.
 
 ### Unknown never looks like healthy
 
@@ -111,6 +128,12 @@ one finishes, the tab re-reads `Cargo.toml` and `Cargo.lock` from disk.
 - "Compatible only" in the details pane hides versions that declare a
   minimum Rust version above the installed toolchain. Versions that declare
   none are kept and marked.
+- Searches are at least a second apart, which is the rate crates.io asks
+  API users to keep to. A second search inside that second waits; it is not
+  dropped.
+- The README is fetched when asked for and shown as crates.io serves it,
+  rendered HTML, through `gpui_component::text::html`. Images in it (badges,
+  mostly) may not show.
 - Nothing depends on rust-analyzer, and nothing polls. The tab reloads when
   a `Cargo.toml` or `Cargo.lock` in the project changes on disk.
 - If a crate name or version contains anything but the characters real ones
@@ -130,17 +153,18 @@ one finishes, the tab re-reads `Cargo.toml` and `Cargo.lock` from disk.
 
 The UI is composed from `gpui_component` widgets: `setting::{Settings,
 SettingPage, SettingGroup, SettingItem}` for the pages, `h_resizable` /
-`resizable_panel` for the details split, and `Button`, `Tag`, `Switch` and
-`Spinner` inside them.
+`resizable_panel` for the details split, `text::html` for the README, and
+`Input`, `Button`, `Tag`, `Switch` and `Spinner` inside them.
 
 ## Layout
 
 | File | Contents |
 | --- | --- |
 | `src/cargo_manager_panel.rs` | The tab: state, loading, the confirm-then-run actions, `Item` and `Render` |
-| `src/pages.rs` | The four `SettingPage`s and the shared list view behind three of them |
-| `src/details.rs` | The details pane and its version list |
-| `src/registry.rs` | Sparse-index lookups and the OSV advisory scan, shared with `rust_panel` |
+| `src/pages.rs` | The `SettingPage`s, the General page, and the shared list view behind Installed, Updates and Vulnerabilities |
+| `src/search.rs` | The Search page, adding a dependency, and fetching a README |
+| `src/details.rs` | The details pane: a dependency's or a search result's details, the version list, the README view |
+| `src/registry.rs` | Sparse-index lookups, the OSV advisory scan (both shared with `rust_panel`), search and README requests |
 
 ## Development
 
@@ -151,8 +175,9 @@ cargo test -p cargo_manager_panel -j 8
 
 The tests cover the command lines the tab builds (including that values
 with shell syntax are refused and that "Update all" never produces a bare
-`cargo update`), the text of the confirmations, the outdated rows, the index
-cache, and list navigation. None of them runs Cargo, opens a window or uses
+`cargo update`, and that no version is passed when adding a package the
+workspace declares), the text of the confirmations, the outdated rows, the
+index cache, how a shared scan is identified, and list navigation. None of them runs Cargo, opens a window or uses
 the network.
 
 To try the actions, use a scratch crate or workspace, never this fork: see

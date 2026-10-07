@@ -32,6 +32,9 @@
 //! [`update_args`]) and what each does to the manifests beyond the obvious
 //! ([`add_effect`], [`declaration`], [`remove_effect`]). The host runs the
 //! commands; the only one run here is the dry run ([`update_dry_run`]).
+//!
+//! Finding something to add is the crates.io Web API ([`search_url`],
+//! [`parse_search`]), and a crate's README is one more URL ([`readme_url`]).
 
 use std::path::Path;
 
@@ -42,6 +45,7 @@ mod lockfile;
 mod metadata;
 mod outdated;
 mod path_env;
+mod search;
 
 pub use actions::{
     AddEffect, Declaration, LockChange, LockChangeKind, Manifest, RemoveEffect, UpdateSpec,
@@ -64,6 +68,10 @@ pub use metadata::{
 pub use outdated::{
     RustCompat, UpdateKind, UpdateTarget, VersionChoice, VersionStatus, available_versions,
     classify_update, rust_compat, version_status,
+};
+pub use search::{
+    SEARCH_BASE_URL, SEARCH_PAGE_SIZE, SearchPage, SearchResult, fmt_count, next_search_url,
+    parse_search, readme_url, search_url,
 };
 pub use semver::Version;
 

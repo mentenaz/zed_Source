@@ -195,6 +195,8 @@ until the stamp changes.
 | Findings | `merge_findings(hits, records)` → `Vec<Finding>` (`package`, `version`, `id`, `other_ids`, `kind`, `severity`, `summary`, `fixed_in`, `url`, `details_missing`), `FindingKind`, `FindingCounts` |
 | Severity | `Severity` (low/moderate/high/critical), `cvss3_base_tenths(vector)` |
 | Parsers | `parse_metadata(json)`, `parse_lockfile(toml)` |
+| Search | `search_url(query)`, `next_search_url(next_page)`, `parse_search(json)` → `SearchPage` (`results`, `total`, `next_page`), `SearchResult`, `fmt_count(n)` |
+| README | `readme_url(name, version)` |
 | Command lines | `add_args(name, version, member, kind)`, `remove_args(name, member, kind, target)`, `update_args(specs, dry_run)` → `Option` (never a bare `cargo update`), `UpdateSpec`, `command_line(args)` |
 | Validation | `check_crate_name(name)`, `check_exact_version(version)` |
 | What an update would change | `update_dry_run(root, specs)` / `parse_update_output(text)` → `Vec<LockChange>` (`kind`, `name`, `from`, `to`) |
@@ -303,6 +305,19 @@ different commands:
   only exists when building for WebAssembly. `cargo audit` reads the
   lockfile the same way and reports the same set.
 
+### Search and READMEs
+
+- Search is the crates.io Web API (`/api/v1/crates?q=`), which needs a
+  `User-Agent`: without one the answer is HTTP 403.
+- It pages with an opaque `seek` token. Each answer carries the whole query
+  string for the next page, which `next_search_url` appends after checking
+  that it is a query string and nothing else.
+- A result's version is the newest stable one, falling back to the newest
+  pre-release for a crate that has published nothing else. A crate with
+  every version yanked is left out.
+- The README request is answered with a redirect to `static.crates.io`, and
+  the body is rendered HTML, not Markdown.
+
 ### Adding, removing and updating
 
 The crate builds the command lines; the host runs them. Checked with Cargo
@@ -359,6 +374,7 @@ that pins a different one. An installed build is not affected.
 | `src/index.rs` | Sparse-index paths and parsing |
 | `src/outdated.rs` | In-range and out-of-range updates, minimum Rust version, version picker |
 | `src/advisories.rs` | OSV batch requests, advisory records, CVSS scoring, merging into findings |
+| `src/search.rs` | crates.io search URLs and answers, the README URL |
 | `src/actions.rs` | `cargo add`/`remove`/`update` command lines, dry-run output, manifest side effects |
 | `src/path_env.rs` | PATH enrichment on Windows, as in the other backends |
 | `examples/list.rs` | Lists a crate's dependencies |

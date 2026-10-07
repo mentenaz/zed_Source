@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use cargo_backend::{
     AdvisoryRecord, DependencyList, Finding, IndexVersion, LockedPackage, PackageAdvisories,
-    UpdateTarget, advisory_ids, advisory_url, index_url, osv_batches, parse_advisory, parse_index,
+    SearchPage, UpdateTarget, advisory_ids, advisory_url, index_url, osv_batches, parse_advisory,
+    parse_index, parse_search, readme_url,
 };
 use futures::{AsyncReadExt as _, StreamExt as _, stream};
 use gpui::{App, BorrowAppContext as _, Global};
@@ -204,6 +205,22 @@ async fn fetch_text(client: &Arc<dyn HttpClient>, url: &str) -> Result<String, S
 
 async fn post_json(client: &Arc<dyn HttpClient>, url: &str, body: String) -> Result<String, String> {
     read_body(client.post_json(url, body.into()).await).await
+}
+
+/// Fetches one page of crates.io search results from a URL built by
+/// `cargo_backend::search_url` or `next_search_url`.
+pub async fn fetch_search(client: &Arc<dyn HttpClient>, url: &str) -> Result<SearchPage, String> {
+    parse_search(&fetch_text(client, url).await?)
+}
+
+/// Fetches a crate's README as crates.io serves it: rendered HTML, reached
+/// through a redirect to another host (which `fetch_text` follows).
+pub async fn fetch_readme(
+    client: &Arc<dyn HttpClient>,
+    name: &str,
+    version: &str,
+) -> Result<String, String> {
+    fetch_text(client, &readme_url(name, version)?).await
 }
 
 /// Looks each package up in the crates.io sparse index, several at a time.

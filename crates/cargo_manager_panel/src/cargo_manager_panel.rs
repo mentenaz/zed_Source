@@ -1,7 +1,7 @@
 //! Cargo manager — the workspace tab opened from the Rust panel's "Package
 //! Manager" quick action, for one crate's crates.io dependencies: what is
 //! installed, what is behind the registry, which advisories apply, and
-//! removing, updating and re-versioning them through Cargo.
+//! adding, removing, updating and re-versioning them through Cargo.
 //!
 //! Not a Forge port: written for this tree from
 //! `docs/Rust_Manager_Design_Note.md`, in the shape of the other manager
@@ -35,7 +35,7 @@ use std::time::Instant;
 use cargo_backend::{
     CrateInfo, Declaration, DependencyKind, DependencyList, FindingCounts, ListedDependency,
     LockChange, LockChangeKind, LockedPackage, Lockfile, Manifest, RemoveEffect, UpdateSpec,
-    add_args, command_line, declaration, direct_dependencies, has_lockfile, is_cargo_project,
+    command_line, declaration, direct_dependencies, has_lockfile, is_cargo_project,
     load_workspace, merge_findings, query_cargo, query_rustc, read_lockfile,
     read_member_manifests, read_root_manifest, remove_args, remove_effect, update_args,
     update_dry_run,
@@ -57,11 +57,13 @@ use gpui_component::{
 use project::Project;
 use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::{check_package_name, check_version};
+use search::{Readme, SearchState, add_command};
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 
 mod details;
 mod pages;
 pub mod registry;
+mod search;
 
 use registry::{
     AdvisoryRecords, AdvisoryState, IndexCache, OutdatedRow, OutdatedState, ScanResult,
@@ -119,7 +121,7 @@ pub fn open(
 
     let project = workspace.project().clone();
     let handle = workspace.weak_handle();
-    let panel = cx.new(|cx| CargoManagerPanel::new(root, crate_name, handle, project, cx));
+    let panel = cx.new(|cx| CargoManagerPanel::new(root, crate_name, handle, project, window, cx));
     workspace.add_item_to_active_pane(Box::new(panel.clone()), None, true, window, cx);
     panel
 }
@@ -198,10 +200,7 @@ fn change_version_command(
     member: &str,
     kind: DependencyKind,
 ) -> Result<String, String> {
-    check_package_name(name)?;
-    check_package_name(member)?;
-    check_version(version)?;
-    Ok(command_line(&add_args(name, Some(version), member, kind)?))
+    add_command(name, Some(version), member, kind)
 }
 
 /// `cargo update a@1.0.0 b@2.1.0`. `Ok(None)` with nothing to update: there
@@ -327,6 +326,9 @@ pub struct CargoManagerPanel {
     selected: Option<String>,
     /// The details pane's "compatible versions only" filter.
     compatible_only: bool,
+    /// The README the details pane is showing in place of the details.
+    readme: Readme,
+    search: SearchState,
 
     /// Label of the Cargo command streaming in the Script Runner.
     running_action: Option<String>,
@@ -342,6 +344,8 @@ pub struct CargoManagerPanel {
     outdated_task: Option<Task<()>>,
     advisory_task: Option<Task<()>>,
     confirm_task: Option<Task<()>>,
+    details_task: Option<Task<()>>,
+    readme_task: Option<Task<()>>,
 
     pages: pages::PageViews,
 }
@@ -352,6 +356,7 @@ impl CargoManagerPanel {
         crate_name: Option<String>,
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Reload when a manifest or the lockfile changes on disk, however it
@@ -374,6 +379,7 @@ impl CargoManagerPanel {
         let scan_subscription =
             cx.observe_global::<SharedScans>(|this: &mut Self, cx| this.adopt_shared_scan(cx));
 
+        let search = SearchState::new(window, cx);
         let pages = pages::PageViews::new(cx.weak_entity(), cx);
         let mut panel = CargoManagerPanel {
             focus_handle: cx.focus_handle(),
@@ -397,6 +403,8 @@ impl CargoManagerPanel {
             advisory_records: AdvisoryRecords::new(),
             selected: None,
             compatible_only: true,
+            readme: Readme::Closed,
+            search,
             running_action: None,
             checking: None,
             error: None,
@@ -405,6 +413,8 @@ impl CargoManagerPanel {
             outdated_task: None,
             advisory_task: None,
             confirm_task: None,
+            details_task: None,
+            readme_task: None,
             pages,
         };
         panel.detect_toolchain(cx);
@@ -586,11 +596,9 @@ impl CargoManagerPanel {
             .map(|krate| direct_dependencies(krate, self.lockfile.as_ref()))
             .unwrap_or_default();
         // The details pane follows a dependency, and it may be gone now.
-        if self
-            .selected
-            .as_deref()
-            .is_some_and(|package| self.listed(package).is_none())
-        {
+        if self.selected.as_deref().is_some_and(|package| {
+            self.listed(package).is_none() && self.search.result(package).is_none()
+        }) {
             self.selected = None;
         }
 
@@ -705,18 +713,6 @@ impl CargoManagerPanel {
             })
             .ok();
         }));
-    }
-
-    // ── Details pane ──
-
-    fn open_details(&mut self, package: String, cx: &mut Context<Self>) {
-        self.selected = Some(package);
-        cx.notify();
-    }
-
-    fn close_details(&mut self, cx: &mut Context<Self>) {
-        self.selected = None;
-        cx.notify();
     }
 
     // ── Actions ──
@@ -1036,12 +1032,12 @@ impl SerializableItem for CargoManagerPanel {
         workspace: WeakEntity<Workspace>,
         _workspace_id: WorkspaceId,
         _item_id: ItemId,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         let root = first_worktree_root(&project, cx);
         Task::ready(Ok(
-            cx.new(|cx| CargoManagerPanel::new(root, None, workspace, project, cx))
+            cx.new(|cx| CargoManagerPanel::new(root, None, workspace, project, window, cx))
         ))
     }
 

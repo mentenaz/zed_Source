@@ -1,5 +1,5 @@
-//! The `SettingPage`s of the Cargo manager tab: General, Installed, Updates
-//! and Vulnerabilities.
+//! The `SettingPage`s of the Cargo manager tab: General, Search, Installed,
+//! Updates and Vulnerabilities. (The Search page's view is in `search.rs`.)
 //!
 //! Each page is a *view shell*, as in the other manager tabs: a cheap
 //! `SettingPage` whose body is a single `SettingItem::render` embedding a
@@ -31,6 +31,7 @@ use gpui_component::{
 };
 
 use crate::registry::{AdvisoryState, OutdatedRow, OutdatedState};
+use crate::search::SearchView;
 use crate::{
     ActSelectedPackage, CargoManagerPanel, OpenSelectedPackage, SelectNextPackage,
     SelectPrevPackage,
@@ -68,6 +69,7 @@ fn step_selected(selected: Option<usize>, len: usize, forward: bool) -> Option<u
 /// The page views created alongside the panel.
 pub(super) struct PageViews {
     general: Entity<GeneralPage>,
+    search: Entity<SearchView>,
     installed: Entity<ListPage>,
     updates: Entity<ListPage>,
     advisories: Entity<ListPage>,
@@ -86,6 +88,9 @@ impl PageViews {
         };
         PageViews {
             general: cx.new(|_| GeneralPage {
+                panel: panel.clone(),
+            }),
+            search: cx.new(|_| SearchView {
                 panel: panel.clone(),
             }),
             installed: list(ListKind::Installed, cx),
@@ -118,6 +123,15 @@ pub(super) fn build_all(panel: &CargoManagerPanel, pages: &PageViews) -> Vec<Set
                     .title("Crate")
                     .description("Pick another crate in the Rust panel, then open its Package Manager.")
                     .item(embed_view(pages.general.clone())),
+            ),
+        SettingPage::new("Search")
+            .resettable(false)
+            .icon(Icon::new(IconName::Search))
+            .description("Find a crate on crates.io and add it to this crate.")
+            .group(
+                SettingGroup::new()
+                    .title("crates.io")
+                    .item(embed_view(pages.search.clone())),
             ),
         SettingPage::new("Installed")
             .resettable(false)

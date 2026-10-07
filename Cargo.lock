@@ -2913,6 +2913,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.9.8",
+ "urlencoding",
  "windows-registry 0.6.1",
 ]
 
