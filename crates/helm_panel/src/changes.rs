@@ -316,13 +316,13 @@ impl HelmPanel {
         match action {
             HelmAction::CreateRepo { .. } => {
                 if let Some(repo) = repo {
-                    self.repos.push(repo.clone());
+                    self.repos.items.push(repo.clone());
                     self.select_repo(repo, cx);
                 }
             }
             HelmAction::EditRepo { .. } => {
                 if let Some(updated) = repo {
-                    if let Some(existing) = self.repos.iter_mut().find(|r| r.id == updated.id) {
+                    if let Some(existing) = self.repos.items.iter_mut().find(|r| r.id == updated.id) {
                         *existing = updated.clone();
                     }
                     self.selected_repo = Some(updated);

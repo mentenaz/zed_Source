@@ -17,10 +17,10 @@ impl HelmPanel {
     }
 
     pub(super) fn load_repos(&mut self, owner: String, cx: &mut Context<Self>) {
-        self.load_with(
+        self.load_section_with(
             cx,
+            |this| &mut this.repos,
             |gh_state| async move { gh_get_repos(owner, &gh_state).await },
-            |this, repos| this.repos = repos,
         );
     }
 
@@ -186,7 +186,7 @@ impl HelmPanel {
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
 
-        if self.load_state == LoadState::Loading {
+        if self.repos.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -207,7 +207,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.repos.state == LoadState::Error {
             let owner = self
                 .selected_org
                 .clone()
@@ -232,7 +232,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.repos.is_empty() {
+        if self.repos.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -249,9 +249,10 @@ impl HelmPanel {
 
         let query = self.repo_search.read(cx).value().trim().to_lowercase();
         let filtered: Vec<Repo> = if query.is_empty() {
-            self.repos.clone()
+            self.repos.items.clone()
         } else {
             self.repos
+                .items
                 .iter()
                 .filter(|r| r.name.to_lowercase().contains(&query))
                 .cloned()
@@ -275,9 +276,9 @@ impl HelmPanel {
                 .into_any_element()
         } else {
             let len = filtered.len();
-            let cursor = self.repo_list_cursor;
+            let cursor = self.repos.cursor;
             // Captured for `OpenSelectedRow` below rather than re-reading
-            // `self.repos`: `repo_list_cursor` indexes this filtered order
+            // `self.repos`: `repos.cursor` indexes this filtered order
             // (per its own doc comment), and re-filtering `self.repos` by a
             // *stale* `self.repo_search` value inside the action handler —
             // run on a later keypress, against whatever the search box says
@@ -285,22 +286,22 @@ impl HelmPanel {
             let filtered_for_open = filtered.clone();
             v_flex()
                 .id("helm-repo-list")
-                .track_focus(&self.repo_list_focus)
+                .track_focus(&self.repos.focus)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    window.focus(&this.repo_list_focus, cx);
+                    window.focus(&this.repos.focus, cx);
                 }))
                 .key_context("HelmRowList")
                 .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                    this.repo_list_cursor = step_selected(this.repo_list_cursor, len, true);
+                    this.repos.cursor = step_selected(this.repos.cursor, len, true);
                     cx.notify();
                 }))
                 .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                    this.repo_list_cursor = step_selected(this.repo_list_cursor, len, false);
+                    this.repos.cursor = step_selected(this.repos.cursor, len, false);
                     cx.notify();
                 }))
                 .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
                     let Some(repo) =
-                        this.repo_list_cursor.and_then(|ix| filtered_for_open.get(ix)).cloned()
+                        this.repos.cursor.and_then(|ix| filtered_for_open.get(ix)).cloned()
                     else {
                         return;
                     };
@@ -325,7 +326,7 @@ impl HelmPanel {
                                 )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.repo_list_cursor = Some(ix);
+                            this.repos.cursor = Some(ix);
                             this.select_repo(click_repo.clone(), cx)
                         }))
                 }))

@@ -184,14 +184,12 @@ pub struct HelmPanel {
     profile_menu_focus: FocusHandle,
 
     // Repos
-    repos: Vec<Repo>,
+    repos: Section<Repo>,
     repo_search: Entity<InputState>,
     /// Row `up`/`down`/`enter` act on, within the filtered repo list
     /// `render_repo_list` computes from `repos` + `repo_search` — an index
     /// into that filtered order, not into `repos` itself, since the two can
     /// disagree once a search narrows the list.
-    repo_list_cursor: Option<usize>,
-    repo_list_focus: FocusHandle,
 
     /// The repo the user drilled into from `RepoList`. Cleared whenever
     /// `set_screen` lands anywhere but `RepoDetail`.
@@ -329,10 +327,8 @@ impl HelmPanel {
                 org_detail: None,
                 profile_menu_cursor: None,
                 profile_menu_focus: cx.focus_handle(),
-                repos: Vec::new(),
+                repos: Section::new(cx),
                 repo_search,
-                repo_list_cursor: None,
-                repo_list_focus: cx.focus_handle(),
                 selected_repo: None,
                 clone_url_copied: false,
                 cloning: false,

@@ -57,7 +57,9 @@ impl<T> SectionData<T> {
         self.items.get(self.cursor?)
     }
 
-    fn begin(&mut self) {
+    /// Marks a load as started. [`HelmPanel::load_section`] calls this; a
+    /// loader that fills several sections from one request calls it itself.
+    pub(super) fn begin(&mut self) {
         self.state = LoadState::Loading;
         self.error.clear();
     }
@@ -65,7 +67,7 @@ impl<T> SectionData<T> {
     /// Stores a finished load. A failure keeps the rows already shown: the
     /// screen says the load failed, and the old rows are not passed off as
     /// the answer because the state is `Error`.
-    fn finish(&mut self, result: Result<Vec<T>, String>) {
+    pub(super) fn finish(&mut self, result: Result<Vec<T>, String>) {
         match result {
             Ok(items) => {
                 self.items = items;
@@ -108,12 +110,36 @@ impl<T> DerefMut for Section<T> {
 }
 
 impl HelmPanel {
-    /// Loads one section's rows for the repository the user drilled into.
-    /// Does nothing when no repository is selected.
+    /// Loads one section's rows.
     ///
     /// `section` picks the section out of the panel. It is called once
     /// before the request and once after, so it is a plain function, not
     /// a closure that captures anything.
+    pub(super) fn load_section_with<T, Fut>(
+        &mut self,
+        cx: &mut Context<Self>,
+        section: fn(&mut Self) -> &mut Section<T>,
+        fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
+    ) where
+        T: Send + 'static,
+        Fut: Future<Output = Result<Vec<T>, String>> + Send + 'static,
+    {
+        section(self).begin();
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(fetch(gh_state)).await;
+            this.update(cx, |this, cx| {
+                section(this).finish(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::load_section_with`] for rows that belong to the repository
+    /// the user drilled into. Does nothing when no repository is selected.
     pub(super) fn load_section<T, Fut>(
         &mut self,
         cx: &mut Context<Self>,
@@ -126,18 +152,7 @@ impl HelmPanel {
         let Some(repo) = self.selected_repo.clone() else {
             return;
         };
-        section(self).begin();
-        cx.notify();
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result = on_tokio(fetch(repo, gh_state)).await;
-            this.update(cx, |this, cx| {
-                section(this).finish(result);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.load_section_with(cx, section, move |gh_state| fetch(repo, gh_state));
     }
 }
 
