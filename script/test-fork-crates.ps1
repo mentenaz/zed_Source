@@ -2,7 +2,12 @@
 #
 # Upstream's own CI (`.github/workflows/run_tests.yml`) only runs for the
 # zed-industries organisation, so nothing runs these automatically here.
-# Run this before pushing a change to any of the fork's panels or backends.
+# The pre-push hook in `script/git-hooks` runs this before every push and
+# stops the push if a test fails. Turn the hook on once per clone:
+#
+#   git config core.hooksPath script/git-hooks
+#
+# It can also be run by hand:
 #
 #   script/test-fork-crates.ps1                    # the fork-authored crates
 #   script/test-fork-crates.ps1 -IncludeVendored   # also gpui_component & co.

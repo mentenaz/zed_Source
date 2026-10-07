@@ -1,0 +1,54 @@
+#!/bin/sh
+# Runs the fork's unit tests before a push, and stops the push if any fail.
+#
+# Upstream's CI (`.github/workflows/run_tests.yml`) only runs for the
+# zed-industries organisation, so without this nothing tests the fork's own
+# crates before they leave this machine. See `script/test-fork-crates.ps1`
+# for what is run: the crates this fork adds, not upstream Zed's.
+#
+# Turn it on once per clone:
+#
+#     git config core.hooksPath script/git-hooks
+#
+# To push without running the tests (a docs-only change, say):
+#
+#     SKIP_FORK_TESTS=1 git push          # sh, Git Bash
+#     $env:SKIP_FORK_TESTS = 1; git push  # PowerShell
+#
+# `git push --no-verify` skips it too, along with every other hook.
+
+if [ "$SKIP_FORK_TESTS" = "1" ]; then
+    echo "pre-push: SKIP_FORK_TESTS=1, not running the fork's tests."
+    exit 0
+fi
+
+# Git lists what is being pushed on stdin, one ref per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# A deleted branch has an all-zero local sha. If the push only deletes
+# refs, there is no code to test.
+pushes_code=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    case "$local_sha" in
+        *[!0]*) pushes_code=1 ;;
+    esac
+done
+if [ "$pushes_code" = "0" ]; then
+    exit 0
+fi
+
+if ! command -v pwsh >/dev/null 2>&1; then
+    echo "pre-push: pwsh (PowerShell 7) was not found, so the fork's tests cannot run." >&2
+    echo "pre-push: install it, or push with SKIP_FORK_TESTS=1 to go ahead without them." >&2
+    exit 1
+fi
+
+root=$(git rev-parse --show-toplevel) || exit 1
+echo "pre-push: running the fork's tests (script/test-fork-crates.ps1)."
+
+# The tests need no input, and stdin still belongs to git here.
+pwsh -NoProfile -File "$root/script/test-fork-crates.ps1" </dev/null
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "pre-push: tests failed, so nothing was pushed." >&2
+    exit "$status"
+fi
