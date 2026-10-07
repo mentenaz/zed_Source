@@ -94,6 +94,14 @@ Phase A moves the lines; this is the phase that removes them.
 
 **Load state per section.** Today there is one `load_state` and one `error_msg` for the whole panel, so two loads in flight share one spinner and one error. Each section gets its own. This is the one deliberate behaviour change in the phase, and it is a fix.
 
+### Progress (7 October 2026)
+
+- **Loaders: done.** `src/loading.rs` has `load_with` and `load_for_repo`; fifteen loaders use them (456 lines became 173).
+- **State and load state per section: done for every list.** `src/section.rs` adds `Section<T>`: rows, load state, last error, cursor and focus handle together. Thirteen lists are on it: issues, pull requests, releases, packages, tags, branches, collaborators, commits, workflow runs, deployments, the two security alert lists, repositories, invitations and organisations. Each replaced three loose fields on `HelmPanel`, and the ones that load from GitHub no longer share the panel-wide spinner and error.
+- **Still on the panel-wide state, on purpose:** sign-in, and the three screens that show one thing, not a list (organisation detail, a user's profile, traffic).
+- **List screens: not started.** The repeated header, spinner, error, empty and row scaffolding is still written out in each render function. `activity_list_states` already does part of this for four screens and is the starting point.
+- **Checked by:** build and the crate's tests (13, five of them new for `Section`) after every commit. **Not yet tried in the running app.**
+
 ### Done when
 
 - No section file is over about 500 lines, and the crate is noticeably smaller than phase A left it. The target is about 5,000 lines of UI in total, down from 7,989; that number is an estimate until the first two screens have been converted.
