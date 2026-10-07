@@ -108,10 +108,12 @@ under the list. `cargo audit` behaves the same way.
 
 ### Read-only accessors
 
-For a future Dashboard section: `rustc_version()`, `crate_count()`,
-`selected_crate_name()`, `outdated_count()` and `vulnerability_count()`. The
-last returns `None` until a scan has finished, so "not scanned" cannot be
-read as zero.
+Read by the Dashboard's Rust row and card: `rustc_version()`,
+`crate_count()`, `selected_crate_name()`, `outdated_count()`,
+`vulnerability_count()`, `advisory_findings()`, `advisories_scanning()` and
+`advisory_scan_error()`. The count and the findings are `None` until a scan
+has finished, so "not scanned" cannot be read as zero. `rescan_advisories(cx)`
+is what the Dashboard's **Scan all** calls.
 
 ## Where the logic lives
 

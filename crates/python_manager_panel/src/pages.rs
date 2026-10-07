@@ -6,7 +6,7 @@
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, white,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon,
@@ -959,12 +959,30 @@ fn colored_count_badge(count: usize, loading: bool, color: Hsla) -> AnyElement {
                     .items_center()
                     .justify_center()
                     .text_xs()
-                    .text_color(white())
+                    .text_color(badge_text(color))
                     .child(count.to_string())
             })
             .when(count == 0 && loading, |this| this.child(Spinner::new().with_size(Size::XSmall))),
     )
     .into_any_element()
+}
+
+/// The text colour for a count badge filled with `fill`: black on a light
+/// fill, white on a dark one.
+///
+/// The badge used to be white on whatever the theme's accent was, which is
+/// unreadable in themes with a light accent (white on lilac, say). Choosing
+/// by the fill's brightness keeps the number legible in any theme without
+/// relying on the theme to define a matching foreground.
+fn badge_text(fill: Hsla) -> Hsla {
+    let rgb = fill.to_rgb();
+    // How bright the colour looks, green counting most and blue least.
+    let brightness = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+    if brightness > 0.55 {
+        gpui::black()
+    } else {
+        gpui::white()
+    }
 }
 
 #[cfg(test)]
@@ -994,5 +1012,17 @@ mod tests {
         // A selection left over from a longer list still lands in range.
         assert!(step_selected(Some(9), 3, true).is_some_and(|ix| ix < 3));
         assert!(step_selected(Some(9), 3, false).is_some_and(|ix| ix < 3));
+    }
+
+    #[test]
+    fn badge_text_contrasts_with_its_fill() {
+        // Light fills take dark text: a lilac accent, a yellow warning.
+        assert_eq!(badge_text(gpui::rgb(0xc4b5fd).into()), gpui::black());
+        assert_eq!(badge_text(gpui::rgb(0xeab308).into()), gpui::black());
+        assert_eq!(badge_text(gpui::white()), gpui::black());
+        // Dark fills take light text: a deep blue accent, a red danger.
+        assert_eq!(badge_text(gpui::rgb(0x1d4ed8).into()), gpui::white());
+        assert_eq!(badge_text(gpui::rgb(0xb91c1c).into()), gpui::white());
+        assert_eq!(badge_text(gpui::black()), gpui::white());
     }
 }

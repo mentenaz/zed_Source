@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+cargo_backend.workspace = true
 cockpit_panel.workspace = true
 dotnet_backend.workspace = true
 dotnet_panel.workspace = true
@@ -23,5 +24,6 @@ npm_backend.workspace = true
 project.workspace = true
 python_backend.workspace = true
 python_panel.workspace = true
+rust_panel.workspace = true
 ui.workspace = true
 workspace.workspace = true

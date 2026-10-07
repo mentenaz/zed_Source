@@ -17,7 +17,7 @@ Rust is the language used every day in this fork, so this panel is a daily-drive
 - Publishing crates, or alternative registries
 - Workspace-wide dependency view (per-crate first)
 - Path and git dependencies: hidden from every list in v1 (decision 10). No tagging, updating or vulnerability checking for them.
-- Error counts or diagnostics on the Dashboard (the Dashboard has no diagnostics code today)
+- Error counts or diagnostics on the Dashboard (the Dashboard has no diagnostics code today). The Dashboard does show Rust in its Runtimes and Security sections, added 7 October 2026, for the crate selected in the Rust panel.
 - A "reload language server" button
 
 ## 3. The rule that shapes the design

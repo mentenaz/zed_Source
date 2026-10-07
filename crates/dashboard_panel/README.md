@@ -1,11 +1,12 @@
 # dashboard_panel
 
-A workspace tab that summarises the open project across the Node, Python and
-.NET ecosystems, plus git status and live system charts.
+A workspace tab that summarises the open project across the Node, Python,
+.NET and Rust ecosystems, plus git status and live system charts.
 
 ## Why it exists
 
-Each runtime panel (`node_panel`, `python_panel`, `dotnet_panel`) only shows
+Each runtime panel (`node_panel`, `python_panel`, `dotnet_panel`,
+`rust_panel`) only shows
 its own ecosystem. The Dashboard is the one place that answers "what is the
 state of this whole project?" — which runtimes are installed, how many
 packages are outdated or vulnerable, and where the repository stands.
@@ -22,10 +23,18 @@ is already open in the active pane it is re-activated rather than duplicated.
 
 The tab shows:
 
-- **Runtimes** — detected Node, Python and .NET versions with project counts.
+- **Runtimes** — detected Node, Python, .NET and Rust versions with project
+  (for Rust, crate) counts, and how many dependencies are outdated or
+  vulnerable.
 - **Security** — one row per finding for each ecosystem (severity, package,
   fixed-in version, advisory link). PyPI advisories expand in place.
   **Scan all** re-runs each panel's own vulnerability scan.
+  - The Rust card covers the crate selected in the Rust panel, not the whole
+    workspace, and names it. Its scan is on demand, so until one has run the
+    card says "Not scanned yet" and the Runtimes row carries a "not scanned"
+    tag instead of showing nothing: an unscanned crate must not look clean.
+  - Rust findings that are not vulnerabilities (unsound, unmaintained) are
+    listed after them and tagged with their kind rather than a severity.
 - **Git** — repository name, branch, changed-file count and ahead/behind for
   the active project.
 - **System** — the same live charts as the Cockpit panel.
@@ -46,9 +55,9 @@ does not stop the tab from opening.
 
 ### Dependencies on other fork crates
 
-`cockpit_panel`, `node_panel`, `python_panel`, `dotnet_panel` for the data
-they already hold, and `npm_backend`, `python_backend`, `dotnet_backend` for
-the finding types. Git status comes straight from
+`cockpit_panel`, `node_panel`, `python_panel`, `dotnet_panel`, `rust_panel`
+for the data they already hold, and `npm_backend`, `python_backend`,
+`dotnet_backend`, `cargo_backend` for the finding types. Git status comes straight from
 `project::git_store::Repository`.
 
 ## Not included

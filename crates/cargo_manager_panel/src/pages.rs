@@ -27,7 +27,7 @@ use gpui_component::{
     setting::{SettingGroup, SettingItem, SettingPage},
     spinner::Spinner,
     tag::Tag,
-    v_flex, white,
+    v_flex,
 };
 
 use crate::registry::{AdvisoryState, OutdatedRow, OutdatedState};
@@ -194,7 +194,7 @@ fn count_badge(count: Option<usize>, loading: bool, color: Hsla) -> AnyElement {
                         .items_center()
                         .justify_center()
                         .text_xs()
-                        .text_color(white())
+                        .text_color(badge_text(color))
                         .child(count.to_string())
                 })
                 .when(count.is_none() && loading, |this| {
@@ -246,15 +246,17 @@ pub(super) fn rust_tag(rust: &RustCompat) -> Option<Tag> {
 fn severity_tag(finding: &Finding) -> Option<Tag> {
     let tag = match (finding.severity, finding.kind) {
         (Some(Severity::Critical), _) => Tag::danger().child("critical"),
-        (Some(Severity::High), _) => Tag::danger().outline().child("high"),
-        (Some(Severity::Moderate), _) => Tag::warning().child("moderate"),
-        (Some(Severity::Low), _) => Tag::info().outline().child("low"),
+        (Some(Severity::High), _) => Tag::warning().child("high"),
+        (Some(Severity::Moderate), _) => Tag::info().child("moderate"),
+        (Some(Severity::Low), _) => Tag::secondary().child("low"),
         // Unknown severity on a vulnerability is a warning, never neutral.
-        (None, FindingKind::Vulnerability) => Tag::warning().outline().child("unknown"),
+        (None, FindingKind::Vulnerability) => Tag::warning().child("unknown"),
         // A notice without a severity simply has none.
         (None, _) => return None,
     };
-    Some(tag.xsmall())
+    // Outlined, like the Dashboard's: a filled tag's label is unreadable in
+    // themes where the fill and the text are close in colour.
+    Some(tag.xsmall().outline())
 }
 
 /// The summary line above the findings: each kind with its own count, so an
@@ -1013,6 +1015,24 @@ fn target_line(cx: &App, prefix: &str, target: &UpdateTarget) -> gpui::Div {
     line
 }
 
+/// The text colour for a count badge filled with `fill`: black on a light
+/// fill, white on a dark one.
+///
+/// The badge used to be white on whatever the theme's accent was, which is
+/// unreadable in themes with a light accent (white on lilac, say). Choosing
+/// by the fill's brightness keeps the number legible in any theme without
+/// relying on the theme to define a matching foreground.
+fn badge_text(fill: Hsla) -> Hsla {
+    let rgb = fill.to_rgb();
+    // How bright the colour looks, green counting most and blue least.
+    let brightness = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+    if brightness > 0.55 {
+        gpui::black()
+    } else {
+        gpui::white()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,5 +1080,17 @@ mod tests {
         };
         assert!(counts_line(one).starts_with("1 vulnerability "));
         assert!(counts_line(one).ends_with("1 other notice"));
+    }
+
+    #[test]
+    fn badge_text_contrasts_with_its_fill() {
+        // Light fills take dark text: a lilac accent, a yellow warning.
+        assert_eq!(badge_text(gpui::rgb(0xc4b5fd).into()), gpui::black());
+        assert_eq!(badge_text(gpui::rgb(0xeab308).into()), gpui::black());
+        assert_eq!(badge_text(gpui::white()), gpui::black());
+        // Dark fills take light text: a deep blue accent, a red danger.
+        assert_eq!(badge_text(gpui::rgb(0x1d4ed8).into()), gpui::white());
+        assert_eq!(badge_text(gpui::rgb(0xb91c1c).into()), gpui::white());
+        assert_eq!(badge_text(gpui::black()), gpui::white());
     }
 }

@@ -25,6 +25,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use cargo_backend::{Finding, FindingKind};
 use dotnet_backend::VulnerablePackage;
 use dotnet_panel::DotNetPanel;
 use git::repository::Branch;
@@ -48,6 +49,7 @@ use node_panel::NodePanel;
 use npm_backend::NpmAuditVuln;
 use python_backend::PyPiVulnerability;
 use python_panel::PythonPanel;
+use rust_panel::RustPanel;
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 
 /// Opens (or activates) the Dashboard tab. Looks up the sibling ecosystem
@@ -76,6 +78,7 @@ pub fn open(
     let node_panel = workspace.panel::<NodePanel>(cx);
     let python_panel = workspace.panel::<PythonPanel>(cx);
     let dotnet_panel = workspace.panel::<DotNetPanel>(cx);
+    let rust_panel = workspace.panel::<RustPanel>(cx);
     // Mirror the docked Cockpit panel for the "System" section: same live
     // charts, but no header "Dashboard" button (redundant inside the
     // Dashboard) and no second `sysinfo` poller — see `CockpitPanel::new_embedded`.
@@ -89,6 +92,7 @@ pub fn open(
             node_panel,
             python_panel,
             dotnet_panel,
+            rust_panel,
             cockpit_panel,
             cx,
         )
@@ -117,6 +121,7 @@ pub struct DashboardPanel {
     node_panel: Option<Entity<NodePanel>>,
     python_panel: Option<Entity<PythonPanel>>,
     dotnet_panel: Option<Entity<DotNetPanel>>,
+    rust_panel: Option<Entity<RustPanel>>,
     cockpit_panel: Option<Entity<cockpit_panel::CockpitPanel>>,
     /// PyPI package ids currently expanded in the Security section.
     expanded: HashSet<String>,
@@ -128,6 +133,7 @@ impl DashboardPanel {
         node_panel: Option<Entity<NodePanel>>,
         python_panel: Option<Entity<PythonPanel>>,
         dotnet_panel: Option<Entity<DotNetPanel>>,
+        rust_panel: Option<Entity<RustPanel>>,
         cockpit_panel: Option<Entity<cockpit_panel::CockpitPanel>>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -142,6 +148,9 @@ impl DashboardPanel {
         if let Some(panel) = &dotnet_panel {
             cx.observe(panel, |_, _, cx| cx.notify()).detach();
         }
+        if let Some(panel) = &rust_panel {
+            cx.observe(panel, |_, _, cx| cx.notify()).detach();
+        }
         if let Some(panel) = &cockpit_panel {
             cx.observe(panel, |_, _, cx| cx.notify()).detach();
         }
@@ -152,6 +161,7 @@ impl DashboardPanel {
             node_panel,
             python_panel,
             dotnet_panel,
+            rust_panel,
             cockpit_panel,
             expanded: HashSet::new(),
         }
@@ -430,6 +440,74 @@ fn dotnet_finding_row(
 }
 
 /// A "scanning…" status row (spinner + text).
+/// The tag that leads a Rust finding's row. A vulnerability shows its
+/// severity, and "unknown" when it has none: an advisory exists, only its
+/// rating is missing. A notice shows its kind instead (unsound,
+/// unmaintained), because for a notice a missing severity is not unknown,
+/// there simply isn't one.
+fn rust_finding_label(finding: &Finding) -> &'static str {
+    match (finding.kind, finding.severity) {
+        (_, Some(severity)) => severity.label(),
+        (FindingKind::Vulnerability, None) => "unknown",
+        (kind, None) => kind.label(),
+    }
+}
+
+fn rust_finding_tag(finding: &Finding) -> Tag {
+    let label = rust_finding_label(finding);
+    match (finding.kind, finding.severity) {
+        (_, Some(_)) => severity_tag(label),
+        // Warning colour, never neutral: unknown must not rank below low.
+        (FindingKind::Vulnerability, None) => Tag::warning().xsmall().outline().child(label),
+        (_, None) => Tag::secondary().xsmall().outline().child(label),
+    }
+}
+
+/// A compact per-finding row for a Rust advisory: severity or kind, the
+/// package and locked version, the advisory id, fixed-in, and the summary
+/// beneath.
+fn rust_finding_row(theme: &gpui_component::Theme, finding: &Finding) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap_0p5()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(rust_finding_tag(finding))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family("Cascadia Mono")
+                        .text_xs()
+                        .text_color(theme.foreground)
+                        .child(format!(
+                            "{} {}  {}",
+                            finding.package, finding.version, finding.id
+                        )),
+                )
+                .when_some(finding.fixed_in.first(), |row, fixed| {
+                    row.child(
+                        Tag::success()
+                            .xsmall()
+                            .outline()
+                            .child(format!("fixed in {fixed}")),
+                    )
+                }),
+        )
+        .when_some(finding.summary.clone(), |body, summary| {
+            body.child(
+                div()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(summary),
+            )
+        })
+}
+
 fn scanning_row(theme: &gpui_component::Theme, message: impl Into<String>) -> impl IntoElement {
     h_flex()
         .gap_2()
@@ -522,36 +600,55 @@ impl DashboardPanel {
         rows = rows.child(self.runtime_row(
             theme,
             "Node",
+            "project",
             self.node_panel.as_ref().map(|p| p.read(cx)).map(|p| {
                 (
                     p.node_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    p.vulnerable_count(),
+                    Some(p.vulnerable_count()),
                 )
             }),
         ));
         rows = rows.child(self.runtime_row(
             theme,
             "Python",
+            "project",
             self.python_panel.as_ref().map(|p| p.read(cx)).map(|p| {
                 (
                     p.python_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    p.vulnerable_count(),
+                    Some(p.vulnerable_count()),
                 )
             }),
         ));
         rows = rows.child(self.runtime_row(
             theme,
             ".NET",
+            "project",
             self.dotnet_panel.as_ref().map(|p| p.read(cx)).map(|p| {
                 (
                     p.dotnet_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    p.vulnerable_count(),
+                    Some(p.vulnerable_count()),
+                )
+            }),
+        ));
+
+        rows = rows.child(self.runtime_row(
+            theme,
+            "Rust",
+            "crate",
+            self.rust_panel.as_ref().map(|p| p.read(cx)).map(|p| {
+                (
+                    p.rustc_version().map(str::to_string),
+                    p.crate_count(),
+                    p.outdated_count(),
+                    // `None` until a scan has finished: Rust's scan is on
+                    // demand, and "not scanned" must not read as zero.
+                    p.vulnerability_count(),
                 )
             }),
         ));
@@ -566,11 +663,15 @@ impl DashboardPanel {
         &self,
         theme: &gpui_component::Theme,
         label: &'static str,
-        data: Option<(Option<String>, usize, usize, usize)>,
+        unit: &'static str,
+        data: Option<(Option<String>, usize, usize, Option<usize>)>,
     ) -> impl IntoElement {
+        // A vulnerable count of `None` means the ecosystem has not been
+        // scanned, which is shown as such rather than as nothing to report.
+        let not_scanned = matches!(&data, Some((Some(_), _, _, None)));
         let (version, projects, outdated, vulnerable) = match data {
             Some((version, projects, outdated, vulnerable)) => {
-                (version, projects, outdated, vulnerable)
+                (version, projects, outdated, vulnerable.unwrap_or(0))
             }
             None => (None, 0, 0, 0),
         };
@@ -596,7 +697,7 @@ impl DashboardPanel {
                     .child(version.unwrap_or_else(|| "not detected".to_string())),
             )
             .child(div().text_color(theme.muted_foreground).child(format!(
-                "{projects} project{}",
+                "{projects} {unit}{}",
                 if projects == 1 { "" } else { "s" }
             )))
             .when(outdated > 0, |row| {
@@ -614,6 +715,9 @@ impl DashboardPanel {
                         .text_color(theme.foreground)
                         .child(format!("{vulnerable} vulnerable")),
                 )
+            })
+            .when(not_scanned, |row| {
+                row.child(Tag::secondary().xsmall().outline().child("not scanned"))
             })
     }
 
@@ -641,6 +745,9 @@ impl DashboardPanel {
                 if let Some(panel) = &this.dotnet_panel {
                     panel.update(cx, |panel, cx| panel.rescan_vulnerabilities(cx));
                 }
+                if let Some(panel) = &this.rust_panel {
+                    panel.update(cx, |panel, cx| panel.rescan_advisories(cx));
+                }
             }));
 
         let body = v_flex()
@@ -649,7 +756,8 @@ impl DashboardPanel {
             .child(h_flex().w_full().justify_end().child(scan_all))
             .child(self.security_node_card(theme, cx))
             .child(self.security_python_card(theme, cx))
-            .child(self.security_dotnet_card(theme, cx));
+            .child(self.security_dotnet_card(theme, cx))
+            .child(self.security_rust_card(theme, cx));
 
         section(theme, "Security", body)
     }
@@ -931,6 +1039,58 @@ impl DashboardPanel {
         self.security_card(theme, ".NET", target, rows)
     }
 
+    /// The selected crate's advisories, as the Rust panel last scanned them.
+    /// Vulnerabilities come first; unsound and unmaintained notices follow
+    /// under their own kind, so an abandoned crate is not shown as a
+    /// security hole.
+    fn security_rust_card(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let mut rows = v_flex().w_full().gap_1();
+
+        let target = match self.rust_panel.as_ref().map(|p| p.read(cx)) {
+            Some(panel) => {
+                if panel.advisories_scanning() {
+                    rows = rows.child(scanning_row(theme, "Scanning the selected crate\u{2026}"));
+                } else if let Some(error) = panel.advisory_scan_error() {
+                    rows = rows.child(scan_error_row(theme, error));
+                } else {
+                    match panel.advisory_findings() {
+                        Some([]) => {
+                            rows = rows.child(muted_row(theme, "No known advisories."));
+                        }
+                        Some(findings) => {
+                            for finding in findings {
+                                rows = rows.child(rust_finding_row(theme, finding));
+                            }
+                        }
+                        None => {
+                            rows = rows.child(muted_row(
+                                theme,
+                                "Not scanned yet \u{2014} press Scan all (Rust's scan is on-demand).",
+                            ));
+                        }
+                    }
+                }
+                match panel.selected_crate_name() {
+                    Some(name) => name.to_string(),
+                    None => "no crate selected".to_string(),
+                }
+            }
+            None => {
+                rows = rows.child(muted_row(
+                    theme,
+                    "The Rust panel isn't loaded in this workspace.",
+                ));
+                "n/a".to_string()
+            }
+        };
+
+        self.security_card(theme, "Rust", target, rows)
+    }
+
     fn render_git(&self, theme: &gpui_component::Theme, cx: &Context<Self>) -> impl IntoElement {
         let body = match self.git_summary(cx) {
             Some(git) => v_flex()
@@ -1031,6 +1191,44 @@ mod tests {
         assert_eq!(severity_level(""), SeverityLevel::Other);
         // Not trimmed: a padded value is not silently promoted.
         assert_eq!(severity_level(" high "), SeverityLevel::Other);
+    }
+
+    fn rust_finding(kind: FindingKind, severity: Option<cargo_backend::Severity>) -> Finding {
+        Finding {
+            package: "time".to_string(),
+            version: "0.1.43".to_string(),
+            id: "RUSTSEC-2020-0071".to_string(),
+            other_ids: Vec::new(),
+            kind,
+            severity,
+            summary: None,
+            fixed_in: Vec::new(),
+            url: String::new(),
+            details_missing: false,
+        }
+    }
+
+    #[test]
+    fn a_rust_finding_leads_with_its_severity_or_its_kind() {
+        use cargo_backend::Severity;
+        assert_eq!(
+            rust_finding_label(&rust_finding(FindingKind::Vulnerability, Some(Severity::High))),
+            "high"
+        );
+        // A vulnerability with no rating is "unknown", not blank.
+        assert_eq!(
+            rust_finding_label(&rust_finding(FindingKind::Vulnerability, None)),
+            "unknown"
+        );
+        // A notice with no rating has none: it shows what kind it is.
+        assert_eq!(
+            rust_finding_label(&rust_finding(FindingKind::Unmaintained, None)),
+            FindingKind::Unmaintained.label()
+        );
+        assert_eq!(
+            rust_finding_label(&rust_finding(FindingKind::Unsound, Some(Severity::Moderate))),
+            "moderate"
+        );
     }
 
     #[test]

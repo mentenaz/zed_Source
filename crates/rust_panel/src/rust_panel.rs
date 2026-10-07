@@ -322,6 +322,37 @@ impl RustPanel {
         }
     }
 
+    /// The selected crate's findings of every kind (vulnerabilities, then
+    /// unsound, unmaintained and other notices) — `None` until a scan has
+    /// finished.
+    pub fn advisory_findings(&self) -> Option<&[Finding]> {
+        match &self.advisories {
+            AdvisoryState::Done { findings, .. } => Some(findings),
+            _ => None,
+        }
+    }
+
+    /// Whether an advisory scan is running.
+    pub fn advisories_scanning(&self) -> bool {
+        matches!(self.advisories, AdvisoryState::Scanning)
+    }
+
+    /// Why the last advisory scan failed, if it did.
+    pub fn advisory_scan_error(&self) -> Option<&str> {
+        match &self.advisories {
+            AdvisoryState::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Scans the selected crate for advisories, as the panel's own Scan
+    /// button does. Does nothing while a scan is already running.
+    pub fn rescan_advisories(&mut self, cx: &mut Context<Self>) {
+        if !self.advisories_scanning() {
+            self.scan_advisories(cx);
+        }
+    }
+
     fn is_open(&self, key: &str) -> bool {
         *self.open.get(key).unwrap_or(&true)
     }
@@ -708,15 +739,17 @@ fn busy_line(cx: &Context<RustPanel>, text: impl Into<String>) -> gpui::Div {
 fn severity_tag(finding: &Finding) -> Option<Tag> {
     let tag = match (finding.severity, finding.kind) {
         (Some(Severity::Critical), _) => Tag::danger().child("critical"),
-        (Some(Severity::High), _) => Tag::danger().outline().child("high"),
-        (Some(Severity::Moderate), _) => Tag::warning().child("moderate"),
-        (Some(Severity::Low), _) => Tag::info().outline().child("low"),
+        (Some(Severity::High), _) => Tag::warning().child("high"),
+        (Some(Severity::Moderate), _) => Tag::info().child("moderate"),
+        (Some(Severity::Low), _) => Tag::secondary().child("low"),
         // Unknown severity on a vulnerability is a warning, never neutral.
-        (None, FindingKind::Vulnerability) => Tag::warning().outline().child("unknown"),
+        (None, FindingKind::Vulnerability) => Tag::warning().child("unknown"),
         // A notice without a severity simply has none.
         (None, _) => return None,
     };
-    Some(tag.xsmall())
+    // Outlined, like the Dashboard's: a filled tag's label is unreadable in
+    // themes where the fill and the text are close in colour.
+    Some(tag.xsmall().outline())
 }
 
 // ── Render ─────────────────────────────────────────────────────────────

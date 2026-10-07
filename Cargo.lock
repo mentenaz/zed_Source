@@ -4977,6 +4977,7 @@ name = "dashboard_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cargo_backend",
  "cockpit_panel",
  "dotnet_backend",
  "dotnet_panel",
@@ -4988,6 +4989,7 @@ dependencies = [
  "project",
  "python_backend",
  "python_panel",
+ "rust_panel",
  "ui",
  "workspace",
 ]
