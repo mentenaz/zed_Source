@@ -29,6 +29,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 # Cargo package names. Written by the fork, on top of the crates below.
 $forkCrates = @(
     'cargo_backend',
+    'cargo_manager_panel',
     'cockpit_panel',
     'dashboard_panel',
     'database_backend',

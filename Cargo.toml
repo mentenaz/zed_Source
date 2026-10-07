@@ -27,6 +27,7 @@ members = [
     "crates/call",
     "crates/call_hierarchy",
     "crates/cargo_backend",
+    "crates/cargo_manager_panel",
     "crates/channel",
     "crates/cli",
     "crates/client",
@@ -335,6 +336,7 @@ buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }
 call_hierarchy = { path = "crates/call_hierarchy" }
 cargo_backend = { path = "crates/cargo_backend" }
+cargo_manager_panel = { path = "crates/cargo_manager_panel" }
 channel = { path = "crates/channel" }
 cli = { path = "crates/cli", default-features = false }
 client = { path = "crates/client" }

@@ -5,8 +5,9 @@
 //! Not a Forge port: written for this tree from
 //! `docs/Rust_Manager_Design_Note.md`, in the shape of the other runtime
 //! panels (`dotnet_panel` is the closest sibling). All of the working-out
-//! lives in `cargo_backend`; this file is the dock panel, the HTTP requests
-//! that crate leaves to its host, and the wiring to the Script Runner.
+//! lives in `cargo_backend`; this file is the dock panel and the wiring to
+//! the Script Runner. The HTTP requests `cargo_backend` leaves to its host
+//! are shared with the manager tab, in `cargo_manager_panel::registry`.
 //!
 //! The rule from the design note that shapes this panel: **it never depends
 //! on rust-analyzer.** A Rust project is recognized by its `Cargo.toml` on
@@ -30,18 +31,20 @@
 //! line says how many were left out.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use cargo_backend::{
-    AdvisoryRecord, CrateInfo, DependencyKind, DependencyList, Finding, FindingCounts,
-    FindingKind, IndexVersion, LockedPackage, Lockfile, PackageAdvisories, RustCompat, Severity,
-    UpdateTarget, advisory_ids, advisory_url, direct_dependencies, has_lockfile, index_url,
-    is_cargo_project, load_workspace, merge_findings, osv_batches, parse_advisory, parse_index,
-    query_cargo, query_rustc, read_lockfile,
+    CrateInfo, DependencyKind, DependencyList, Finding, FindingCounts, FindingKind,
+    LockedPackage, Lockfile, RustCompat, Severity, UpdateTarget, direct_dependencies,
+    has_lockfile, is_cargo_project, load_workspace, merge_findings, query_cargo, query_rustc,
+    read_lockfile,
 };
-use futures::{AsyncReadExt as _, StreamExt as _, stream};
+use cargo_manager_panel::registry::{
+    AdvisoryRecords, AdvisoryState, IndexCache, OutdatedRow, OutdatedState, ScanResult,
+    SharedScans, fetch_index_entries, outdated_rows, publish_scan, run_advisory_scan, scan_key,
+    shared_scan, stale_names, store_index_entries,
+};
 use gpui::{
     Action, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -58,7 +61,6 @@ use gpui_component::{
     spinner::Spinner,
     tag::Tag,
 };
-use http_client::{AsyncBody, HttpClient};
 use project::Project;
 use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::check_package_name;
@@ -66,12 +68,6 @@ use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
-
-/// How long a crate's index entry is reused before asking again — the
-/// `max-age` the sparse index itself sends.
-const INDEX_CACHE_LIFETIME: Duration = Duration::from_secs(600);
-/// Requests in flight at once, for index lookups and advisory details alike.
-const REQUEST_CONCURRENCY: usize = 8;
 
 actions!(
     rust_panel,
@@ -124,57 +120,7 @@ fn is_manifest_file(file_name: &str) -> bool {
     file_name == cargo_backend::MANIFEST_FILE || file_name == cargo_backend::LOCK_FILE
 }
 
-/// One row of the Outdated section.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OutdatedRow {
-    name: String,
-    /// The locked version, or `None` when the lockfile doesn't have it.
-    locked: Option<String>,
-    locked_yanked: bool,
-    /// Newest version the declared requirement allows (an upper bound: see
-    /// `cargo_backend::outdated`).
-    in_range: Option<UpdateTarget>,
-    /// Newest version the requirement excludes.
-    out_of_range: Option<UpdateTarget>,
-}
-
-/// The dependencies that are behind the registry, or locked to a yanked
-/// version, once each. A package declared twice (normal and dev, or under
-/// two targets) has the same status both times and is shown once.
-fn outdated_rows(
-    list: &DependencyList,
-    index: &HashMap<String, CachedIndex>,
-    toolchain: Option<&str>,
-) -> Vec<OutdatedRow> {
-    let mut rows: Vec<OutdatedRow> = Vec::new();
-    for dependency in &list.listed {
-        if rows.iter().any(|row| row.name == dependency.name) {
-            continue;
-        }
-        let Some(cached) = index.get(&dependency.name) else {
-            continue;
-        };
-        let status = dependency.status(&cached.versions, toolchain);
-        if !status.is_outdated() && !status.locked_yanked {
-            continue;
-        }
-        rows.push(OutdatedRow {
-            name: dependency.name.clone(),
-            locked: dependency.locked_version.clone(),
-            locked_yanked: status.locked_yanked,
-            in_range: status.in_range,
-            out_of_range: status.out_of_range,
-        });
-    }
-    rows
-}
-
 // ── State ──────────────────────────────────────────────────────────────
-
-struct CachedIndex {
-    versions: Vec<IndexVersion>,
-    fetched: Instant,
-}
 
 /// Where the local load (workspace + lockfile) stands.
 enum LoadState {
@@ -182,30 +128,6 @@ enum LoadState {
     /// The opened folder has no `Cargo.toml` at its root.
     NoManifest,
     Ready,
-    Failed(String),
-}
-
-/// Where the registry check for newer versions stands.
-enum OutdatedState {
-    /// Nothing to check yet (no crate selected, or it lists nothing).
-    Idle,
-    Checking,
-    /// Finished; `failed` lookups could not be completed (offline, usually).
-    Done { failed: usize },
-}
-
-/// Where the advisory scan stands. Starts — and after any change to the
-/// selected crate returns to — `NotScanned`.
-enum AdvisoryState {
-    NotScanned,
-    Scanning,
-    Done {
-        findings: Vec<Finding>,
-        /// Packages asked about.
-        scanned: usize,
-        /// OSV had more results for some package than it returned.
-        truncated: bool,
-    },
     Failed(String),
 }
 
@@ -226,12 +148,10 @@ pub struct RustPanel {
     selected_crate: Option<String>,
     dependencies: DependencyList,
 
-    index: HashMap<String, CachedIndex>,
+    index: IndexCache,
     outdated: OutdatedState,
     advisories: AdvisoryState,
-    /// Fetched advisory records with the `modified` stamp they were fetched
-    /// at, so a rescan only refetches what changed.
-    advisory_records: HashMap<String, (Option<String>, AdvisoryRecord)>,
+    advisory_records: AdvisoryRecords,
 
     crate_filter: Entity<InputState>,
     open: HashMap<String, bool>,
@@ -320,6 +240,9 @@ impl RustPanel {
                 },
             );
 
+            let scan_subscription =
+                cx.observe_global::<SharedScans>(|this: &mut Self, cx| this.adopt_shared_scan(cx));
+
             let mut open = HashMap::new();
             for section in [
                 "Crates",
@@ -343,10 +266,10 @@ impl RustPanel {
                 lockfile: None,
                 selected_crate: None,
                 dependencies: DependencyList::default(),
-                index: HashMap::new(),
+                index: IndexCache::new(),
                 outdated: OutdatedState::Idle,
                 advisories: AdvisoryState::NotScanned,
-                advisory_records: HashMap::new(),
+                advisory_records: AdvisoryRecords::new(),
                 crate_filter,
                 open,
                 running_action: None,
@@ -355,7 +278,7 @@ impl RustPanel {
                 load_task: None,
                 outdated_task: None,
                 advisory_task: None,
-                _subscriptions: vec![filter_subscription, project_subscription],
+                _subscriptions: vec![filter_subscription, project_subscription, scan_subscription],
             };
             panel.detect_toolchain(cx);
             panel.reload(cx);
@@ -522,6 +445,8 @@ impl RustPanel {
             self.advisory_task = None;
             self.advisories = AdvisoryState::NotScanned;
         }
+        // Unless that same set of packages has already been scanned.
+        self.adopt_shared_scan(cx);
         self.check_outdated(cx);
         cx.notify();
     }
@@ -531,19 +456,7 @@ impl RustPanel {
     /// Looks up, in the crates.io sparse index, every listed dependency that
     /// isn't already cached and fresh.
     fn check_outdated(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        let names: Vec<String> = self
-            .dependencies
-            .registry_names()
-            .into_iter()
-            .filter(|name| {
-                self.index
-                    .get(*name)
-                    .is_none_or(|cached| now.duration_since(cached.fetched) > INDEX_CACHE_LIFETIME)
-            })
-            .map(str::to_string)
-            .collect();
-
+        let names = stale_names(&self.dependencies, &self.index, Instant::now());
         if names.is_empty() {
             self.outdated_task = None;
             self.outdated = if self.dependencies.listed.is_empty() {
@@ -557,39 +470,9 @@ impl RustPanel {
         self.outdated = OutdatedState::Checking;
         let client = cx.http_client();
         self.outdated_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let results: Vec<(String, Result<Vec<IndexVersion>, String>)> = stream::iter(names)
-                .map(|name| {
-                    let client = client.clone();
-                    async move {
-                        let versions = match fetch_text(&client, &index_url(&name)).await {
-                            Ok(body) => parse_index(&body),
-                            Err(error) => Err(error),
-                        };
-                        (name, versions)
-                    }
-                })
-                .buffer_unordered(REQUEST_CONCURRENCY)
-                .collect()
-                .await;
-
+            let results = fetch_index_entries(&client, names).await;
             this.update(cx, |this, cx| {
-                let mut failed = 0;
-                for (name, versions) in results {
-                    match versions {
-                        Ok(versions) => {
-                            this.index.insert(
-                                name,
-                                CachedIndex {
-                                    versions,
-                                    fetched: Instant::now(),
-                                },
-                            );
-                        }
-                        // A failed lookup keeps whatever older entry there
-                        // was: stale-but-labelled beats blank.
-                        Err(_) => failed += 1,
-                    }
-                }
+                let failed = store_index_entries(&mut this.index, results);
                 this.outdated = OutdatedState::Done { failed };
                 cx.notify();
             })
@@ -598,6 +481,26 @@ impl RustPanel {
     }
 
     // ── Advisory scan ──
+
+    /// Shows the result of a scan already run for exactly these packages,
+    /// here or in the crate's other view, instead of "not scanned yet".
+    fn adopt_shared_scan(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.advisories, AdvisoryState::Scanning) {
+            return;
+        }
+        let (Some(krate), Some(lockfile)) = (self.selected(), &self.lockfile) else {
+            return;
+        };
+        let reachable: Vec<LockedPackage> = lockfile
+            .reachable_crates_io_packages(&krate.name, &krate.version)
+            .into_iter()
+            .cloned()
+            .collect();
+        if let Some(result) = shared_scan(scan_key(&reachable), cx) {
+            self.advisories = result.into_state();
+            cx.notify();
+        }
+    }
 
     /// Asks OSV about every crates.io package reachable from the selected
     /// crate, fetches the records it names, and merges them into findings.
@@ -620,6 +523,7 @@ impl RustPanel {
             .cloned()
             .collect();
         let scanned = reachable.len();
+        let key = scan_key(&reachable);
 
         self.advisories = AdvisoryState::Scanning;
         cx.notify();
@@ -631,15 +535,18 @@ impl RustPanel {
             this.update(cx, |this, cx| {
                 match outcome {
                     Ok((hits, records)) => {
-                        let known: Vec<AdvisoryRecord> =
+                        let known: Vec<_> =
                             records.values().map(|(_, record)| record.clone()).collect();
                         let findings = merge_findings(&hits, &known);
                         this.advisory_records = records;
-                        this.advisories = AdvisoryState::Done {
+                        let result = ScanResult {
                             findings,
                             scanned,
                             truncated: hits.iter().any(|hit| hit.truncated),
                         };
+                        // Shared, so the same crate's other view shows it too.
+                        publish_scan(key, result.clone(), cx);
+                        this.advisories = result.into_state();
                     }
                     Err(error) => this.advisories = AdvisoryState::Failed(error),
                 }
@@ -714,107 +621,6 @@ impl RustPanel {
             cx.notify();
         }
     }
-}
-
-// ── Network ────────────────────────────────────────────────────────────
-// `cargo_backend` builds URLs and bodies and parses answers; these make the
-// requests, through the app's shared HTTP client (which carries Zed's
-// `User-Agent`, as crates.io requires).
-
-async fn read_body(
-    response: anyhow::Result<http_client::Response<AsyncBody>>,
-) -> Result<String, String> {
-    let mut response = response.map_err(|error| format!("request failed: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .read_to_end(&mut body)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(String::from_utf8_lossy(&body).into_owned())
-}
-
-async fn fetch_text(client: &Arc<dyn HttpClient>, url: &str) -> Result<String, String> {
-    read_body(client.get(url, AsyncBody::default(), true).await).await
-}
-
-async fn post_json(client: &Arc<dyn HttpClient>, url: &str, body: String) -> Result<String, String> {
-    read_body(client.post_json(url, body.into()).await).await
-}
-
-/// Both rounds of an advisory scan. Returns the batch hits and the record
-/// cache, updated with whatever had to be (re)fetched.
-///
-/// A record whose detail request fails is simply absent from the cache;
-/// `merge_findings` then reports that advisory as "details missing" rather
-/// than dropping it. Only a failed *batch* request fails the scan, because
-/// without it there is nothing to show at all.
-async fn run_advisory_scan(
-    client: &Arc<dyn HttpClient>,
-    reachable: &[LockedPackage],
-    mut records: HashMap<String, (Option<String>, AdvisoryRecord)>,
-) -> Result<
-    (
-        Vec<PackageAdvisories>,
-        HashMap<String, (Option<String>, AdvisoryRecord)>,
-    ),
-    String,
-> {
-    let refs: Vec<&LockedPackage> = reachable.iter().collect();
-    let mut hits = Vec::new();
-    for batch in osv_batches(&refs) {
-        let answer = post_json(client, cargo_backend::OSV_BATCH_URL, batch.body.clone())
-            .await
-            .map_err(|error| format!("Could not reach the advisory service: {error}"))?;
-        hits.extend(batch.parse_response(&answer)?);
-    }
-
-    // The newest `modified` stamp seen for each id, to decide what is stale.
-    let mut stamps: HashMap<&str, Option<&str>> = HashMap::new();
-    for advisory in hits.iter().flat_map(|hit| hit.advisories.iter()) {
-        stamps.insert(advisory.id.as_str(), advisory.modified.as_deref());
-    }
-    let to_fetch: Vec<(String, Option<String>)> = advisory_ids(&hits)
-        .into_iter()
-        .filter(|id| {
-            let stamp = stamps.get(id).copied().flatten();
-            records
-                .get(*id)
-                .is_none_or(|(cached_stamp, _)| cached_stamp.as_deref() != stamp)
-        })
-        .map(|id| {
-            (
-                id.to_string(),
-                stamps.get(id).copied().flatten().map(str::to_string),
-            )
-        })
-        .collect();
-
-    let fetched: Vec<(String, Option<String>, Result<AdvisoryRecord, String>)> =
-        stream::iter(to_fetch)
-            .map(|(id, stamp)| {
-                let client = client.clone();
-                async move {
-                    let record = match fetch_text(&client, &advisory_url(&id)).await {
-                        Ok(body) => parse_advisory(&body),
-                        Err(error) => Err(error),
-                    };
-                    (id, stamp, record)
-                }
-            })
-            .buffer_unordered(REQUEST_CONCURRENCY)
-            .collect()
-            .await;
-    for (id, stamp, record) in fetched {
-        if let Ok(record) = record {
-            records.insert(id, (stamp, record));
-        }
-    }
-
-    Ok((hits, records))
 }
 
 // ── Section header helper ──────────────────────────────────────────────
@@ -1158,6 +964,23 @@ impl RustPanel {
                     })),
             );
         }
+        row = row.child(
+            Button::new("rust-quick-package-manager")
+                .secondary()
+                .xsmall()
+                .label("Package Manager")
+                .disabled(!ready)
+                .tooltip("Open the Cargo manager for the selected crate")
+                .on_click(cx.listener(|this, _e, window, cx| {
+                    let name = this.selected_crate.clone();
+                    let root = this.root.clone();
+                    if let Some(workspace) = this.workspace.upgrade() {
+                        workspace.update(cx, |workspace, cx| {
+                            cargo_manager_panel::open(root, name, workspace, window, cx);
+                        });
+                    }
+                })),
+        );
         if let Some(label) = &self.running_action {
             row = row.child(
                 h_flex()
@@ -1567,26 +1390,7 @@ impl Panel for RustPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cargo_backend::{ListedDependency, UpdateKind, Version, parse_metadata};
-
-    fn listed(name: &str, requirement: &str, locked: Option<&str>, kind: DependencyKind) -> ListedDependency {
-        ListedDependency {
-            name: name.to_string(),
-            rename: None,
-            requirement: requirement.to_string(),
-            kind,
-            target: None,
-            optional: false,
-            locked_version: locked.map(str::to_string),
-        }
-    }
-
-    fn cached(lines: &[&str]) -> CachedIndex {
-        CachedIndex {
-            versions: parse_index(&lines.join("\n")).unwrap(),
-            fetched: Instant::now(),
-        }
-    }
+    use cargo_backend::parse_metadata;
 
     fn crates(names: &[&str]) -> Vec<CrateInfo> {
         let packages: Vec<String> = names
@@ -1645,77 +1449,5 @@ mod tests {
         assert!(!is_manifest_file("Cargo.toml.bak"));
         assert!(!is_manifest_file("main.rs"));
         assert!(!is_manifest_file(""));
-    }
-
-    #[test]
-    fn outdated_rows_list_each_package_once() {
-        let list = DependencyList {
-            listed: vec![
-                listed("serde", "^1", Some("1.0.210"), DependencyKind::Normal),
-                // Declared again as a dev-dependency: same status, one row.
-                listed("serde", "^1", Some("1.0.210"), DependencyKind::Dev),
-                listed("log", "^0.4", Some("0.4.29"), DependencyKind::Normal),
-                listed("fresh", "^2", Some("2.0.0"), DependencyKind::Normal),
-            ],
-            hidden: 0,
-        };
-        let mut index = HashMap::new();
-        index.insert(
-            "serde".to_string(),
-            cached(&[r#"{"vers":"1.0.210"}"#, r#"{"vers":"1.0.229"}"#, r#"{"vers":"2.0.0"}"#]),
-        );
-        index.insert("log".to_string(), cached(&[r#"{"vers":"0.4.29"}"#, r#"{"vers":"0.4.34"}"#]));
-        index.insert("fresh".to_string(), cached(&[r#"{"vers":"2.0.0"}"#]));
-
-        let rows = outdated_rows(&list, &index, Some("1.98.1"));
-        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
-        assert_eq!(names, vec!["serde", "log"]);
-
-        let serde = &rows[0];
-        assert_eq!(serde.locked.as_deref(), Some("1.0.210"));
-        let in_range = serde.in_range.as_ref().unwrap();
-        assert_eq!(in_range.version, Version::new(1, 0, 229));
-        assert_eq!(in_range.kind, UpdateKind::Patch);
-        assert_eq!(serde.out_of_range.as_ref().unwrap().version, Version::new(2, 0, 0));
-    }
-
-    #[test]
-    fn dependencies_not_looked_up_yet_are_not_reported() {
-        // No index entry means "not checked", which is neither outdated nor
-        // up to date — it must not appear as a row.
-        let list = DependencyList {
-            listed: vec![listed("serde", "^1", Some("1.0.210"), DependencyKind::Normal)],
-            hidden: 0,
-        };
-        assert!(outdated_rows(&list, &HashMap::new(), None).is_empty());
-    }
-
-    #[test]
-    fn a_yanked_locked_version_is_a_row_even_with_nothing_newer() {
-        let list = DependencyList {
-            listed: vec![listed("oops", "^1", Some("1.0.1"), DependencyKind::Normal)],
-            hidden: 0,
-        };
-        let mut index = HashMap::new();
-        index.insert(
-            "oops".to_string(),
-            cached(&[r#"{"vers":"1.0.0"}"#, r#"{"vers":"1.0.1","yanked":true}"#]),
-        );
-        let rows = outdated_rows(&list, &index, None);
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].locked_yanked);
-        assert_eq!(rows[0].in_range, None);
-        assert_eq!(rows[0].out_of_range, None);
-    }
-
-    #[test]
-    fn a_dependency_without_a_locked_version_is_not_called_outdated() {
-        let list = DependencyList {
-            listed: vec![listed("serde", "^1", None, DependencyKind::Normal)],
-            hidden: 0,
-        };
-        let mut index = HashMap::new();
-        index.insert("serde".to_string(), cached(&[r#"{"vers":"1.0.229"}"#]));
-        assert!(outdated_rows(&list, &index, None).is_empty());
     }
 }

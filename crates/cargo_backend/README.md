@@ -19,6 +19,9 @@ it works whether or not a language server is running.
 **Status:** steps 1 to 3 of the design note's build order (dependency list,
 outdated versions, vulnerabilities). Add/remove/update is not here yet.
 
+Used by [`rust_panel`](../rust_panel/README.md) (the dock panel) and
+[`cargo_manager_panel`](../cargo_manager_panel/README.md) (the manager tab).
+
 ## Trying it
 
 ```sh

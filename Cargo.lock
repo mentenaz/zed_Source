@@ -2917,6 +2917,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo_manager_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_backend",
+ "futures 0.3.34",
+ "gpui",
+ "gpui-component",
+ "http_client",
+ "project",
+ "script_runner_panel",
+ "workspace",
+]
+
+[[package]]
 name = "cargo_metadata"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17248,10 +17263,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo_backend",
- "futures 0.3.34",
+ "cargo_manager_panel",
  "gpui",
  "gpui-component",
- "http_client",
  "project",
  "script_runner_panel",
  "ui",
@@ -24618,6 +24632,7 @@ dependencies = [
  "breadcrumbs",
  "call",
  "call_hierarchy",
+ "cargo_manager_panel",
  "channel",
  "chrono",
  "clap",

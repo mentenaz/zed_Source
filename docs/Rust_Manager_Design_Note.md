@@ -1,6 +1,6 @@
 # Rust (Cargo) Manager: Design Note
 
-**Status:** the backend for steps 1 to 3 (`cargo_backend`) and the left panel (`rust_panel`) are built and tested. The backend for step 4 (add, remove, update) is built and tested; nothing in the UI uses it yet. The manager tab is not started. The panel has not yet been tried in the running app. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
+**Status:** the backend for steps 1 to 3 (`cargo_backend`) and the left panel (`rust_panel`) are built and tested. The manager tab (`cargo_manager_panel`) is built for steps 1 to 4: Installed, Updates and Vulnerabilities pages, with remove, update, update all and changing a version. Tried by hand in the running app on 7 October 2026, on the scratch crate: update, change version and remove each ran and matched their confirmation. **Not yet tried in the UI:** the workspace cases (inherited dependencies, and a removal that also edits the root manifest). Adding a dependency waits for Search (step 5). **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
 **Pattern to follow:** the existing runtime panel plus manager pairs, each with a GPUI-free backend (`node_panel` + `npm_manager_panel` + `node_backend`/`npm_backend`, `dotnet_panel` + `nuget_manager_panel` + `dotnet_backend`, `python_panel` + `python_manager_panel` + `python_backend`).
 
 ---
@@ -76,10 +76,15 @@ Consequences:
 - Header: `rustc` and `cargo` versions
 - Projects: crates in the workspace. The selected crate is the active target.
 - Quick actions (new buttons, following the pattern in `node_panel` and `dotnet_panel`): `check`, `build`, `run`, `test`, plus a **Package Manager** button
-- **As built (6 October 2026):** the panel also lists the selected crate's dependencies, outdated versions and advisories itself, the way `dotnet_panel` does, so steps 1 to 3 are usable before the manager tab exists. The advisory scan is a **Scan** button rather than automatic: it covers every package reachable from the crate (1,425 for `zed`), too much to fire on each click through the crate list. The **Package Manager** button is left out until there is a manager to open.
+- **As built (6 October 2026):** the panel also lists the selected crate's dependencies, outdated versions and advisories itself, the way `dotnet_panel` does, so steps 1 to 3 are usable before the manager tab exists. The advisory scan is a **Scan** button rather than automatic: it covers every package reachable from the crate (1,425 for `zed`), too much to fire on each click through the crate list. The **Package Manager** button was added on 7 October 2026 with the manager tab; it opens the tab on the selected crate.
 - Summary counts: Dependencies, Outdated, Vulnerabilities
 
 **Manager tab (`cargo_manager_panel`):** the same pages as the other managers: General, Search, Installed, Updates, Vulnerabilities, with the README flyout.
+
+- **As built (7 October 2026):** General, Installed, Updates and Vulnerabilities. Search and the README view are step 5. Selecting a dependency opens a details pane with the version picker (decision 4), which needs no extra request because the index entries are already fetched.
+- The tab manages one crate. It is switched from the Rust panel (select a crate, press **Package Manager**), not from inside the tab.
+- A finished advisory scan is shared between the tab and the Rust panel, keyed by the exact set of packages it covered, so scanning in one shows the findings in both and a result is never shown for a lockfile it was not computed for.
+- The sparse-index and OSV requests moved out of `rust_panel` into `cargo_manager_panel::registry`, which both crates use. `rust_panel` depends on the manager (to open it), so the shared code could not stay in the panel.
 
 **Updates page.** Classify each row as patch, minor or major, as the other managers do, and make clear which action it gets:
 
@@ -173,6 +178,7 @@ Fork conventions that apply to all three:
 3. Vulnerabilities via OSV.
    - **Backend done (6 October 2026):** batch requests, advisory records, CVSS v3 scoring, and merging into findings. Checked against live data for `zed`: 1,425 reachable packages, 2 batch requests, 40 records, giving 26 vulnerabilities, 5 unsound and 10 unmaintained. The requests themselves are left to the panel. See decisions 12 to 14 for what the real data changed.
 4. Add, remove and update through Cargo.
+   - **UI done (7 October 2026):** in `cargo_manager_panel`. Tried by hand on the scratch crate; the workspace cases are still to try. Remove, update, update all and "change to" each confirm first; an update's confirmation is Cargo's own dry run. Not built: adding a dependency (needs Search), behaviour rule 2's "waiting for Cargo" state (the Script Runner shows Cargo's own "Blocking waiting for file lock" line instead), and rule 7's rust-analyzer hint.
    - **Backend done (7 October 2026):** `cargo_backend::actions`. Validated command lines for add, remove and update, reading `cargo update --dry-run`, and the manifest side effects (inherited or literal, what adding writes, whether removing deletes the root entry). Checked in a scratch workspace: the predicted root-manifest removal matched what `cargo remove` did. Checked read-only on this fork: `cargo update --dry-run clap` moves six lockfile entries, so the confirmation lists every change. The UI is not started.
 5. Search and README viewing.
 

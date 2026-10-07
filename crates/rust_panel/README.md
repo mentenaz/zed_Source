@@ -13,8 +13,10 @@ this tree from
 [`docs/Rust_Manager_Design_Note.md`](../../docs/Rust_Manager_Design_Note.md).
 
 **Status:** steps 1 to 3 of that note are visible here (dependencies,
-outdated versions, advisories). Adding, removing and updating dependencies,
-and the full-width manager tab, are not built yet.
+outdated versions, advisories). Removing and updating dependencies is done
+in the full-width manager tab,
+[`cargo_manager_panel`](../cargo_manager_panel/README.md), which the
+**Package Manager** quick action opens on the selected crate.
 
 ## Using it
 
@@ -25,7 +27,7 @@ Open with `ctrl-k c` (`cmd-k c` on macOS), the status bar icon (tooltip
 | --- | --- |
 | Toolchain line | The installed `rustc` and `cargo` versions |
 | Crates | Every crate in the workspace. Click one to select it. A filter box appears when there are more than eight |
-| Quick Actions | `check`, `build`, `run`, `test` for the selected crate |
+| Quick Actions | `check`, `build`, `run`, `test` for the selected crate, and **Package Manager**, which opens the Cargo Manager tab on it |
 | Dependencies | The crate's crates.io dependencies with the exact version each is locked to |
 | Outdated | Dependencies with a newer version on crates.io |
 | Advisories | Security advisories for everything the crate pulls in. Press **Scan** |
@@ -116,7 +118,8 @@ read as zero.
 | Concern | Where |
 | --- | --- |
 | Workspace, lockfile, outdated and advisory logic | [`cargo_backend`](../cargo_backend/README.md) |
-| The HTTP requests that crate leaves to its host | This crate (`fetch_text`, `post_json`, `run_advisory_scan`) |
+| The HTTP requests that crate leaves to its host | [`cargo_manager_panel::registry`](../cargo_manager_panel/README.md), shared with the manager tab |
+| Removing, updating and re-versioning dependencies | [`cargo_manager_panel`](../cargo_manager_panel/README.md) |
 | Running commands, and validating what goes into them | [`script_runner_panel`](../script_runner_panel/README.md) |
 
 The requests go through the app's shared HTTP client, which sends Zed's own
@@ -140,8 +143,8 @@ cargo test -p rust_panel -j 8
 ```
 
 The tests cover the quick-action commands (including refusing shell syntax
-in a crate name), the crate filter, which file changes trigger a reload, and
-how the Outdated rows are built. They do not open a window or use the
-network.
+in a crate name), the crate filter, and which file changes trigger a reload.
+How the Outdated rows are built is tested in `cargo_manager_panel`, where
+that code now lives. The tests do not open a window or use the network.
 
 To run the tests of every fork crate at once: `script/test-fork-crates.ps1`.
