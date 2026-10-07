@@ -18,6 +18,11 @@ pub(super) struct Section<T> {
     pub(super) state: LoadState,
     /// Why the last load failed. Empty unless `state` is `Error`.
     pub(super) error: String,
+    /// Which page `items` is, counting from 1. A list that is not paged is
+    /// always on page 1 of 1.
+    pub(super) page: u32,
+    /// The last page there is.
+    pub(super) last_page: u32,
 }
 
 impl<T> Default for Section<T> {
@@ -26,6 +31,8 @@ impl<T> Default for Section<T> {
             items: Vec::new(),
             state: LoadState::Idle,
             error: String::new(),
+            page: 1,
+            last_page: 1,
         }
     }
 }
@@ -37,6 +44,8 @@ impl<T> Section<T> {
         self.items.clear();
         self.state = LoadState::Idle;
         self.error.clear();
+        self.page = 1;
+        self.last_page = 1;
     }
 
     /// Marks a load as started. [`HelmPanel::load_section`] calls this; a
@@ -54,6 +63,8 @@ impl<T> Section<T> {
             Ok(items) => {
                 self.items = items;
                 self.state = LoadState::Idle;
+                self.page = 1;
+                self.last_page = 1;
             }
             Err(error) => {
                 self.state = LoadState::Error;
@@ -61,6 +72,45 @@ impl<T> Section<T> {
             }
         }
     }
+
+    /// Marks a load of page `page` as started. The page is recorded now, so
+    /// that the pager shows where the user asked to go while it loads, and
+    /// a retry after a failure asks for the same page.
+    pub(super) fn begin_page(&mut self, page: u32) {
+        self.begin();
+        self.page = page.max(1);
+        self.last_page = self.last_page.max(self.page);
+    }
+
+    /// Stores a finished load of one page.
+    pub(super) fn finish_page(&mut self, result: Result<Page<T>, String>) {
+        match result {
+            Ok(page) => {
+                self.items = page.items;
+                self.page = page.page;
+                self.last_page = page.last_page;
+                self.state = LoadState::Idle;
+            }
+            Err(error) => {
+                self.state = LoadState::Error;
+                self.error = error;
+            }
+        }
+    }
+}
+
+/// How many rows a paged list shows at a time.
+pub(super) const PAGE_SIZE: u32 = 10;
+
+/// Which rows of a list of `len` are on page `page`, for a list the panel
+/// holds in full and pages itself. Returns the page actually shown (a page
+/// past the end becomes the last one), the last page, and the rows.
+pub(super) fn page_slice(len: usize, page: u32, per_page: u32) -> (u32, u32, std::ops::Range<usize>) {
+    let per_page = per_page.max(1) as usize;
+    let last_page = len.div_ceil(per_page).max(1) as u32;
+    let page = page.clamp(1, last_page);
+    let start = (page as usize - 1) * per_page;
+    (page, last_page, start..(start + per_page).min(len))
 }
 
 impl HelmPanel {
@@ -109,6 +159,54 @@ impl HelmPanel {
             return;
         };
         self.load_section_with(cx, section, move |gh_state| fetch(repo, gh_state));
+    }
+}
+
+impl HelmPanel {
+    /// Loads page `page` of one section's rows for the selected repository.
+    /// Does nothing when no repository is selected.
+    pub(super) fn load_section_page<T, E, Fut>(
+        &mut self,
+        cx: &mut Context<Self>,
+        section: fn(&mut Self) -> &mut Section<T>,
+        page: u32,
+        fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
+    ) where
+        T: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<Page<T>, E>> + Send + 'static,
+    {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        section(self).begin_page(page);
+        cx.notify();
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(fetch(repo, gh_state)).await;
+            this.update(cx, |this, cx| {
+                section(this).finish_page(result.map_err(|error| error.to_string()));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::load_section_page`] for the common case: one request, whose
+    /// answer is the list itself. `request` builds it for the repository.
+    pub(super) fn load_repo_page<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        section: fn(&mut Self) -> &mut Section<T>,
+        page: u32,
+        request: impl FnOnce(&Repo) -> requests::ApiRequest + Send + 'static,
+    ) where
+        T: serde::de::DeserializeOwned + Send + 'static,
+    {
+        self.load_section_page(cx, section, page, move |repo, gh_state| async move {
+            fetch_page::<T>(&gh_state, request(&repo), page, PAGE_SIZE).await
+        });
     }
 }
 
@@ -176,6 +274,57 @@ mod tests {
         assert!(section.items.is_empty());
         assert!(section.state == LoadState::Idle);
         assert!(section.error.is_empty());
+    }
+
+    #[test]
+    fn a_page_load_records_where_it_is() {
+        let mut section = Section::<u32>::default();
+        assert_eq!((section.page, section.last_page), (1, 1));
+
+        section.begin_page(1);
+        section.finish_page(Ok(Page {
+            items: vec![1, 2],
+            page: 1,
+            last_page: 7,
+        }));
+        assert_eq!((section.page, section.last_page), (1, 7));
+
+        // Going to page 3 shows page 3 at once, while it loads.
+        section.begin_page(3);
+        assert!(section.state == LoadState::Loading);
+        assert_eq!((section.page, section.last_page), (3, 7));
+        section.finish_page(Ok(Page {
+            items: vec![5, 6],
+            page: 3,
+            last_page: 7,
+        }));
+        assert_eq!(section.items, vec![5, 6]);
+
+        // A failed page keeps its number, so Retry asks for the same one.
+        section.begin_page(4);
+        section.finish_page(Err("boom".to_string()));
+        assert!(section.state == LoadState::Error);
+        assert_eq!(section.page, 4);
+
+        // Leaving the screen goes back to the start.
+        section.clear();
+        assert_eq!((section.page, section.last_page), (1, 1));
+    }
+
+    #[test]
+    fn a_list_held_in_full_is_cut_into_pages() {
+        // 25 rows, ten a page: three pages, the last one short.
+        assert_eq!(page_slice(25, 1, 10), (1, 3, 0..10));
+        assert_eq!(page_slice(25, 2, 10), (2, 3, 10..20));
+        assert_eq!(page_slice(25, 3, 10), (3, 3, 20..25));
+        // A page past the end, as after a search narrows the list, becomes
+        // the last one.
+        assert_eq!(page_slice(25, 9, 10), (3, 3, 20..25));
+        assert_eq!(page_slice(25, 0, 10), (1, 3, 0..10));
+        // Exactly full pages, one row, and nothing at all.
+        assert_eq!(page_slice(20, 2, 10), (2, 2, 10..20));
+        assert_eq!(page_slice(1, 1, 10), (1, 1, 0..1));
+        assert_eq!(page_slice(0, 1, 10), (1, 1, 0..0));
     }
 
     #[test]

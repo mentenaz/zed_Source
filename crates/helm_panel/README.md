@@ -98,6 +98,21 @@ to see whether your login has the scope that action needs:
 **Clone** runs `gh repo clone` and streams its output to a progress screen.
 It can then run `npm install` in the cloned folder as a second phase.
 
+### Pages
+
+Lists show ten rows at a time, with **Back** and **Next** arrows and "Page 2
+of 7" under the list when there is more than one page.
+
+- Issues, pull requests, branches, collaborators, releases, tags, commits,
+  Actions runs and deployments ask GitHub for one page at a time.
+- Repositories are fetched in full, because the search box filters them, and
+  are then shown ten at a time. Typing in the search box goes back to the
+  first page of what matches.
+- On Issues a page can show fewer than ten rows while more pages follow.
+  GitHub counts pull requests as issues in its pages; Helm leaves them out.
+- Packages, security alerts, invitations and organisations are not paged
+  and still show at most the first 100.
+
 ### Keyboard
 
 Click a list to focus it, then:

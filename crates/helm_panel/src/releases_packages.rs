@@ -6,13 +6,13 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s releases.
     pub(super) fn load_releases(&mut self, cx: &mut Context<Self>) {
-        self.load_section(
-            cx,
-            |this| &mut this.releases,
-            |repo, gh_state| async move {
-                gh_list_releases(repo.owner.login, repo.name, &gh_state).await
-            },
-        );
+        self.load_releases_page(1, cx);
+    }
+
+    pub(super) fn load_releases_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.load_repo_page(cx, |this| &mut this.releases, page, |repo| {
+            requests::releases(&repo.owner.login, &repo.name)
+        });
     }
 
     /// Loads `self.selected_repo`'s packages (owner-scoped: either the repo's
@@ -67,13 +67,13 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s tags.
     pub(super) fn load_tags(&mut self, cx: &mut Context<Self>) {
-        self.load_section(
-            cx,
-            |this| &mut this.tags,
-            |repo, gh_state| async move {
-                gh_list_tags(repo.owner.login, repo.name, &gh_state).await
-            },
-        );
+        self.load_tags_page(1, cx);
+    }
+
+    pub(super) fn load_tags_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.load_repo_page(cx, |this| &mut this.tags, page, |repo| {
+            requests::tags(&repo.owner.login, &repo.name)
+        });
     }
 
     /// Opens the "Create release" modal.
@@ -134,7 +134,8 @@ impl HelmPanel {
             );
 
         self.list_screen(
-            self.releases.status(),
+            self.releases
+                .paged_status(|this, page, cx| this.load_releases_page(page, cx)),
             &self.releases_list,
             Some(header.into_any_element()),
             ListLabels {
@@ -142,7 +143,7 @@ impl HelmPanel {
                 error: "Failed to load releases",
                 empty: "No releases yet",
             },
-            |this, cx| this.load_releases(cx),
+            |this, cx| this.load_releases_page(this.releases.page, cx),
             cx,
         )
     }
@@ -263,7 +264,8 @@ impl HelmPanel {
     /// The Tags screen.
     pub(super) fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            self.tags.status(),
+            self.tags
+                .paged_status(|this, page, cx| this.load_tags_page(page, cx)),
             &self.tags_list,
             None,
             ListLabels {
@@ -271,7 +273,7 @@ impl HelmPanel {
                 error: "Failed to load tags",
                 empty: "No tags found",
             },
-            |this, cx| this.load_tags(cx),
+            |this, cx| this.load_tags_page(this.tags.page, cx),
             cx,
         )
     }

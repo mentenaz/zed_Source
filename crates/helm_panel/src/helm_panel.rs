@@ -58,20 +58,18 @@ use serde_json::json;
 
 use helm_backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
-    GhState,
-    GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
-    Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
-    gh_accept_org_invitation, gh_accept_repo_invitation, gh_add_collaborator, gh_auth_status,
-    gh_check_cli, gh_clone_repo, gh_create_pull, gh_create_release, gh_create_repo,
-    gh_decline_org_invitation, gh_decline_repo_invitation, gh_ensure_scope, gh_get_branches,
-    gh_get_collaborators, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
+    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion,
+    Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
+    fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
+    gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo, gh_create_pull,
+    gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
+    gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
     gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
     gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_get_workflow_run,
-    gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_deployments,
-    gh_list_issue_comments, gh_list_issues, gh_list_org_invitations, gh_list_package_versions,
-    gh_list_packages, gh_list_pulls, gh_list_recent_commits, gh_list_releases,
-    gh_list_secret_scanning_alerts, gh_list_tags, gh_list_workflow_runs, gh_login, gh_logout,
-    gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
+    gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_issue_comments,
+    gh_list_org_invitations, gh_list_package_versions, gh_list_packages,
+    gh_list_secret_scanning_alerts, gh_login, gh_logout, gh_remove_collaborator, gh_update_repo,
+    gh_update_topics, gh_update_user, requests,
 };
 use helm_backend::{EventRecvError, on_tokio};
 use changes::*;
@@ -182,10 +180,14 @@ pub struct HelmPanel {
 
     // Repos
     repos: Section<Repo>,
-    /// Positions in `repos` of the rows the search box leaves, in order.
-    /// Recomputed at the top of every render of the repository list, so it
-    /// always matches what `repos` and the search box hold.
+    /// Positions in `repos` of the rows on the page being shown, out of the
+    /// ones the search box leaves. Recomputed at the top of every render of
+    /// the repository list, so it always matches what `repos`, the search
+    /// box and `repos_page` hold.
     repos_shown: Vec<usize>,
+    /// The page of matching repositories on screen, counting from 1.
+    repos_page: u32,
+    repos_last_page: u32,
     repos_list: ListView,
     repo_search: Entity<InputState>,
     /// Row `up`/`down`/`enter` act on, within the filtered repo list
@@ -303,8 +305,10 @@ impl HelmPanel {
         cx.new(|cx| {
             let repo_search =
                 cx.new(|cx| InputState::new(window, cx).placeholder("Search repositories…"));
-            cx.subscribe(&repo_search, |_this, _, event: &InputEvent, cx| {
+            cx.subscribe(&repo_search, |this: &mut Self, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
+                    // A new search starts from its first page.
+                    this.repos_page = 1;
                     cx.notify();
                 }
             })
@@ -337,6 +341,8 @@ impl HelmPanel {
                 profile_menu_focus: cx.focus_handle(),
                 repos: Section::default(),
                 repos_shown: Vec::new(),
+                repos_page: 1,
+                repos_last_page: 1,
                 repos_list: lists::repos_list(window, cx),
                 repo_search,
                 selected_repo: None,
@@ -489,7 +495,11 @@ impl Render for HelmPanel {
         let show_nav = !matches!(self.screen, HelmScreen::Gate | HelmScreen::Auth);
         if self.screen == HelmScreen::RepoList {
             let query = self.repo_search.read(cx).value().to_string();
-            self.repos_shown = repos::matching_repos(&self.repos.items, &query);
+            let matching = repos::matching_repos(&self.repos.items, &query);
+            let (page, last_page, rows) = page_slice(matching.len(), self.repos_page, PAGE_SIZE);
+            self.repos_page = page;
+            self.repos_last_page = last_page;
+            self.repos_shown = matching[rows].to_vec();
         }
 
         v_flex()

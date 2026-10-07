@@ -6,22 +6,30 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s recent commits (Commits screen).
     pub(super) fn load_commits(&mut self, cx: &mut Context<Self>) {
-        self.load_section(
-            cx,
-            |this| &mut this.commits,
-            |repo, gh_state| async move {
-                gh_list_recent_commits(repo.owner.login, repo.name, &gh_state).await
-            },
-        );
+        self.load_commits_page(1, cx);
+    }
+
+    pub(super) fn load_commits_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.load_repo_page(cx, |this| &mut this.commits, page, |repo| {
+            requests::recent_commits(&repo.owner.login, &repo.name)
+        });
     }
 
     /// Loads `self.selected_repo`'s recent Actions/CI workflow runs.
     pub(super) fn load_workflow_runs(&mut self, cx: &mut Context<Self>) {
-        self.load_section(
+        self.load_workflow_runs_page(1, cx);
+    }
+
+    pub(super) fn load_workflow_runs_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.load_section_page(
             cx,
             |this| &mut this.workflow_runs,
-            |repo, gh_state| async move {
-                gh_list_workflow_runs(repo.owner.login, repo.name, &gh_state).await
+            page,
+            move |repo, gh_state| async move {
+                // GitHub wraps this list in an object, under `workflow_runs`.
+                let request = requests::workflow_runs(&repo.owner.login, &repo.name);
+                fetch_page_under::<WorkflowRun>(&gh_state, request, "workflow_runs", page, PAGE_SIZE)
+                    .await
             },
         );
     }
@@ -48,20 +56,21 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s deployments.
     pub(super) fn load_deployments(&mut self, cx: &mut Context<Self>) {
-        self.load_section(
-            cx,
-            |this| &mut this.deployments,
-            |repo, gh_state| async move {
-                gh_list_deployments(repo.owner.login, repo.name, &gh_state).await
-            },
-        );
+        self.load_deployments_page(1, cx);
+    }
+
+    pub(super) fn load_deployments_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.load_repo_page(cx, |this| &mut this.deployments, page, |repo| {
+            requests::deployments(&repo.owner.login, &repo.name)
+        });
     }
 
 
     /// The Commits screen — recent commits with GitHub author avatars.
     pub(super) fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            self.commits.status(),
+            self.commits
+                .paged_status(|this, page, cx| this.load_commits_page(page, cx)),
             &self.commits_list,
             None,
             ListLabels {
@@ -69,7 +78,7 @@ impl HelmPanel {
                 error: "Failed to load commits",
                 empty: "No commits found",
             },
-            |this, cx| this.load_commits(cx),
+            |this, cx| this.load_commits_page(this.commits.page, cx),
             cx,
         )
     }
@@ -80,7 +89,8 @@ impl HelmPanel {
     /// than a detail pane embedded in this panel.
     pub(super) fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            self.workflow_runs.status(),
+            self.workflow_runs
+                .paged_status(|this, page, cx| this.load_workflow_runs_page(page, cx)),
             &self.workflow_runs_list,
             None,
             ListLabels {
@@ -88,7 +98,7 @@ impl HelmPanel {
                 error: "Failed to load workflow runs",
                 empty: "No workflow runs found",
             },
-            |this, cx| this.load_workflow_runs(cx),
+            |this, cx| this.load_workflow_runs_page(this.workflow_runs.page, cx),
             cx,
         )
     }
@@ -96,7 +106,8 @@ impl HelmPanel {
     /// The Deployments screen.
     pub(super) fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            self.deployments.status(),
+            self.deployments
+                .paged_status(|this, page, cx| this.load_deployments_page(page, cx)),
             &self.deployments_list,
             None,
             ListLabels {
@@ -104,7 +115,7 @@ impl HelmPanel {
                 error: "Failed to load deployments",
                 empty: "No deployments found",
             },
-            |this, cx| this.load_deployments(cx),
+            |this, cx| this.load_deployments_page(this.deployments.page, cx),
             cx,
         )
     }

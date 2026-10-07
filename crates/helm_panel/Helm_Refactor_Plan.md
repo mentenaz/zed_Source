@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is done in code and checked against the live API from a terminal, but not yet tried in the app. Phases D and E are not started.
+**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is done in code and checked against the live API from a terminal, but not yet tried in the app. Phase D is done in code and checked against the live API, but not yet tried in the app. Phase E is not started.
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
@@ -146,6 +146,16 @@ Move `src/backend/` into a new `helm_backend` crate, in the role `npm_backend`, 
 - The backend reads GitHub's `Link` header and returns a page together with "is there another".
 - Lists load the first page, then more on demand (a "Load more" row, as the Cargo Manager's search does), and always say how many are loaded when the list is not complete.
 - The repository list, which is filtered locally, either loads every page before filtering or says that the filter only covers what is loaded.
+
+### As done (7 October 2026)
+
+- **Backend:** `ApiRequest::page`, `paging.rs` (reads the `Link` header), and `fetch_page`, `fetch_page_under` and `fetch_all`. Checked against the live API: ten commits of `zed_Source` came back as page 1 of 4040.
+- **Pages of ten, with Back and Next** (the size and the buttons were the user's choice, in place of the "Load more" row this section first proposed). `list_screen` shows `gpui_component`'s `Pagination` and "Page 2 of 7" under any list with more than one page.
+- **Paged by GitHub, one request a page:** issues, pull requests, branches, collaborators, releases, tags, commits, Actions runs, deployments.
+- **Repositories** are fetched in full (decision 5: the search box needs them all) and paged by the panel. A new search starts at its first page.
+- **Not paged:** packages (several requests merged), security alerts (Dependabot pages by cursor, not by number), invitations and organisations. These still show at most the first 100.
+- **Known oddity:** an Issues page can hold fewer than ten rows, because GitHub counts pull requests in its issue pages and Helm leaves them out.
+- **Not yet tried in the running app.**
 
 ### Done when
 

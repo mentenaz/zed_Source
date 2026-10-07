@@ -72,6 +72,7 @@ impl HelmPanel {
                 state: LoadState::Idle,
                 error: String::new(),
                 is_empty: self.invitations.items.is_empty() && self.org_invitations.is_empty(),
+                pager: None,
             },
             &self.invitations_list,
             None,

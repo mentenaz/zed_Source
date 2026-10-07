@@ -29,7 +29,8 @@ It uses the `gh` CLI's existing sign-in and only reads:
 ```text
 signed in as mentenaz
 1 organisation(s)
-58 repositories on the first page
+58 repositories in all
+zed_Source: 10 commits on page 1 of 4040
 a missing repository: GitHub API 404: Not Found (permission-like: true)
 ```
 
@@ -98,9 +99,14 @@ what lets them be tested without a network.
 
 ## Behaviour worth knowing
 
-- **Lists return one page.** Every list asks GitHub for up to 100 items (50
-  in a few places) and stops. An account with more than 100 repositories
-  gets the first 100. Pagination is phase D of the plan.
+- **Lists come a page at a time.** `fetch_page(state, request, page,
+  per_page)` returns a `Page` with its items, its number and the last page
+  there is, read from GitHub's `Link` header. `fetch_page_under` does the
+  same for a list GitHub wraps in an object, and `fetch_all` joins every
+  page (up to 50) for a list that has to be complete to be useful.
+  `gh_get_repos` uses `fetch_all`. The other `gh_list_*` functions still
+  return a single page of up to 100, for callers that have not moved to
+  `fetch_page`.
 - **Nothing is cached** except the token. The rate-limit headers are read
   only to recognise a used-up limit; nothing tracks how much is left. Both
   are phase E.
@@ -125,6 +131,7 @@ what lets them be tested without a network.
 | `src/github/cli.rs` | `gh auth`: check, status, login, scopes, logout |
 | `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
 | `src/github/api.rs` | The endpoint functions, and `send` |
+| `src/github/paging.rs` | `Page`, and reading the `Link` header |
 | `src/github/error.rs` | `GhError`, and turning an HTTP answer into a value or an error |
 | `src/github/clone.rs` | `gh repo clone` with streamed output |
 | `src/github/types.rs` | Response types and `GhState` |
@@ -145,7 +152,7 @@ Still on tokio: running `gh` (sign-in, the token, cloning) and the two
 progress channels. Moving those off it would mean rewriting the sign-in
 flow, which cannot be tested without signing in by hand, so it was left.
 
-Next, in the plan: pagination (phase D), then rate limits and caching
+Pagination (phase D) is done too. Next in the plan: rate limits and caching
 (phase E).
 
 ## Development

@@ -9,15 +9,23 @@ impl HelmPanel {
     /// `issues_filter`. The Issues tab drops PR-shaped items (the `/issues`
     /// endpoint mixes issues and PRs).
     pub(super) fn load_issues(&mut self, cx: &mut Context<Self>) {
+        self.load_issues_page(1, cx);
+    }
+
+    pub(super) fn load_issues_page(&mut self, page: u32, cx: &mut Context<Self>) {
         let filter = self.issues_filter.clone();
-        self.load_section(
+        self.load_section_page(
             cx,
             |this| &mut this.issues,
-            |repo, gh_state| async move {
-                let mut issues =
-                    gh_list_issues(repo.owner.login, repo.name, filter, &gh_state).await?;
-                // GitHub's issues endpoint returns pull requests too.
-                issues.retain(|issue| issue.pull_request.is_none());
+            page,
+            move |repo, gh_state| async move {
+                let request = requests::issues(&repo.owner.login, &repo.name, &filter);
+                let mut issues: Page<Issue> =
+                    fetch_page(&gh_state, request, page, PAGE_SIZE).await?;
+                // GitHub's issues endpoint returns pull requests too, and
+                // counts them in its pages. Leaving them out means a page
+                // can show fewer than ten rows while more pages follow.
+                issues.items.retain(|issue| issue.pull_request.is_none());
                 Ok::<_, GhError>(issues)
             },
         );
@@ -141,7 +149,8 @@ impl HelmPanel {
             ));
 
         self.list_screen(
-            self.issues.status(),
+            self.issues
+                .paged_status(|this, page, cx| this.load_issues_page(page, cx)),
             &self.issues_list,
             Some(filter_row.into_any_element()),
             ListLabels {
@@ -149,7 +158,7 @@ impl HelmPanel {
                 error: "Failed to load issues",
                 empty: "No issues found",
             },
-            |this, cx| this.load_issues(cx),
+            |this, cx| this.load_issues_page(this.issues.page, cx),
             cx,
         )
     }

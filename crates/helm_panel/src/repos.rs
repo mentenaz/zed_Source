@@ -191,9 +191,19 @@ impl HelmPanel {
             ListStatus {
                 state: self.repos.state,
                 error: self.repos.error.clone(),
-                // `repos_shown` is what the search box leaves, worked out
-                // at the top of `render`.
+                // `repos_shown` is the page of what the search box leaves,
+                // worked out at the top of `render`.
                 is_empty: self.repos_shown.is_empty(),
+                pager: Some(Pager {
+                    page: self.repos_page,
+                    last_page: self.repos_last_page,
+                    // Every repository is already here; another page is
+                    // just another slice.
+                    go: |this, page, cx| {
+                        this.repos_page = page;
+                        cx.notify();
+                    },
+                }),
             },
             &self.repos_list,
             Some(search_row.into_any_element()),

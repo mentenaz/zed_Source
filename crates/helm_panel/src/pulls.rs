@@ -7,14 +7,14 @@ impl HelmPanel {
     /// Loads `self.selected_repo`'s pull requests for the current
     /// `pulls_filter`.
     pub(super) fn load_pulls(&mut self, cx: &mut Context<Self>) {
+        self.load_pulls_page(1, cx);
+    }
+
+    pub(super) fn load_pulls_page(&mut self, page: u32, cx: &mut Context<Self>) {
         let filter = self.pulls_filter.clone();
-        self.load_section(
-            cx,
-            |this| &mut this.pulls,
-            |repo, gh_state| async move {
-                gh_list_pulls(repo.owner.login, repo.name, filter, &gh_state).await
-            },
-        );
+        self.load_repo_page(cx, |this| &mut this.pulls, page, move |repo| {
+            requests::pulls(&repo.owner.login, &repo.name, &filter)
+        });
     }
 
     /// Same as [`Self::open_issue_detail`], for a PR row.
@@ -108,7 +108,8 @@ impl HelmPanel {
             );
 
         self.list_screen(
-            self.pulls.status(),
+            self.pulls
+                .paged_status(|this, page, cx| this.load_pulls_page(page, cx)),
             &self.pulls_list,
             Some(filter_row.into_any_element()),
             ListLabels {
@@ -116,7 +117,7 @@ impl HelmPanel {
                 error: "Failed to load pull requests",
                 empty: "No pull requests found",
             },
-            |this, cx| this.load_pulls(cx),
+            |this, cx| this.load_pulls_page(this.pulls.page, cx),
             cx,
         )
     }

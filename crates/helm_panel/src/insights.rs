@@ -288,6 +288,7 @@ impl HelmPanel {
                 state: self.dependabot_alerts.state,
                 error: String::new(),
                 is_empty: dependabot + secret_scanning == 0,
+                pager: None,
             },
             &self.security_list,
             Some(header.into_any_element()),

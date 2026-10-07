@@ -19,6 +19,7 @@ use std::rc::Rc;
 use gpui_component::{
     IndexPath,
     list::{List, ListDelegate, ListEvent, ListState},
+    pagination::Pagination,
 };
 
 use super::*;
@@ -164,6 +165,17 @@ pub(super) struct ListStatus {
     pub(super) state: LoadState,
     pub(super) error: String,
     pub(super) is_empty: bool,
+    /// Set for a list shown a page at a time.
+    pub(super) pager: Option<Pager>,
+}
+
+/// Where a paged list is, and how to go to another page.
+pub(super) struct Pager {
+    pub(super) page: u32,
+    pub(super) last_page: u32,
+    /// Shows page `page`: a request for a list paged by GitHub, or a change
+    /// of slice for one the panel holds in full.
+    pub(super) go: fn(&mut HelmPanel, u32, &mut Context<HelmPanel>),
 }
 
 impl<T> Section<T> {
@@ -172,6 +184,23 @@ impl<T> Section<T> {
             state: self.state,
             error: self.error.clone(),
             is_empty: self.items.is_empty(),
+            pager: None,
+        }
+    }
+
+    /// [`Self::status`] for a list shown a page at a time. `go` loads
+    /// another page.
+    pub(super) fn paged_status(
+        &self,
+        go: fn(&mut HelmPanel, u32, &mut Context<HelmPanel>),
+    ) -> ListStatus {
+        ListStatus {
+            pager: Some(Pager {
+                page: self.page,
+                last_page: self.last_page,
+                go,
+            }),
+            ..self.status()
         }
     }
 }
@@ -253,6 +282,45 @@ impl HelmPanel {
                 .into_any_element()
         };
 
+        // Back and Next, for a list with more than one page. Shown while a
+        // page loads too, so the buttons do not jump about, but they only
+        // act once the list has settled.
+        let settled = status.state != LoadState::Loading;
+        let pager = status
+            .pager
+            .filter(|pager| pager.last_page > 1)
+            .map(|pager| {
+                let panel = cx.weak_entity();
+                let go = pager.go;
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(format!("Page {} of {}", pager.page, pager.last_page)),
+                    )
+                    .child(
+                        Pagination::new("helm-list-pager")
+                            .current_page(pager.page as usize)
+                            .total_pages(pager.last_page as usize)
+                            .compact()
+                            .small()
+                            .disabled(!settled)
+                            .on_click(move |page, _, cx| {
+                                let page = *page as u32;
+                                panel.update(cx, |this, cx| go(this, page, cx)).ok();
+                            }),
+                    )
+            });
+
         v_flex()
             .size_full()
             .when_some(header, |screen, header| {
@@ -261,6 +329,7 @@ impl HelmPanel {
                     .child(div().h_px().w_full().bg(border))
             })
             .child(body)
+            .children(pager)
             .into_any_element()
     }
 }
