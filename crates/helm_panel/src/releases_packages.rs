@@ -6,12 +6,12 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s releases.
     pub(super) fn load_releases(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.releases,
             |repo, gh_state| async move {
                 gh_list_releases(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, releases| this.releases = releases,
         );
     }
 
@@ -135,7 +135,7 @@ impl HelmPanel {
                     })),
             );
 
-        if self.load_state == LoadState::Loading {
+        if self.releases.state == LoadState::Loading {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(cx.theme().border))
@@ -161,7 +161,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.releases.state == LoadState::Error {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(cx.theme().border))
@@ -185,7 +185,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.releases.is_empty() {
+        if self.releases.items.is_empty() {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(cx.theme().border))
@@ -205,35 +205,35 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let releases_len = self.releases.len();
-        let releases_cursor = self.releases_list_cursor;
+        let releases_len = self.releases.items.len();
+        let releases_cursor = self.releases.cursor;
         let releases_urls: Vec<String> =
-            self.releases.iter().map(|r| r.html_url.clone()).collect();
+            self.releases.items.iter().map(|r| r.html_url.clone()).collect();
         let releases_list = v_flex()
             .id("helm-releases-list")
-            .track_focus(&self.releases_list_focus)
+            .track_focus(&self.releases.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.releases_list_focus, cx);
+                window.focus(&this.releases.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.releases_list_cursor = step_selected(this.releases_list_cursor, releases_len, true);
+                this.releases.cursor = step_selected(this.releases.cursor, releases_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.releases_list_cursor =
-                    step_selected(this.releases_list_cursor, releases_len, false);
+                this.releases.cursor =
+                    step_selected(this.releases.cursor, releases_len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(url) = this.releases_list_cursor.and_then(|ix| releases_urls.get(ix))
+                let Some(url) = this.releases.cursor.and_then(|ix| releases_urls.get(ix))
                 else {
                     return;
                 };
                 cx.open_url(url);
             }))
             .py_1()
-            .children(self.releases.iter().enumerate().map(|(ix, release)| {
+            .children(self.releases.items.iter().enumerate().map(|(ix, release)| {
                 let tag = release.tag_name.clone();
                 let title = release
                     .name
@@ -317,7 +317,7 @@ impl HelmPanel {
                             .text_color(muted_foreground)
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.releases_list_cursor = Some(ix);
+                        this.releases.cursor = Some(ix);
                         cx.open_url(&url);
                     }))
             }));

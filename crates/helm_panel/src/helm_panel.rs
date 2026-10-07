@@ -24,6 +24,7 @@ mod releases_packages;
 mod insights;
 mod activity;
 mod repository_modal;
+mod section;
 mod workflow_run_tab;
 mod state;
 mod widgets;
@@ -74,6 +75,7 @@ use crate::backend::on_tokio;
 use changes::*;
 use collaborators::*;
 use repository_modal::*;
+use section::*;
 use workflow_run_tab::*;
 use state::*;
 use widgets::*;
@@ -228,11 +230,9 @@ pub struct HelmPanel {
     // Repo-detail tab caches (Issues/Pulls/Releases/Packages/Traffic) —
     // loaded on screen entry and kept while drilling; `set_screen` clears
     // them along with `selected_repo` when leaving the repo-drilled screens.
-    issues: Vec<Issue>,
+    issues: Section<Issue>,
     issues_filter: String,
     /// Row `up`/`down`/`enter` act on, within `issues`.
-    issues_list_cursor: Option<usize>,
-    issues_list_focus: FocusHandle,
     pulls: Vec<Pull>,
     pulls_filter: String,
     pulls_list_cursor: Option<usize>,
@@ -249,9 +249,7 @@ pub struct HelmPanel {
     /// `Comment`'s doc comment).
     detail_comments: Vec<Comment>,
     detail_comments_state: LoadState,
-    releases: Vec<Release>,
-    releases_list_cursor: Option<usize>,
-    releases_list_focus: FocusHandle,
+    releases: Section<Release>,
     packages: Vec<Package>,
     packages_list_cursor: Option<usize>,
     packages_list_focus: FocusHandle,
@@ -365,10 +363,8 @@ impl HelmPanel {
                 collaborators: Vec::new(),
                 collaborators_list_cursor: None,
                 collaborators_list_focus: cx.focus_handle(),
-                issues: Vec::new(),
+                issues: Section::new(cx),
                 issues_filter: "open".into(),
-                issues_list_cursor: None,
-                issues_list_focus: cx.focus_handle(),
                 pulls: Vec::new(),
                 pulls_filter: "open".into(),
                 pulls_list_cursor: None,
@@ -377,9 +373,7 @@ impl HelmPanel {
                 selected_pr: None,
                 detail_comments: Vec::new(),
                 detail_comments_state: LoadState::Idle,
-                releases: Vec::new(),
-                releases_list_cursor: None,
-                releases_list_focus: cx.focus_handle(),
+                releases: Section::new(cx),
                 packages: Vec::new(),
                 packages_list_cursor: None,
                 packages_list_focus: cx.focus_handle(),

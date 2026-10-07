@@ -10,14 +10,15 @@ impl HelmPanel {
     /// endpoint mixes issues and PRs).
     pub(super) fn load_issues(&mut self, cx: &mut Context<Self>) {
         let filter = self.issues_filter.clone();
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.issues,
             |repo, gh_state| async move {
-                gh_list_issues(repo.owner.login, repo.name, filter, &gh_state).await
-            },
-            |this, mut issues| {
+                let mut issues =
+                    gh_list_issues(repo.owner.login, repo.name, filter, &gh_state).await?;
+                // GitHub's issues endpoint returns pull requests too.
                 issues.retain(|issue| issue.pull_request.is_none());
-                this.issues = issues;
+                Ok(issues)
             },
         );
     }
@@ -143,7 +144,7 @@ impl HelmPanel {
                 cx,
             ));
 
-        if self.load_state == LoadState::Loading {
+        if self.issues.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -164,7 +165,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.issues.state == LoadState::Error {
             return v_flex()
                 .gap_3()
                 .p_4()
@@ -183,7 +184,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.issues.is_empty() {
+        if self.issues.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -198,32 +199,32 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let issues_len = self.issues.len();
-        let issues_cursor = self.issues_list_cursor;
+        let issues_len = self.issues.items.len();
+        let issues_cursor = self.issues.cursor;
         let issues_list = v_flex()
             .id("helm-issues-list")
-            .track_focus(&self.issues_list_focus)
+            .track_focus(&self.issues.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.issues_list_focus, cx);
+                window.focus(&this.issues.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.issues_list_cursor = step_selected(this.issues_list_cursor, issues_len, true);
+                this.issues.cursor = step_selected(this.issues.cursor, issues_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.issues_list_cursor = step_selected(this.issues_list_cursor, issues_len, false);
+                this.issues.cursor = step_selected(this.issues.cursor, issues_len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(issue) = this.issues_list_cursor.and_then(|ix| this.issues.get(ix)).cloned()
+                let Some(issue) = this.issues.cursor.and_then(|ix| this.issues.items.get(ix)).cloned()
                 else {
                     return;
                 };
                 this.open_issue_detail(issue, cx);
             }))
             .py_1()
-            .children(self.issues.iter().enumerate().map(|(ix, issue)| {
+            .children(self.issues.items.iter().enumerate().map(|(ix, issue)| {
                 let number = issue.number;
                 let title = issue.title.clone();
                 let state = if issue.state == "closed" {
@@ -302,7 +303,7 @@ impl HelmPanel {
                             )
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.issues_list_cursor = Some(ix);
+                        this.issues.cursor = Some(ix);
                         this.open_issue_detail(issue_for_click.clone(), cx);
                     }))
             }));
