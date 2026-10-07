@@ -52,16 +52,7 @@ pub(super) fn branch_row(ix: usize, branch: &Branch, default_branch: &str, cx: &
                 .items_center()
                 .gap_2()
                 .when(is_default, |row| {
-                    row.child(
-                        div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_full()
-                            .text_xs()
-                            .bg(muted_foreground.opacity(0.15))
-                            .text_color(muted_foreground)
-                            .child("default"),
-                    )
+                    row.child(chip("default"))
                 })
                 .when(protected, |row| {
                     row.child(

@@ -46,27 +46,9 @@ impl HelmPanel {
     pub(super) fn render_org_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         if self.load_state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading organization…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Loading organization…", cx);
         }
 
         let Some(org) = self.org_detail.clone() else {
@@ -144,9 +126,9 @@ impl HelmPanel {
 
         v_flex()
             .child(stats_row)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(info_rows)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 ListItem::new("helm-org-repositories")
                     .child(div().text_color(foreground).child("Repositories"))

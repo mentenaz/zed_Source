@@ -81,27 +81,9 @@ impl HelmPanel {
     pub(super) fn render_traffic(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         if self.load_state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading traffic…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Loading traffic…", cx);
         }
 
         if self.load_state == LoadState::Error {
@@ -178,7 +160,7 @@ impl HelmPanel {
 
         let mut col = v_flex()
             .child(totals_row)
-            .child(div().h_px().w_full().bg(border));
+            .child(Separator::horizontal());
 
         if let Some(views) = traffic.views.clone() {
             col = col.child(daily_label("Views (last 7 days)")).child(

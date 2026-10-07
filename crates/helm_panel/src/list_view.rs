@@ -335,7 +335,7 @@ impl HelmPanel {
             .when_some(header, |screen, header| {
                 screen
                     .child(header)
-                    .child(div().h_px().w_full().bg(border))
+                    .child(Separator::horizontal())
             })
             .child(body)
             .children(pager)

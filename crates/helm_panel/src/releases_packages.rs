@@ -337,22 +337,11 @@ pub(super) fn release_summary(release: &Release) -> String {
 pub(super) fn release_row(ix: usize, release: &Release, cx: &App) -> ListItem {
     let muted_foreground = cx.theme().muted_foreground;
     let foreground = cx.theme().foreground;
-    let warning = cx.theme().warning;
     let title = release
         .name
         .clone()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| release.tag_name.clone());
-    let badge = |text: &'static str, color: gpui::Hsla| {
-        div()
-            .px_1p5()
-            .py_0p5()
-            .rounded_full()
-            .text_xs()
-            .bg(color.opacity(0.15))
-            .text_color(color)
-            .child(text)
-    };
     ListItem::new(("helm-release", ix))
         .child(
             v_flex()
@@ -370,9 +359,9 @@ pub(super) fn release_row(ix: usize, release: &Release, cx: &App) -> ListItem {
                                 .text_color(foreground)
                                 .child(title),
                         )
-                        .when(release.draft, |row| row.child(badge("draft", muted_foreground)))
+                        .when(release.draft, |row| row.child(chip("draft")))
                         .when(release.prerelease, |row| {
-                            row.child(badge("pre-release", warning))
+                            row.child(Pill::warning().xsmall().rounded_full().child("pre-release"))
                         }),
                 )
                 .child(

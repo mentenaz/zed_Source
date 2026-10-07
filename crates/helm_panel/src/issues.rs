@@ -180,9 +180,6 @@ impl HelmPanel {
     pub(super) fn render_issue_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let success = cx.theme().success;
-        let danger = cx.theme().danger;
-        let border = cx.theme().border;
 
         let Some(issue) = self.selected_issue.clone() else {
             return v_flex()
@@ -218,15 +215,14 @@ impl HelmPanel {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        div()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_full()
-                                            .text_xs()
-                                            .bg((if state_open { success } else { danger })
-                                                .opacity(0.15))
-                                            .text_color(if state_open { success } else { danger })
-                                            .child(if state_open { "Open" } else { "Closed" }),
+                                        if state_open {
+                                            Pill::success()
+                                        } else {
+                                            Pill::danger()
+                                        }
+                                        .xsmall()
+                                        .rounded_full()
+                                        .child(if state_open { "Open" } else { "Closed" }),
                                     )
                                     .child(
                                         div()
@@ -256,19 +252,13 @@ impl HelmPanel {
                             h_flex()
                                 .flex_wrap()
                                 .gap_1()
-                                .children(issue.labels.iter().map(|label| {
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .text_xs()
-                                        .bg(muted_foreground.opacity(0.15))
-                                        .text_color(muted_foreground)
-                                        .child(label.name.clone())
-                                })),
+                                .children(
+                                    issue.labels.iter().map(|label| chip(label.name.clone())),
+                                ),
                         )
                     }),
             )
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 div().p_3().text_sm().child(markdown(
                     issue
@@ -278,7 +268,7 @@ impl HelmPanel {
                         .unwrap_or_else(|| "_No description provided._".to_string()),
                 )),
             )
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(self.render_comment_thread(cx))
             .into_any_element()
     }
@@ -423,15 +413,7 @@ pub(super) fn issue_row(ix: usize, issue: &Issue, cx: &App) -> ListItem {
             h_flex()
                 .items_center()
                 .gap_2()
-                .children(labels.iter().map(|label| {
-                    div()
-                        .px_1p5()
-                        .rounded_full()
-                        .text_xs()
-                        .bg(muted_foreground.opacity(0.15))
-                        .text_color(muted_foreground)
-                        .child(label.name.clone())
-                }))
+                .children(labels.iter().map(|label| chip(label.name.clone())))
                 .child(
                     Icon::new(IconName::ChevronRight)
                         .xsmall()

@@ -310,41 +310,16 @@ impl HelmPanel {
     /// The "gh CLI required" gate — shown until `gh --version` succeeds.
     pub(super) fn render_gate(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
-        let warning = cx.theme().warning;
 
         if self.load_state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Checking for GitHub CLI…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Checking for GitHub CLI…", cx);
         }
 
         v_flex()
             .gap_3()
             .p_4()
             .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(warning.opacity(0.12))
-                    .text_color(warning)
-                    .text_sm()
-                    .child("⚠ GitHub CLI (gh) is required"),
+                Alert::warning("helm-gate-alert", "GitHub CLI (gh) is required"),
             )
             .child(
                 div()
@@ -369,33 +344,13 @@ impl HelmPanel {
 
     /// Login / scope-authorization screen.
     pub(super) fn render_auth(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let warning = cx.theme().warning;
-        let danger = cx.theme().danger;
 
         // Initial `do_auth()` hasn't resolved yet — never flash the login
         // button.
         if !self.auth_initialized && !self.login_started {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Checking GitHub login…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Checking GitHub login…", cx);
         }
 
         // Missing scope — `repo` from the startup check, or whichever scope
@@ -408,14 +363,10 @@ impl HelmPanel {
                 .gap_3()
                 .p_4()
                 .child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(warning.opacity(0.12))
-                        .text_color(warning)
-                        .text_sm()
-                        .child(format!("⚠ Missing '{scope}' scope")),
+                    Alert::warning(
+                        "helm-scope-alert",
+                        format!("Missing '{scope}' scope"),
+                    ),
                 )
                 .child(
                     div()
@@ -447,7 +398,7 @@ impl HelmPanel {
                 .gap_3()
                 .p_4()
                 .child(div().text_color(foreground).child("Connect to GitHub"))
-                .child(div().h_px().w_full().bg(border));
+                .child(Separator::horizontal());
 
             col = if !self.device_code.is_empty() {
                 let copied = self.code_copied;
@@ -534,14 +485,7 @@ impl HelmPanel {
                 .gap_3()
                 .p_4()
                 .child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(danger.opacity(0.12))
-                        .text_color(danger)
-                        .text_sm()
-                        .child(format!("✗ {}", self.error_msg)),
+                    Alert::error("helm-login-error", self.error_msg.clone()),
                 )
                 .child(
                     Button::new("auth-retry")
@@ -557,7 +501,7 @@ impl HelmPanel {
             .gap_3()
             .p_4()
             .child(div().text_color(foreground).child("GitHub"))
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 div()
                     .text_sm()

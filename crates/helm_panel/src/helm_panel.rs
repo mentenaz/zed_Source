@@ -41,6 +41,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable as _, StyledExt,
+    alert::Alert,
     avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -48,8 +49,10 @@ use gpui_component::{
     list::ListItem,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
+    separator::Separator,
     spinner::Spinner,
     switch::Switch,
+    tag::Tag as Pill,
     text::markdown,
     v_flex,
 };
@@ -530,7 +533,7 @@ impl Render for HelmPanel {
                     )
                     .when(show_nav, |row| row.child(self.render_nav_bar(cx))),
             )
-            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(Separator::horizontal())
             .children(self.render_identity_header(cx))
             .child(
                 v_flex()

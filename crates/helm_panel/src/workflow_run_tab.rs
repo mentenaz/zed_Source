@@ -241,7 +241,6 @@ impl Render for WorkflowRunItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         let run_status_label = self.run.conclusion.clone().unwrap_or_else(|| self.run.status.clone());
         let run_color = workflow_status_color(cx, &self.run.status, &self.run.conclusion);
@@ -280,13 +279,8 @@ impl Render for WorkflowRunItem {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(run_color.opacity(0.2))
-                            .text_color(run_color)
-                            .text_xs()
+                        Pill::custom(run_color.opacity(0.2), run_color, run_color.opacity(0.3))
+                            .xsmall()
                             .child(run_status_label),
                     )
                     .child(
@@ -297,13 +291,13 @@ impl Render for WorkflowRunItem {
                     ),
             );
 
-        let divider = div().h_px().w_full().bg(border);
+        let divider = || Separator::horizontal();
 
         if self.jobs.is_empty() && self.load_state == LoadState::Loading {
             return v_flex()
                 .size_full()
                 .child(header)
-                .child(divider)
+                .child(divider())
                 .child(
                     v_flex()
                         .flex_1()
@@ -329,7 +323,7 @@ impl Render for WorkflowRunItem {
             return v_flex()
                 .size_full()
                 .child(header)
-                .child(divider)
+                .child(divider())
                 .child(
                     v_flex()
                         .gap_3()
@@ -355,7 +349,7 @@ impl Render for WorkflowRunItem {
             return v_flex()
                 .size_full()
                 .child(header)
-                .child(divider)
+                .child(divider())
                 .child(
                     v_flex()
                         .flex_1()
@@ -375,7 +369,7 @@ impl Render for WorkflowRunItem {
         v_flex()
             .size_full()
             .child(header)
-            .child(divider)
+            .child(divider())
             .child(
                 div()
                     .relative()

@@ -63,7 +63,6 @@ impl HelmPanel {
     pub(super) fn render_profile(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         let Some(user) = self.user.clone() else {
             return v_flex()
@@ -136,7 +135,7 @@ impl HelmPanel {
         let row_ids: Vec<&'static str> = rows.iter().map(|row| row.id).collect();
         v_flex()
             .child(stats_row)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 v_flex()
                     .id("helm-profile-menu")
@@ -221,7 +220,6 @@ impl HelmPanel {
     /// anyway).
     pub(super) fn render_identity_header(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let muted_foreground = cx.theme().muted_foreground;
-        let border = cx.theme().border;
 
         // `OrgDetail` swaps in the org's own avatar/name instead of the
         // user's — matches the old app's `PanelHeader`/`OrgHeader` split.
@@ -285,7 +283,7 @@ impl HelmPanel {
                                 ),
                         ),
                 )
-                .child(div().h_px().w_full().bg(border)),
+                .child(Separator::horizontal()),
         )
     }
 
@@ -364,27 +362,9 @@ impl HelmPanel {
     pub(super) fn render_user_profile(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         if self.load_state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading profile…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Loading profile…", cx);
         }
 
         let Some(user) = self.viewed_user.clone() else {
@@ -441,7 +421,7 @@ impl HelmPanel {
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     ),
             )
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .when_some(user.bio.clone(), |col, bio| {
                 col.child(div().p_3().text_sm().text_color(foreground).child(bio))
             })

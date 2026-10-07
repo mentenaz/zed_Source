@@ -107,75 +107,6 @@ impl HelmPanel {
     /// reroutes the `"owner"` key to `POST /orgs/{org}/repos`).
     pub(super) fn open_create_repo_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_workspace_modal(HelmModalKind::CreateRepo, window, cx);
-        return;
-
-        /*
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("my-new-repo"));
-        let description =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
-        let org = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Organization (blank = your account)")
-        });
-        let private = Rc::new(Cell::new(true));
-        let view = cx.entity();
-
-        window.open_dialog(cx, move |dialog, _, _| {
-            let name = name.clone();
-            let description = description.clone();
-            let org = org.clone();
-            let private = private.clone();
-            let view = view.clone();
-
-            dialog
-                .title("Create repository")
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(Input::new(&name))
-                        .child(Input::new(&description))
-                        .child(Input::new(&org))
-                        .child(
-                            Switch::new("create-repo-private")
-                                .label("Private")
-                                .checked(private.get())
-                                .on_click({
-                                    let private = private.clone();
-                                    move |checked: &bool, _, _| private.set(*checked)
-                                }),
-                        ),
-                )
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            DialogClose::new()
-                                .child(Button::new("cancel").outline().label("Cancel")),
-                        )
-                        .child(
-                            DialogAction::new().child(
-                                Button::new("create-repo-confirm").primary().label("Create"),
-                            ),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    let name_val = name.read(cx).value().to_string();
-                    let description_val = description.read(cx).value().to_string();
-                    let private_val = private.get();
-                    let org_val = org.read(cx).value().to_string();
-                    let org_val = (!org_val.trim().is_empty()).then(|| org_val.trim().to_string());
-                    view.update(cx, |this, cx| {
-                        this.handle_create_repo(
-                            name_val,
-                            description_val,
-                            private_val,
-                            org_val,
-                            window,
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
-        */
     }
 
     /// The repo list — mirrors the old `RepoListScreen`. Loads either the
@@ -232,7 +163,6 @@ impl HelmPanel {
     pub(super) fn render_repo_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
         let Some(repo) = self.selected_repo.clone() else {
             return v_flex()
@@ -265,12 +195,7 @@ impl HelmPanel {
                             .text_color(foreground)
                             .child(repo.name.clone()),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_foreground)
-                            .child(repo_vis_label(&repo)),
-                    ),
+                    .child(Pill::secondary().outline().xsmall().child(repo_vis_label(&repo))),
             )
             .child(
                 Button::new("helm-repo-edit")
@@ -289,16 +214,7 @@ impl HelmPanel {
                 .gap_1()
                 .px_3()
                 .py_2()
-                .children(repo.topics.iter().map(|t| {
-                    div()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_full()
-                        .text_xs()
-                        .bg(cx.theme().muted)
-                        .text_color(muted_foreground)
-                        .child(t.clone())
-                }))
+                .children(repo.topics.iter().map(|topic| chip(topic.clone())))
         });
 
         let info_row = |label: &'static str, value: String| {
@@ -421,14 +337,14 @@ impl HelmPanel {
 
         v_flex()
             .child(header_row)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .children(topics_row)
             .child(description_row)
             .child(homepage_row)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(clone_url_row)
             .child(clone_section)
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 nav_row("helm-repo-branches", IconName::Git, "Branches").on_click(cx.listener(
                     |this, _, _, cx| {
@@ -538,128 +454,6 @@ impl HelmPanel {
         };
 
         self.open_workspace_modal(HelmModalKind::EditRepo(repo), window, cx);
-        return;
-
-        /*
-        let name = cx.new(|cx| InputState::new(window, cx).default_value(repo.name.clone()));
-        let description = cx.new(|cx| {
-            InputState::new(window, cx).default_value(repo.description.clone().unwrap_or_default())
-        });
-        let homepage = cx.new(|cx| {
-            InputState::new(window, cx).default_value(repo.homepage.clone().unwrap_or_default())
-        });
-        let topics = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(repo.topics.join(", "))
-                .placeholder("comma, separated, topics")
-        });
-        let has_issues = Rc::new(Cell::new(repo.has_issues));
-        let has_wiki = Rc::new(Cell::new(repo.has_wiki));
-        let has_projects = Rc::new(Cell::new(repo.has_projects));
-        let has_discussions = Rc::new(Cell::new(repo.has_discussions));
-        let view = cx.entity();
-
-        window.open_dialog(cx, move |dialog, _, _| {
-            let name = name.clone();
-            let description = description.clone();
-            let homepage = homepage.clone();
-            let topics = topics.clone();
-            let has_issues = has_issues.clone();
-            let has_wiki = has_wiki.clone();
-            let has_projects = has_projects.clone();
-            let has_discussions = has_discussions.clone();
-            let view = view.clone();
-
-            dialog
-                .title("Edit repository")
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(Input::new(&name))
-                        .child(Input::new(&description))
-                        .child(Input::new(&homepage))
-                        .child(Input::new(&topics))
-                        .child(
-                            Switch::new("edit-repo-has-issues")
-                                .label("Issues")
-                                .checked(has_issues.get())
-                                .on_click({
-                                    let has_issues = has_issues.clone();
-                                    move |checked: &bool, _, _| has_issues.set(*checked)
-                                }),
-                        )
-                        .child(
-                            Switch::new("edit-repo-has-projects")
-                                .label("Projects")
-                                .checked(has_projects.get())
-                                .on_click({
-                                    let has_projects = has_projects.clone();
-                                    move |checked: &bool, _, _| has_projects.set(*checked)
-                                }),
-                        )
-                        .child(
-                            Switch::new("edit-repo-has-wiki")
-                                .label("Wiki")
-                                .checked(has_wiki.get())
-                                .on_click({
-                                    let has_wiki = has_wiki.clone();
-                                    move |checked: &bool, _, _| has_wiki.set(*checked)
-                                }),
-                        )
-                        .child(
-                            Switch::new("edit-repo-has-discussions")
-                                .label("Discussions")
-                                .checked(has_discussions.get())
-                                .on_click({
-                                    let has_discussions = has_discussions.clone();
-                                    move |checked: &bool, _, _| has_discussions.set(*checked)
-                                }),
-                        ),
-                )
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            DialogClose::new()
-                                .child(Button::new("cancel").outline().label("Cancel")),
-                        )
-                        .child(
-                            DialogAction::new()
-                                .child(Button::new("edit-repo-confirm").primary().label("Save")),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    let name_val = name.read(cx).value().to_string();
-                    let description_val = description.read(cx).value().to_string();
-                    let homepage_val = homepage.read(cx).value().to_string();
-                    let topics_val: Vec<String> = topics
-                        .read(cx)
-                        .value()
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    let has_issues_val = has_issues.get();
-                    let has_wiki_val = has_wiki.get();
-                    let has_projects_val = has_projects.get();
-                    let has_discussions_val = has_discussions.get();
-                    view.update(cx, |this, cx| {
-                        this.handle_edit_repo(
-                            name_val,
-                            description_val,
-                            homepage_val,
-                            topics_val,
-                            has_issues_val,
-                            has_wiki_val,
-                            has_projects_val,
-                            has_discussions_val,
-                            window,
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
-        */
     }
 }
 

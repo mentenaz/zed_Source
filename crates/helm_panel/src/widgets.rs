@@ -16,8 +16,35 @@ pub(super) fn labeled_field(
         .child(input)
 }
 
-/// Mirrors the old TS `visLabel`: archived beats internal beats
-/// private/public.
+/// A spinner beside a line of text, in the middle of the space a screen has.
+/// What a screen shows while the one thing it is about is being fetched.
+pub(super) fn loading_screen(label: &'static str, cx: &App) -> gpui::AnyElement {
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .p_4()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(Spinner::new().small())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
+                ),
+        )
+        .into_any_element()
+}
+
+/// A small rounded label: an issue's label, a repository's topic, "default"
+/// beside a branch.
+pub(super) fn chip(text: impl Into<SharedString>) -> Pill {
+    Pill::secondary().xsmall().rounded_full().child(text.into())
+}
+
 /// Moves `selected` one row up (`forward: false`) or down (`forward: true`)
 /// within a `len`-row list, wrapping at both ends — matches
 /// `gpui_component::table::TableState`'s default `loop_selection` behavior
@@ -56,6 +83,8 @@ pub(super) fn hex(color: gpui::Hsla) -> u32 {
     u32::from(color.to_rgb()) >> 8
 }
 
+/// Mirrors the old TS `visLabel`: archived beats internal beats
+/// private/public.
 pub(super) fn repo_vis_label(repo: &Repo) -> &'static str {
     if repo.archived {
         "archived"

@@ -128,9 +128,6 @@ impl HelmPanel {
     pub(super) fn render_pr_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let success = cx.theme().success;
-        let danger = cx.theme().danger;
-        let border = cx.theme().border;
 
         let Some(pr) = self.selected_pr.clone() else {
             return v_flex()
@@ -144,12 +141,12 @@ impl HelmPanel {
                 .into_any_element();
         };
 
-        let (status_label, status_color) = if pr.merged {
-            ("Merged", success)
+        let (status_label, status_tag) = if pr.merged {
+            ("Merged", Pill::info())
         } else if pr.state == "closed" {
-            ("Closed", danger)
+            ("Closed", Pill::danger())
         } else {
-            ("Open", success)
+            ("Open", Pill::success())
         };
         let author = pr
             .user
@@ -181,16 +178,7 @@ impl HelmPanel {
                                 h_flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        div()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_full()
-                                            .text_xs()
-                                            .bg(status_color.opacity(0.15))
-                                            .text_color(status_color)
-                                            .child(status_label),
-                                    )
+                                    .child(status_tag.xsmall().rounded_full().child(status_label))
                                     .child(
                                         div()
                                             .text_xs()
@@ -222,7 +210,7 @@ impl HelmPanel {
                             .child(format!("{head_label} → {base_label}")),
                     ),
             )
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(
                 div().p_3().text_sm().child(markdown(
                     pr.body
@@ -231,7 +219,7 @@ impl HelmPanel {
                         .unwrap_or_else(|| "_No description provided._".to_string()),
                 )),
             )
-            .child(div().h_px().w_full().bg(border))
+            .child(Separator::horizontal())
             .child(self.render_comment_thread(cx))
             .into_any_element()
     }
