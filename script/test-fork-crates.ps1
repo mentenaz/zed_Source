@@ -1,7 +1,8 @@
 # Runs the unit tests of the crates this fork adds on top of upstream Zed.
 #
 # Upstream's own CI (`.github/workflows/run_tests.yml`) only runs for the
-# zed-industries organisation, so nothing runs these automatically here.
+# zed-industries organisation, so it never tests these crates.
+#
 # GitHub runs this for every push to main and for pull requests
 # (`.github/workflows/fork_tests.yml`). There is also an optional pre-push
 # hook in `script/git-hooks`, off by default, that runs it locally and stops
