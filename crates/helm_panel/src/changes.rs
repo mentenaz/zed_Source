@@ -344,11 +344,11 @@ impl HelmPanel {
                 .detach();
             }
             HelmAction::AcceptRepoInvitation(id) => {
-                self.invitations.retain(|inv| inv.id != *id);
+                self.invitations.items.retain(|inv| inv.id != *id);
                 self.notify("Invitation accepted", cx);
             }
             HelmAction::DeclineRepoInvitation(id) => {
-                self.invitations.retain(|inv| inv.id != *id);
+                self.invitations.items.retain(|inv| inv.id != *id);
                 self.notify("Invitation declined", cx);
             }
             HelmAction::AcceptOrgInvitation(org) => {
@@ -366,7 +366,7 @@ impl HelmPanel {
             | HelmAction::SetCollaboratorPermission { .. }
             | HelmAction::RemoveCollaborator(_) => {}
         }
-        self.repo_invitation_count = self.invitations.len() + self.org_invitations.len();
+        self.repo_invitation_count = self.invitations.items.len() + self.org_invitations.len();
         cx.notify();
     }
 

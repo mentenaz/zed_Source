@@ -256,11 +256,9 @@ pub struct HelmPanel {
 
     // Pending repo invitations shown on the Profile screen's Invitations
     // screen — `repo_invitation_count` above is just the badge for that row.
-    invitations: Vec<RepoInvitation>,
-    invitations_list_cursor: Option<usize>,
-    invitations_list_focus: FocusHandle,
+    invitations: Section<RepoInvitation>,
     /// Pending org invitations, shown on the same Invitations screen — listed
-    /// above `invitations` with no visual separator, so `invitations_list_cursor`
+    /// above `invitations` with no visual separator, so `invitations.cursor`
     /// covers both as one combined, index-shared list (org invitations first,
     /// matching display order) rather than each getting its own cursor.
     org_invitations: Vec<OrgInvitation>,
@@ -355,9 +353,7 @@ impl HelmPanel {
                 tags: Section::new(cx),
                 dependabot_alerts: Section::new(cx),
                 secret_scanning_alerts: Section::new(cx),
-                invitations: Vec::new(),
-                invitations_list_cursor: None,
-                invitations_list_focus: cx.focus_handle(),
+                invitations: Section::new(cx),
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };

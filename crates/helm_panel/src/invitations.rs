@@ -19,12 +19,12 @@ impl HelmPanel {
             .await;
             this.update(cx, |this, cx| {
                 if let Ok(invitations) = repo_result {
-                    this.invitations = invitations;
+                    this.invitations.items = invitations;
                 }
                 if let Ok(org_invitations) = org_result {
                     this.org_invitations = org_invitations;
                 }
-                this.repo_invitation_count = this.invitations.len() + this.org_invitations.len();
+                this.repo_invitation_count = this.invitations.items.len() + this.org_invitations.len();
                 cx.notify();
             })
             .ok();
@@ -68,7 +68,7 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
 
-        if self.invitations.is_empty() && self.org_invitations.is_empty() {
+        if self.invitations.items.is_empty() && self.org_invitations.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -86,7 +86,7 @@ impl HelmPanel {
         let view = cx.entity();
 
         // Org invitations are listed before repo invitations with no visual
-        // separator between them, so `invitations_list_cursor` indexes this
+        // separator between them, so `invitations.cursor` indexes this
         // one combined, display-order list rather than either `Vec` alone.
         enum Invite {
             Org(String),
@@ -96,10 +96,10 @@ impl HelmPanel {
             .org_invitations
             .iter()
             .map(|inv| Invite::Org(inv.organization.login.clone()))
-            .chain(self.invitations.iter().map(|inv| Invite::Repo(inv.id)))
+            .chain(self.invitations.items.iter().map(|inv| Invite::Repo(inv.id)))
             .collect();
         let combined_len = combined.len();
-        let cursor = self.invitations_list_cursor;
+        let cursor = self.invitations.cursor;
 
         let org_rows = self.org_invitations.iter().enumerate().map(|(ix, inv)| {
             let org_login = inv.organization.login.clone();
@@ -183,29 +183,29 @@ impl HelmPanel {
             .org_invitations
             .iter()
             .map(|inv| (true, inv.organization.login.clone()))
-            .chain(self.invitations.iter().map(|inv| (false, inv.id.to_string())))
+            .chain(self.invitations.items.iter().map(|inv| (false, inv.id.to_string())))
             .collect();
 
         v_flex()
             .id("helm-invitations-list")
-            .track_focus(&self.invitations_list_focus)
+            .track_focus(&self.invitations.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.invitations_list_focus, cx);
+                window.focus(&this.invitations.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.invitations_list_cursor =
-                    step_selected(this.invitations_list_cursor, combined_len, true);
+                this.invitations.cursor =
+                    step_selected(this.invitations.cursor, combined_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.invitations_list_cursor =
-                    step_selected(this.invitations_list_cursor, combined_len, false);
+                this.invitations.cursor =
+                    step_selected(this.invitations.cursor, combined_len, false);
                 cx.notify();
             }))
             // Enter accepts the selected row's invitation...
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
-                let Some(invite) = this.invitations_list_cursor.and_then(|ix| combined_for_open.get(ix))
+                let Some(invite) = this.invitations.cursor.and_then(|ix| combined_for_open.get(ix))
                 else {
                     return;
                 };
@@ -219,7 +219,7 @@ impl HelmPanel {
             // Accept/Decline (its only two actions) split Enter/Space instead.
             .on_action(cx.listener(move |this, _: &ActSelectedRow, window, cx| {
                 let Some((is_org, key)) =
-                    this.invitations_list_cursor.and_then(|ix| combined_for_act.get(ix))
+                    this.invitations.cursor.and_then(|ix| combined_for_act.get(ix))
                 else {
                     return;
                 };
@@ -231,7 +231,7 @@ impl HelmPanel {
             }))
             .py_1()
             .children(org_rows)
-            .children(self.invitations.iter().enumerate().map(|(ix, inv)| {
+            .children(self.invitations.items.iter().enumerate().map(|(ix, inv)| {
                 let full_name = inv.repository.full_name.clone();
                 let private = inv.repository.private;
                 let inviter = inv.inviter.login.clone();
