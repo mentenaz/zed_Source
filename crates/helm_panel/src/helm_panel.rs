@@ -186,6 +186,11 @@ pub struct HelmPanel {
 
     // Repos
     repos: Section<Repo>,
+    /// Positions in `repos` of the rows the search box leaves, in order.
+    /// Recomputed at the top of every render of the repository list, so it
+    /// always matches what `repos` and the search box hold.
+    repos_shown: Vec<usize>,
+    repos_list: ListView,
     repo_search: Entity<InputState>,
     /// Row `up`/`down`/`enter` act on, within the filtered repo list
     /// `render_repo_list` computes from `repos` + `repo_search` — an index
@@ -342,6 +347,27 @@ impl HelmPanel {
                 profile_menu_cursor: None,
                 profile_menu_focus: cx.focus_handle(),
                 repos: Section::new(cx),
+                repos_shown: Vec::new(),
+                repos_list: ListView::sectioned(
+                    Vec::new(),
+                    |panel, _| panel.repos_shown.len(),
+                    |panel, ix, cx| {
+                        let repo = panel.repos.items.get(*panel.repos_shown.get(ix.row)?)?;
+                        Some(repos::repo_row(ix.row, repo, cx))
+                    },
+                    |this, ix, _, cx| {
+                        let repo = this
+                            .repos_shown
+                            .get(ix.row)
+                            .and_then(|position| this.repos.items.get(*position))
+                            .cloned();
+                        if let Some(repo) = repo {
+                            this.select_repo(repo, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 repo_search,
                 selected_repo: None,
                 clone_url_copied: false,
@@ -589,6 +615,10 @@ impl Panel for HelmPanel {
 impl Render for HelmPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let show_nav = !matches!(self.screen, HelmScreen::Gate | HelmScreen::Auth);
+        if self.screen == HelmScreen::RepoList {
+            let query = self.repo_search.read(cx).value().to_string();
+            self.repos_shown = repos::matching_repos(&self.repos.items, &query);
+        }
 
         v_flex()
             .size_full()

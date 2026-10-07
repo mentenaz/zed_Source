@@ -182,162 +182,33 @@ impl HelmPanel {
     /// selected org's repos or the user's own, filterable by name. Rows
     /// route into `RepoDetail` via [`Self::select_repo`].
     pub(super) fn render_repo_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
-
-        if self.repos.state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading repositories…"),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.repos.state == LoadState::Error {
-            let owner = self
-                .selected_org
-                .clone()
-                .unwrap_or_else(|| "self".to_string());
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load repositories"),
-                )
-                .child(
-                    Button::new("repo-list-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.load_repos(owner.clone(), cx);
-                        })),
-                )
-                .into_any_element();
-        }
-
-        if self.repos.items.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No repositories found"),
-                )
-                .into_any_element();
-        }
-
-        let query = self.repo_search.read(cx).value().trim().to_lowercase();
-        let filtered: Vec<Repo> = if query.is_empty() {
-            self.repos.items.clone()
-        } else {
-            self.repos
-                .items
-                .iter()
-                .filter(|r| r.name.to_lowercase().contains(&query))
-                .cloned()
-                .collect()
-        };
-
         let search_row = div().px_3().py_2().child(Input::new(&self.repo_search));
-
-        let list = if filtered.is_empty() {
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No repositories match your search"),
-                )
-                .into_any_element()
-        } else {
-            let len = filtered.len();
-            let cursor = self.repos.cursor;
-            // Captured for `OpenSelectedRow` below rather than re-reading
-            // `self.repos`: `repos.cursor` indexes this filtered order
-            // (per its own doc comment), and re-filtering `self.repos` by a
-            // *stale* `self.repo_search` value inside the action handler —
-            // run on a later keypress, against whatever the search box says
-            // *then* — would disagree with what's actually on screen now.
-            let filtered_for_open = filtered.clone();
-            v_flex()
-                .id("helm-repo-list")
-                .track_focus(&self.repos.focus)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    window.focus(&this.repos.focus, cx);
-                }))
-                .key_context("HelmRowList")
-                .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                    this.repos.cursor = step_selected(this.repos.cursor, len, true);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                    this.repos.cursor = step_selected(this.repos.cursor, len, false);
-                    cx.notify();
-                }))
-                .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                    let Some(repo) =
-                        this.repos.cursor.and_then(|ix| filtered_for_open.get(ix)).cloned()
-                    else {
-                        return;
-                    };
-                    this.select_repo(repo, cx);
-                }))
-                .py_1()
-                .children(filtered.into_iter().enumerate().map(|(ix, repo)| {
-                    let vis = repo_vis_label(&repo);
-                    let click_repo = repo.clone();
-                    ListItem::new(format!("helm-repo-{}", repo.id))
-                        .selected(cursor == Some(ix))
-                        .child(div().text_color(foreground).child(repo.name.clone()))
-                        .suffix(move |_, _| {
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().text_color(muted_foreground).child(vis))
-                                .child(
-                                    Icon::new(IconName::ChevronRight)
-                                        .xsmall()
-                                        .text_color(muted_foreground),
-                                )
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.repos.cursor = Some(ix);
-                            this.select_repo(click_repo.clone(), cx)
-                        }))
-                }))
-                .into_any_element()
-        };
-
-        v_flex()
-            .child(search_row)
-            .child(div().h_px().w_full().bg(border))
-            .child(list)
-            .into_any_element()
+        let owner = self
+            .selected_org
+            .clone()
+            .unwrap_or_else(|| "self".to_string());
+        self.list_screen(
+            ListStatus {
+                state: self.repos.state,
+                error: self.repos.error.clone(),
+                // `repos_shown` is what the search box leaves, worked out
+                // at the top of `render`.
+                is_empty: self.repos_shown.is_empty(),
+            },
+            &self.repos_list,
+            Some(search_row.into_any_element()),
+            ListLabels {
+                loading: "Loading repositories…",
+                error: "Failed to load repositories",
+                empty: if self.repos.items.is_empty() {
+                    "No repositories found"
+                } else {
+                    "No repositories match your search"
+                },
+            },
+            move |this, cx| this.load_repos(owner.clone(), cx),
+            cx,
+        )
     }
 
     /// Repo detail: name/visibility, description, homepage, topics, clone
@@ -778,5 +649,74 @@ impl HelmPanel {
                 })
         });
         */
+    }
+}
+
+/// Which repositories the search box leaves, as positions in `repos`, in
+/// their original order. An empty or blank query keeps them all. Matching
+/// is on the repository's name, ignoring case.
+pub(super) fn matching_repos(repos: &[Repo], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    repos
+        .iter()
+        .enumerate()
+        .filter(|(_, repo)| query.is_empty() || repo.name.to_lowercase().contains(&query))
+        .map(|(ix, _)| ix)
+        .collect()
+}
+
+/// One row of the Repositories screen: the name and whether it is public,
+/// private, internal or archived.
+pub(super) fn repo_row(ix: usize, repo: &Repo, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let vis = repo_vis_label(repo);
+    ListItem::new(("helm-repo", ix))
+        .child(div().text_color(foreground).child(repo.name.clone()))
+        .suffix(move |_, _| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_color(muted_foreground).child(vis))
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(muted_foreground),
+                )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str) -> Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": name,
+            "full_name": format!("me/{name}"),
+            "owner": { "login": "me", "id": 1, "avatar_url": "", "type": "User" },
+            "private": false,
+            "description": null,
+            "clone_url": "",
+            "visibility": "public",
+            "archived": false,
+            "pushed_at": "",
+            "has_issues": true,
+            "has_wiki": true,
+            "has_projects": true,
+        }))
+        .expect("a repository the backend's type accepts")
+    }
+
+    #[test]
+    fn the_search_box_filters_by_name_and_keeps_order() {
+        let repos = [repo("zed_Source"), repo("Forge.Scaffold.SDK"), repo("forge-templates")];
+        assert_eq!(matching_repos(&repos, ""), vec![0, 1, 2]);
+        assert_eq!(matching_repos(&repos, "   "), vec![0, 1, 2]);
+        assert_eq!(matching_repos(&repos, "FORGE"), vec![1, 2]);
+        assert_eq!(matching_repos(&repos, " zed "), vec![0]);
+        assert!(matching_repos(&repos, "nothing").is_empty());
+        assert!(matching_repos(&[], "zed").is_empty());
     }
 }
