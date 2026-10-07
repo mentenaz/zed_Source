@@ -7,6 +7,7 @@
 //! `Spinner`) instead of the old `forge_ui` crate.
 
 mod backend;
+mod branches;
 mod pulls;
 mod issues;
 mod releases_packages;
@@ -1524,42 +1525,6 @@ impl HelmPanel {
         }
 
         self.run_action(HelmAction::EditRepo { changes, topics }, true, cx);
-    }
-
-    /// Loads the branch list for `self.selected_repo` — mirrors `load_repos`'s
-    /// shape.
-    fn load_branches(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
-            return;
-        };
-        self.load_state = LoadState::Loading;
-        self.error_msg.clear();
-        self.branches.clear();
-        cx.notify();
-
-        let gh_state = self.gh_state.clone();
-        cx.spawn(async move |this, cx| {
-            let result =
-                on_tokio(
-                    async move { gh_get_branches(repo.owner.login, repo.name, &gh_state).await },
-                )
-                .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(branches) => {
-                        this.branches = branches;
-                        this.load_state = LoadState::Idle;
-                    }
-                    Err(e) => {
-                        this.load_state = LoadState::Error;
-                        this.error_msg = e;
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// Loads the collaborator list for `self.selected_repo` — mirrors
@@ -3270,129 +3235,6 @@ impl HelmPanel {
                 workspace.show_toast(Toast::new(NotificationId::unique::<HelmPanel>(), message), cx);
             })
             .ok();
-    }
-
-    /// The branches list — read-only, mirrors `render_repo_list`'s
-    /// loading/error/empty states.
-    fn render_branches(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
-
-        if self.load_state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading branches…"),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.load_state == LoadState::Error {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load branches"),
-                )
-                .child(
-                    Button::new("branches-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_branches(cx))),
-                )
-                .into_any_element();
-        }
-
-        if self.branches.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No branches found"),
-                )
-                .into_any_element();
-        }
-
-        let default_branch = self
-            .selected_repo
-            .as_ref()
-            .map(|r| r.default_branch.clone())
-            .unwrap_or_default();
-
-        // Read-only list — branch rows have no click action, so this wires
-        // up/down + a selection highlight only, no `OpenSelectedRow` (Enter
-        // falls through as a no-op, matching what clicking a row already did).
-        let len = self.branches.len();
-        let cursor = self.branches_list_cursor;
-        v_flex()
-            .id("helm-branches-list")
-            .track_focus(&self.branches_list_focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.branches_list_focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, false);
-                cx.notify();
-            }))
-            .py_1()
-            .children(self.branches.iter().enumerate().map(|(ix, branch)| {
-                let is_default = branch.name == default_branch;
-                let protected = branch.protected;
-                ListItem::new(format!("helm-branch-{}", branch.name))
-                    .selected(cursor == Some(ix))
-                    .child(div().text_color(foreground).child(branch.name.clone()))
-                    .suffix(move |_, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .when(is_default, |row| {
-                                row.child(
-                                    div()
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .text_xs()
-                                        .bg(muted_foreground.opacity(0.15))
-                                        .text_color(muted_foreground)
-                                        .child("default"),
-                                )
-                            })
-                            .when(protected, |row| {
-                                row.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted_foreground)
-                                        .child("protected"),
-                                )
-                            })
-                    })
-            }))
-            .into_any_element()
     }
 
     /// The collaborators list — add/remove and per-row permission changes.
