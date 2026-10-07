@@ -8,12 +8,12 @@ impl HelmPanel {
     /// `pulls_filter`.
     pub(super) fn load_pulls(&mut self, cx: &mut Context<Self>) {
         let filter = self.pulls_filter.clone();
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.pulls,
             |repo, gh_state| async move {
                 gh_list_pulls(repo.owner.login, repo.name, filter, &gh_state).await
             },
-            |this, pulls| this.pulls = pulls,
         );
     }
 
@@ -111,7 +111,7 @@ impl HelmPanel {
                     })),
             );
 
-        if self.load_state == LoadState::Loading {
+        if self.pulls.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -132,7 +132,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.pulls.state == LoadState::Error {
             return v_flex()
                 .gap_3()
                 .p_4()
@@ -151,7 +151,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.pulls.is_empty() {
+        if self.pulls.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -166,32 +166,32 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let pulls_len = self.pulls.len();
-        let pulls_cursor = self.pulls_list_cursor;
+        let pulls_len = self.pulls.items.len();
+        let pulls_cursor = self.pulls.cursor;
         let pulls_list = v_flex()
             .id("helm-pulls-list")
-            .track_focus(&self.pulls_list_focus)
+            .track_focus(&self.pulls.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.pulls_list_focus, cx);
+                window.focus(&this.pulls.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.pulls_list_cursor = step_selected(this.pulls_list_cursor, pulls_len, true);
+                this.pulls.cursor = step_selected(this.pulls.cursor, pulls_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.pulls_list_cursor = step_selected(this.pulls_list_cursor, pulls_len, false);
+                this.pulls.cursor = step_selected(this.pulls.cursor, pulls_len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(pr) = this.pulls_list_cursor.and_then(|ix| this.pulls.get(ix)).cloned()
+                let Some(pr) = this.pulls.cursor.and_then(|ix| this.pulls.items.get(ix)).cloned()
                 else {
                     return;
                 };
                 this.open_pr_detail(pr, cx);
             }))
             .py_1()
-            .children(self.pulls.iter().enumerate().map(|(ix, pr)| {
+            .children(self.pulls.items.iter().enumerate().map(|(ix, pr)| {
                 let number = pr.number;
                 let title = pr.title.clone();
                 let merged = pr.merged;
@@ -261,7 +261,7 @@ impl HelmPanel {
                             )
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.pulls_list_cursor = Some(ix);
+                        this.pulls.cursor = Some(ix);
                         this.open_pr_detail(pr_for_click.clone(), cx);
                     }))
             }));

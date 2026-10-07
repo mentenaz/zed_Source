@@ -233,10 +233,8 @@ pub struct HelmPanel {
     issues: Section<Issue>,
     issues_filter: String,
     /// Row `up`/`down`/`enter` act on, within `issues`.
-    pulls: Vec<Pull>,
+    pulls: Section<Pull>,
     pulls_filter: String,
-    pulls_list_cursor: Option<usize>,
-    pulls_list_focus: FocusHandle,
     /// The issue/PR drilled into from `Issues`/`Pulls` — mutually exclusive
     /// (only one of the two is ever `Some` at a time), cleared whenever
     /// `set_screen` lands anywhere but `IssueDetail`/`PrDetail`. Same
@@ -365,10 +363,8 @@ impl HelmPanel {
                 collaborators_list_focus: cx.focus_handle(),
                 issues: Section::new(cx),
                 issues_filter: "open".into(),
-                pulls: Vec::new(),
+                pulls: Section::new(cx),
                 pulls_filter: "open".into(),
-                pulls_list_cursor: None,
-                pulls_list_focus: cx.focus_handle(),
                 selected_issue: None,
                 selected_pr: None,
                 detail_comments: Vec::new(),
