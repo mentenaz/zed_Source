@@ -724,6 +724,7 @@
       "ctrl-k i": "python_panel::ToggleFocus",
       "ctrl-k f": "flows_panel::ToggleFocus",
       "ctrl-k k": "script_runner_panel::ToggleFocus",
+      "ctrl-k c": "rust_panel::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
       "ctrl-k n": "encoding_selector::Toggle",

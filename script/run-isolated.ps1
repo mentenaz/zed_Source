@@ -92,7 +92,9 @@ try {
         throw "cargo build failed (exit code $LASTEXITCODE)."
     }
 
-    $exePath = "target/$profile/$Package.exe"
+    # The fork's `zed` package builds a binary named `zeddev`, not `zed`.
+    $binName = if ($Package -eq "zed") { "zeddev" } else { $Package }
+    $exePath = "target/$profile/$binName.exe"
     if (-not (Test-Path $exePath)) {
         throw "Build succeeded but $exePath was not found."
     }

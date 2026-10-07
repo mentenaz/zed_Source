@@ -800,6 +800,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let python_panel = PythonPanel::load(workspace_handle.clone(), cx.clone());
         let node_panel = NodePanel::load(workspace_handle.clone(), cx.clone());
         let dotnet_panel = DotNetPanel::load(workspace_handle.clone(), cx.clone());
+        let rust_panel = rust_panel::RustPanel::load(workspace_handle.clone(), cx.clone());
         let flows_panel = FlowsPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
@@ -912,6 +913,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             script_runner_dependent_panels,
             add_panel_when_ready(processes_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(dotnet_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(rust_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 

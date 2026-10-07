@@ -203,6 +203,7 @@ repl.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 reqwest_client.workspace = true
 rope.workspace = true
+rust_panel.workspace = true
 sandbox.workspace = true
 script_runner_panel.workspace = true
 search.workspace = true

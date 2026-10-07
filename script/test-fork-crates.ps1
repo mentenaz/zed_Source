@@ -48,6 +48,7 @@ $forkCrates = @(
     'python_backend',
     'python_manager_panel',
     'python_panel',
+    'rust_panel',
     'script_runner_panel',
     'workflow_engine'
 )
@@ -72,6 +73,9 @@ if ($IncludeVendored) {
 }
 
 if ($Only) {
+    # Started with `pwsh -File`, `-Only a,b` arrives as the single string
+    # "a,b" rather than two values, so split it here.
+    $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $unknown = $Only | Where-Object { ($forkCrates + $vendoredCrates) -notcontains $_ }
     if ($unknown) {
         Write-Error "Not a fork crate: $($unknown -join ', ')"

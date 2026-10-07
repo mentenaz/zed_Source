@@ -860,6 +860,7 @@ fn main() {
         node_panel::init(cx);
         npm_manager_panel::init(cx);
         dotnet_panel::init(cx);
+        rust_panel::init(cx);
         nuget_manager_panel::init(cx);
         flows_panel::init(cx);
         designer_panel::init(cx);

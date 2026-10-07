@@ -1,6 +1,6 @@
 # Rust (Cargo) Manager: Design Note
 
-**Status:** the backend for steps 1 to 3 (`cargo_backend`) is built and tested; no panel yet. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
+**Status:** the backend for steps 1 to 3 (`cargo_backend`) and the left panel (`rust_panel`) are built and tested. Step 4 (add, remove, update) and the manager tab are not started. The panel has not yet been tried in the running app. **Written:** October 2026. **Reviewed against the fork:** 6 October 2026 (Cargo 1.98.1).
 **Pattern to follow:** the existing runtime panel plus manager pairs, each with a GPUI-free backend (`node_panel` + `npm_manager_panel` + `node_backend`/`npm_backend`, `dotnet_panel` + `nuget_manager_panel` + `dotnet_backend`, `python_panel` + `python_manager_panel` + `python_backend`).
 
 ---
@@ -76,6 +76,7 @@ Consequences:
 - Header: `rustc` and `cargo` versions
 - Projects: crates in the workspace. The selected crate is the active target.
 - Quick actions (new buttons, following the pattern in `node_panel` and `dotnet_panel`): `check`, `build`, `run`, `test`, plus a **Package Manager** button
+- **As built (6 October 2026):** the panel also lists the selected crate's dependencies, outdated versions and advisories itself, the way `dotnet_panel` does, so steps 1 to 3 are usable before the manager tab exists. The advisory scan is a **Scan** button rather than automatic: it covers every package reachable from the crate (1,425 for `zed`), too much to fire on each click through the crate list. The **Package Manager** button is left out until there is a manager to open.
 - Summary counts: Dependencies, Outdated, Vulnerabilities
 
 **Manager tab (`cargo_manager_panel`):** the same pages as the other managers: General, Search, Installed, Updates, Vulnerabilities, with the README flyout.

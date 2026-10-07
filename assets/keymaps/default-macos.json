@@ -776,6 +776,7 @@
       "cmd-k i": "python_panel::ToggleFocus",
       "cmd-k f": "flows_panel::ToggleFocus",
       "cmd-k k": "script_runner_panel::ToggleFocus",
+      "cmd-k c": "rust_panel::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",

@@ -17243,6 +17243,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_backend",
+ "futures 0.3.34",
+ "gpui",
+ "gpui-component",
+ "http_client",
+ "project",
+ "script_runner_panel",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -24715,6 +24731,7 @@ dependencies = [
  "repl",
  "reqwest_client",
  "rope",
+ "rust_panel",
  "sandbox",
  "script_runner_panel",
  "search",
