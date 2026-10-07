@@ -1,60 +1,42 @@
-//! One list screen's worth of state.
+//! One list screen's worth of data.
 //!
-//! Every list in Helm (issues, releases, tags, and so on) needs the same
-//! five things: the rows, whether they are loading, the last error, which
-//! row the keyboard is on, and a focus handle. They used to be loose fields
+//! Every list in Helm (issues, releases, tags, and so on) has rows, a load
+//! state, and the reason the last load failed. They used to be loose fields
 //! on `HelmPanel`, with a single loading flag and error message shared by
-//! the whole panel. A `Section` keeps one list's five together, so two
+//! the whole panel. A `Section` keeps one list's three together, so two
 //! lists loading at once no longer share one spinner and one error.
+//!
+//! Which row is selected, and keyboard focus, are not here: the list widget
+//! that draws the rows owns those (see `list_view.rs`).
 
 use std::future::Future;
-use std::ops::{Deref, DerefMut};
 
 use super::*;
 
-/// A section's rows and load state: everything but the focus handle, which
-/// needs a running app to create. Kept apart so this part can be tested
-/// without one. [`Section`] derefs to it, so `panel.issues.items` works.
-pub(super) struct SectionData<T> {
+pub(super) struct Section<T> {
     pub(super) items: Vec<T>,
     pub(super) state: LoadState,
     /// Why the last load failed. Empty unless `state` is `Error`.
     pub(super) error: String,
-    /// The row `up`/`down`/`enter` act on. `None` until the list is first
-    /// stepped through or clicked.
-    pub(super) cursor: Option<usize>,
 }
 
-impl<T> Default for SectionData<T> {
+impl<T> Default for Section<T> {
     fn default() -> Self {
-        SectionData {
+        Section {
             items: Vec::new(),
             state: LoadState::Idle,
             error: String::new(),
-            cursor: None,
         }
     }
 }
 
-impl<T> SectionData<T> {
+impl<T> Section<T> {
     /// Drops the rows and any load state, for when the screen they belong
-    /// to is left behind. The cursor is kept, as it was before sections
-    /// existed; `step` and `selected` cope with one that is out of range.
+    /// to is left behind.
     pub(super) fn clear(&mut self) {
         self.items.clear();
         self.state = LoadState::Idle;
         self.error.clear();
-    }
-
-    /// Moves the cursor one row down (`forward`) or up, wrapping at both
-    /// ends.
-    pub(super) fn step(&mut self, forward: bool) {
-        self.cursor = step_selected(self.cursor, self.items.len(), forward);
-    }
-
-    /// The row under the cursor.
-    pub(super) fn selected(&self) -> Option<&T> {
-        self.items.get(self.cursor?)
     }
 
     /// Marks a load as started. [`HelmPanel::load_section`] calls this; a
@@ -78,34 +60,6 @@ impl<T> SectionData<T> {
                 self.error = error;
             }
         }
-    }
-}
-
-pub(super) struct Section<T> {
-    data: SectionData<T>,
-    pub(super) focus: FocusHandle,
-}
-
-impl<T> Section<T> {
-    pub(super) fn new(cx: &mut App) -> Self {
-        Section {
-            data: SectionData::default(),
-            focus: cx.focus_handle(),
-        }
-    }
-}
-
-impl<T> Deref for Section<T> {
-    type Target = SectionData<T>;
-
-    fn deref(&self) -> &SectionData<T> {
-        &self.data
-    }
-}
-
-impl<T> DerefMut for Section<T> {
-    fn deref_mut(&mut self) -> &mut SectionData<T> {
-        &mut self.data
     }
 }
 
@@ -162,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_load_goes_from_loading_to_idle_with_its_rows() {
-        let mut section = SectionData::<u32>::default();
+        let mut section = Section::<u32>::default();
         assert!(section.state == LoadState::Idle);
 
         section.begin();
@@ -176,7 +130,7 @@ mod tests {
 
     #[test]
     fn a_failed_load_records_why_and_a_retry_clears_it() {
-        let mut section = SectionData::<u32>::default();
+        let mut section = Section::<u32>::default();
         section.finish(Ok(vec![1]));
 
         section.begin();
@@ -196,8 +150,8 @@ mod tests {
     fn two_sections_load_independently() {
         // The point of the type: one section's failure or spinner is not
         // another's.
-        let mut issues = SectionData::<u32>::default();
-        let mut releases = SectionData::<u32>::default();
+        let mut issues = Section::<u32>::default();
+        let mut releases = Section::<u32>::default();
         issues.begin();
         releases.begin();
         issues.finish(Err("boom".to_string()));
@@ -210,39 +164,32 @@ mod tests {
     }
 
     #[test]
-    fn clearing_drops_rows_and_state_but_not_the_cursor() {
-        let mut section = SectionData::<u32>::default();
+    fn clearing_drops_rows_and_state() {
+        let mut section = Section::<u32>::default();
         section.finish(Ok(vec![1, 2, 3]));
-        section.step(true);
-        section.step(true);
-        assert_eq!(section.selected(), Some(&2));
-
         section.begin();
         section.finish(Err("boom".to_string()));
+
         section.clear();
         assert!(section.items.is_empty());
         assert!(section.state == LoadState::Idle);
         assert!(section.error.is_empty());
-        assert_eq!(section.cursor, Some(1));
-        // A cursor left over from a longer list selects nothing.
-        assert_eq!(section.selected(), None);
     }
 
     #[test]
-    fn stepping_wraps_and_recovers_from_a_stale_cursor() {
-        let mut section = SectionData::<u32>::default();
-        section.step(true);
-        assert_eq!(section.cursor, None);
+    fn a_section_reports_what_its_screen_should_show() {
+        let mut section = Section::<u32>::default();
+        assert!(section.status().is_empty);
 
-        section.finish(Ok(vec![10, 20, 30]));
-        section.step(false);
-        assert_eq!(section.selected(), Some(&30));
-        section.step(true);
-        assert_eq!(section.selected(), Some(&10));
+        section.begin();
+        assert!(section.status().state == LoadState::Loading);
 
-        section.finish(Ok(vec![10]));
-        section.cursor = Some(9);
-        section.step(true);
-        assert_eq!(section.selected(), Some(&10));
+        section.finish(Ok(vec![1]));
+        let status = section.status();
+        assert!(status.state == LoadState::Idle);
+        assert!(!status.is_empty);
+
+        section.finish(Err("GitHub API 403".to_string()));
+        assert_eq!(section.status().error, "GitHub API 403");
     }
 }

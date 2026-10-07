@@ -43,7 +43,7 @@ Inside a repository:
 | Issues | Issue list and detail with comments |
 | Pull requests | List, detail and create |
 | Releases | List and create |
-| Packages | Packages and their versions |
+| Packages | Packages; opening one shows its versions above the list |
 | Commits | Recent commits |
 | Actions | Workflow runs; a run opens as its own tab with jobs drawn as a graph |
 | Deployments | Deployment list |
@@ -100,18 +100,25 @@ It can then run `npm install` in the cloned folder as a second phase.
 
 ### Keyboard
 
-In any list:
+Click a list to focus it, then:
 
 | Key | Action |
 | --- | --- |
 | `up` / `down` | Move the selection |
-| `enter` | Open the selected row |
-| `space` | Secondary action — Decline on the Invitations screen (Enter is Accept) |
+| `enter` | Open the selected row, where rows open something |
+
+A click on a row does the same as `enter`. On read-only lists (branches,
+commits, deployments, tags, security alerts) neither does anything.
+
+Invitations are accepted and declined only with a row's **Accept** and
+decline buttons, never by `enter` or a click on the row, so one cannot be
+accepted by accident.
 
 ## How it is wired
 
-- `helm_panel::init(cx)` registers `helm_panel::ToggleFocus` and the list key
-  bindings (context `HelmRowList`).
+- `helm_panel::init(cx)` registers `helm_panel::ToggleFocus` and the key
+  bindings for the profile menu (context `HelmRowList`). The list screens
+  get theirs from `gpui_component`'s `List` (context `List`).
 - `HelmPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
 - Implements `workspace::dock::Panel`, fixed to the left dock,
@@ -120,7 +127,7 @@ In any list:
 ### Actions
 
 In the `helm_panel` namespace: `ToggleFocus`, `SelectNextRow`,
-`SelectPrevRow`, `OpenSelectedRow`, `ActSelectedRow`.
+`SelectPrevRow`, `OpenSelectedRow`.
 
 ## Layout
 
@@ -131,6 +138,10 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | File | Contents |
 | --- | --- |
 | `src/helm_panel.rs` | `init`, the actions, the `HelmPanel` struct, `load`, and its `Panel` and `Render` impls |
+| `src/section.rs` | `Section<T>`: one list's rows, load state and last error, and the loaders that fill one |
+| `src/list_view.rs` | The shared list screen, on `gpui_component`'s `List` |
+| `src/lists.rs` | Each list screen's widget: where its rows are, how a row is drawn, what `enter` does |
+| `src/loading.rs` | The shared loader for screens that show one thing, not a list |
 | `src/state.rs` | Which screen is showing, load state, menu rows |
 | `src/navigation.rs` | Switching screens, back and forward, the navigation bar |
 | `src/auth.rs` | The `gh` check, sign-in, scope authorization, sign-out, and the gate and auth screens |

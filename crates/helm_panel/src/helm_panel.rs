@@ -20,6 +20,7 @@ mod branches;
 mod pulls;
 mod issues;
 mod list_view;
+mod lists;
 mod loading;
 mod releases_packages;
 mod insights;
@@ -98,11 +99,7 @@ actions!(
         SelectPrevRow,
         /// Opens the selected row — the keyboard equivalent of clicking it
         /// (drills into the repo / opens the issue detail).
-        OpenSelectedRow,
-        /// The Invitations screen's secondary per-row action (Decline) —
-        /// `OpenSelectedRow`/Enter there is Accept. No other list currently
-        /// uses this; everywhere else Enter is the row's only action.
-        ActSelectedRow
+        OpenSelectedRow
     ]
 );
 
@@ -126,7 +123,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", SelectNextRow, Some("HelmRowList")),
         KeyBinding::new("up", SelectPrevRow, Some("HelmRowList")),
         KeyBinding::new("enter", OpenSelectedRow, Some("HelmRowList")),
-        KeyBinding::new("space", ActSelectedRow, Some("HelmRowList")),
     ]);
 }
 
@@ -254,6 +250,7 @@ pub struct HelmPanel {
     releases: Section<Release>,
     releases_list: ListView,
     packages: Section<Package>,
+    packages_list: ListView,
     package_versions: Vec<PackageVersion>,
     package_versions_error: Option<String>,
     expanded_package: Option<String>,
@@ -277,10 +274,8 @@ pub struct HelmPanel {
     /// Organisation and repository invitations in one list, as two headed
     /// sections.
     invitations_list: ListView,
-    /// Pending org invitations, shown on the same Invitations screen — listed
-    /// above `invitations` with no visual separator, so `invitations.cursor`
-    /// covers both as one combined, index-shared list (org invitations first,
-    /// matching display order) rather than each getting its own cursor.
+    /// Pending org invitations, shown on the same Invitations screen as
+    /// `invitations`, as the first of its two sections.
     org_invitations: Vec<OrgInvitation>,
 
     /// Another user's public profile, viewed via [`Self::open_user_profile`]
@@ -332,46 +327,17 @@ impl HelmPanel {
                 code_copied: false,
                 account: String::new(),
                 scopes: Vec::new(),
-                org_logins: Section::new(cx),
-                org_logins_list: ListView::new(
-                    |panel| &panel.org_logins,
-                    orgs::org_row,
-                    |this, ix, _, cx| {
-                        if let Some(org) = this.org_logins.items.get(ix).cloned() {
-                            this.select_org(org, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
+                org_logins: Section::default(),
+                org_logins_list: lists::org_logins_list(window, cx),
                 user: None,
                 repo_invitation_count: 0,
                 selected_org: None,
                 org_detail: None,
                 profile_menu_cursor: None,
                 profile_menu_focus: cx.focus_handle(),
-                repos: Section::new(cx),
+                repos: Section::default(),
                 repos_shown: Vec::new(),
-                repos_list: ListView::sectioned(
-                    Vec::new(),
-                    |panel, _| panel.repos_shown.len(),
-                    |panel, ix, cx| {
-                        let repo = panel.repos.items.get(*panel.repos_shown.get(ix.row)?)?;
-                        Some(repos::repo_row(ix.row, repo, cx))
-                    },
-                    |this, ix, _, cx| {
-                        let repo = this
-                            .repos_shown
-                            .get(ix.row)
-                            .and_then(|position| this.repos.items.get(*position))
-                            .cloned();
-                        if let Some(repo) = repo {
-                            this.select_repo(repo, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
+                repos_list: lists::repos_list(window, cx),
                 repo_search,
                 selected_repo: None,
                 clone_url_copied: false,
@@ -381,185 +347,41 @@ impl HelmPanel {
                 clone_succeeded_path: None,
                 clone_target_dir: None,
                 workspace,
-                branches: Section::new(cx),
-                // Read-only. A row needs the repository's default branch to
-                // mark it, which the panel knows and the row does not.
-                branches_list: ListView::new(
-                    |panel| &panel.branches,
-                    {
-                        let panel: WeakEntity<Self> = cx.weak_entity();
-                        move |ix: usize, branch: &Branch, cx: &App| {
-                            let default_branch: String = panel
-                                .upgrade()
-                                .and_then(|panel| {
-                                    let repo = panel.read(cx).selected_repo.as_ref()?;
-                                    Some(repo.default_branch.clone())
-                                })
-                                .unwrap_or_default();
-                            branches::branch_row(ix, branch, &default_branch, cx)
-                        }
-                    },
-                    |_, _, _, _| {},
-                    window,
-                    cx,
-                ),
-                collaborators: Section::new(cx),
-                collaborators_list: ListView::new(
-                    |panel| &panel.collaborators,
-                    {
-                        let panel: WeakEntity<Self> = cx.weak_entity();
-                        move |ix: usize, collab: &Collaborator, cx: &App| {
-                            collaborators::collaborator_row(ix, collab, &panel, cx)
-                        }
-                    },
-                    |this, ix, _, cx| {
-                        if let Some(collab) = this.collaborators.items.get(ix) {
-                            let login = collab.login.clone();
-                            this.open_user_profile(login, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
-                issues: Section::new(cx),
-                issues_list: ListView::new(
-                    |panel| &panel.issues,
-                    issues::issue_row,
-                    |this, ix, _, cx| {
-                        if let Some(issue) = this.issues.items.get(ix).cloned() {
-                            this.open_issue_detail(issue, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
+                branches: Section::default(),
+                branches_list: lists::branches_list(window, cx),
+                collaborators: Section::default(),
+                collaborators_list: lists::collaborators_list(window, cx),
+                issues: Section::default(),
+                issues_list: lists::issues_list(window, cx),
                 issues_filter: "open".into(),
-                pulls: Section::new(cx),
-                pulls_list: ListView::new(
-                    |panel| &panel.pulls,
-                    pulls::pull_row,
-                    |this, ix, _, cx| {
-                        if let Some(pr) = this.pulls.items.get(ix).cloned() {
-                            this.open_pr_detail(pr, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
+                pulls: Section::default(),
+                pulls_list: lists::pulls_list(window, cx),
                 pulls_filter: "open".into(),
                 selected_issue: None,
                 selected_pr: None,
                 detail_comments: Vec::new(),
                 detail_comments_state: LoadState::Idle,
-                releases: Section::new(cx),
-                releases_list: ListView::new(
-                    |panel| &panel.releases,
-                    releases_packages::release_row,
-                    |this, ix, _, cx| {
-                        if let Some(release) = this.releases.items.get(ix) {
-                            cx.open_url(&release.html_url);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
-                packages: Section::new(cx),
+                releases: Section::default(),
+                releases_list: lists::releases_list(window, cx),
+                packages: Section::default(),
+                packages_list: lists::packages_list(window, cx),
                 package_versions: Vec::new(),
                 package_versions_error: None,
                 expanded_package: None,
                 traffic: None,
-                commits: Section::new(cx),
-                commits_list: ListView::new(
-                    |panel| &panel.commits,
-                    activity::commit_row,
-                    |_, _, _, _| {},
-                    window,
-                    cx,
-                ),
-                workflow_runs: Section::new(cx),
-                workflow_runs_list: ListView::new(
-                    |panel| &panel.workflow_runs,
-                    activity::workflow_run_row,
-                    |this, ix, window, cx| {
-                        if let Some(run) = this.workflow_runs.items.get(ix).cloned() {
-                            this.select_workflow_run(run, window, cx);
-                        }
-                    },
-                    window,
-                    cx,
-                ),
-                deployments: Section::new(cx),
-                deployments_list: ListView::new(
-                    |panel| &panel.deployments,
-                    activity::deployment_row,
-                    |_, _, _, _| {},
-                    window,
-                    cx,
-                ),
-                tags: Section::new(cx),
-                // Tags are read-only: nothing happens on `enter` or a click.
-                tags_list: ListView::new(
-                    |panel| &panel.tags,
-                    releases_packages::tag_row,
-                    |_, _, _, _| {},
-                    window,
-                    cx,
-                ),
-                dependabot_alerts: Section::new(cx),
-                secret_scanning_alerts: Section::new(cx),
-                // Read-only: an alert has no detail screen to open.
-                security_list: ListView::sectioned(
-                    vec!["Dependabot alerts", "Secret scanning alerts"],
-                    |panel, section| match section {
-                        0 => panel.dependabot_alerts.items.len(),
-                        _ => panel.secret_scanning_alerts.items.len(),
-                    },
-                    |panel, ix, cx| match ix.section {
-                        0 => Some(insights::dependabot_row(
-                            ix.row,
-                            panel.dependabot_alerts.items.get(ix.row)?,
-                            cx,
-                        )),
-                        _ => Some(insights::secret_scanning_row(
-                            ix.row,
-                            panel.secret_scanning_alerts.items.get(ix.row)?,
-                            cx,
-                        )),
-                    },
-                    |_, _, _, _| {},
-                    window,
-                    cx,
-                ),
-                invitations: Section::new(cx),
-                invitations_list: {
-                    let row_panel: WeakEntity<Self> = cx.weak_entity();
-                    ListView::sectioned(
-                        vec!["Organizations", "Repositories"],
-                        |panel, section| match section {
-                            0 => panel.org_invitations.len(),
-                            _ => panel.invitations.items.len(),
-                        },
-                        move |panel, ix, cx| match ix.section {
-                            0 => Some(invitations::org_invitation_row(
-                                ix.row,
-                                panel.org_invitations.get(ix.row)?,
-                                &row_panel,
-                                cx,
-                            )),
-                            _ => Some(invitations::repo_invitation_row(
-                                ix.row,
-                                panel.invitations.items.get(ix.row)?,
-                                &row_panel,
-                                cx,
-                            )),
-                        },
-                        // Nothing on a click or `enter`: see
-                        // `invitations::invitation_buttons`.
-                        |_, _, _, _| {},
-                        window,
-                        cx,
-                    )
-                },
+                commits: Section::default(),
+                commits_list: lists::commits_list(window, cx),
+                workflow_runs: Section::default(),
+                workflow_runs_list: lists::workflow_runs_list(window, cx),
+                deployments: Section::default(),
+                deployments_list: lists::deployments_list(window, cx),
+                tags: Section::default(),
+                tags_list: lists::tags_list(window, cx),
+                dependabot_alerts: Section::default(),
+                secret_scanning_alerts: Section::default(),
+                security_list: lists::security_list(window, cx),
+                invitations: Section::default(),
+                invitations_list: lists::invitations_list(window, cx),
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };

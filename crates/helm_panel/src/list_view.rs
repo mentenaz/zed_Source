@@ -166,7 +166,7 @@ pub(super) struct ListStatus {
     pub(super) is_empty: bool,
 }
 
-impl<T> SectionData<T> {
+impl<T> Section<T> {
     pub(super) fn status(&self) -> ListStatus {
         ListStatus {
             state: self.state,

@@ -150,248 +150,114 @@ impl HelmPanel {
     /// The Packages tab — owner-scoped package list; tapping a package
     /// expands its versions inline.
     pub(super) fn render_packages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let versions = self
+            .expanded_package
+            .clone()
+            .map(|package| self.render_package_versions(package, cx).into_any_element());
+        self.list_screen(
+            self.packages.status(),
+            &self.packages_list,
+            versions,
+            ListLabels {
+                loading: "Loading packages…",
+                error: "Failed to load packages",
+                empty: "No packages found",
+            },
+            |this, cx| this.load_packages(cx),
+            cx,
+        )
+    }
+
+    /// The versions of the package that was opened, shown above the list.
+    ///
+    /// They used to unfold inside the package's own row. The list draws all
+    /// of its rows at one height, so a row can no longer grow; the versions
+    /// have their own block instead, with a close button.
+    fn render_package_versions(&self, package: String, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
 
-        if self.packages.state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
+        let title = h_flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .pt_2()
+            .child(
+                div()
+                    .truncate()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(muted_foreground)
+                    .child(format!("Versions of {package}")),
+            )
+            .child(
+                Button::new("helm-package-versions-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Close versions")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.expanded_package = None;
+                        this.package_versions.clear();
+                        this.package_versions_error = None;
+                        cx.notify();
+                    })),
+            );
+
+        let body = if self.package_versions.is_empty() && self.package_versions_error.is_some() {
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(muted_foreground)
+                .child("Failed to load versions")
+                .into_any_element()
+        } else if self.package_versions.is_empty() {
+            h_flex()
+                .gap_2()
                 .items_center()
-                .justify_center()
-                .p_4()
+                .px_3()
+                .py_1()
+                .child(Spinner::new().small())
                 .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child("Loading versions…"),
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .id("helm-package-versions")
+                // A package can have a long history; the list of packages
+                // below still needs room.
+                .max_h(px(180.))
+                .overflow_y_scroll()
+                .children(self.package_versions.iter().map(|version| {
                     h_flex()
-                        .gap_2()
                         .items_center()
-                        .child(Spinner::new().small())
+                        .justify_between()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
                         .child(
                             div()
                                 .text_sm()
+                                .text_color(foreground)
+                                .child(version.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
                                 .text_color(muted_foreground)
-                                .child("Loading packages…"),
-                        ),
-                )
-                .into_any_element();
-        }
+                                .child(short_date(&version.created_at)),
+                        )
+                }))
+                .into_any_element()
+        };
 
-        if self.packages.state == LoadState::Error {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load packages"),
-                )
-                .child(
-                    Button::new("packages-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_packages(cx))),
-                )
-                .into_any_element();
-        }
-
-        if self.packages.items.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No packages found"),
-                )
-                .into_any_element();
-        }
-
-        let owner = self
-            .selected_repo
-            .as_ref()
-            .map(|r| r.owner.login.clone())
-            .unwrap_or_default();
-        let expanded = self.expanded_package.clone();
-        let version_error = self.package_versions_error.clone();
-        let view = cx.entity();
-        let packages_len = self.packages.items.len();
-        let packages_cursor = self.packages.cursor;
-        let packages_for_open = self.packages.items.clone();
-        let owner_for_open = owner.clone();
-
-        v_flex()
-            .id("helm-packages-list")
-            .track_focus(&self.packages.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.packages.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.packages.cursor = step_selected(this.packages.cursor, packages_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.packages.cursor =
-                    step_selected(this.packages.cursor, packages_len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(pkg) = this.packages.cursor.and_then(|ix| packages_for_open.get(ix))
-                else {
-                    return;
-                };
-                this.toggle_package_versions(owner_for_open.clone(), pkg.clone(), cx);
-            }))
-            .py_1()
-            .children(self.packages.items.iter().enumerate().map(|(ix, pkg)| {
-                let pkg_name = pkg.name.clone();
-                let is_expanded = expanded.as_deref() == Some(pkg_name.as_str());
-                let is_selected = packages_cursor == Some(ix);
-                let pkg_type = pkg.package_type.clone();
-                let pkg_vis = pkg.visibility.clone();
-                let pkg_desc = pkg.description.clone();
-                let package_clone = pkg.clone();
-                let owner_clone = owner.clone();
-                let view = view.clone();
-
-                let row = ListItem::new(format!("helm-package-{pkg_name}"))
-                    .selected(is_selected)
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .text_color(foreground)
-                                            .child(pkg_name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child(pkg_type.clone()),
-                                    ),
-                            )
-                            .when_some(pkg_desc, |col, desc| {
-                                col.child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(muted_foreground)
-                                        .child(desc),
-                                )
-                            }),
-                    )
-                    .suffix({
-                        let pkg_vis = pkg_vis.clone();
-                        move |_, _| {
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted_foreground)
-                                        .child(pkg_vis.clone()),
-                                )
-                                .child(
-                                    Icon::new(if is_expanded {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .xsmall()
-                                    .text_color(muted_foreground),
-                                )
-                        }
-                    })
-                    .on_click({
-                        let owner_clone = owner_clone.clone();
-                        let package_clone = package_clone.clone();
-                        move |_, _window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.packages.cursor = Some(ix);
-                                this.toggle_package_versions(
-                                    owner_clone.clone(),
-                                    package_clone.clone(),
-                                    cx,
-                                );
-                            });
-                        }
-                    });
-
-                if is_expanded {
-                    let versions = if self.package_versions.is_empty() && version_error.is_some() {
-                        v_flex()
-                            .px_4()
-                            .py_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child("Failed to load versions"),
-                            )
-                            .into_any_element()
-                    } else if self.package_versions.is_empty() {
-                        v_flex()
-                            .px_4()
-                            .py_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(Spinner::new().small())
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child("Loading versions…"),
-                                    ),
-                            )
-                            .into_any_element()
-                    } else {
-                        v_flex()
-                            .children(self.package_versions.iter().map(|version| {
-                                h_flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .px_4()
-                                    .py_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(foreground)
-                                            .child(version.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child(short_date(&version.created_at)),
-                                    )
-                            }))
-                            .into_any_element()
-                    };
-                    v_flex()
-                        .child(row)
-                        .child(div().h_px().w_full().bg(border))
-                        .child(versions)
-                        .into_any_element()
-                } else {
-                    row.into_any_element()
-                }
-            }))
-            .into_any_element()
+        v_flex().pb_2().child(title).child(body)
     }
 
     /// The Tags screen.
@@ -519,6 +385,72 @@ pub(super) fn release_row(ix: usize, release: &Release, cx: &App) -> ListItem {
             Icon::new(IconName::ExternalLink)
                 .xsmall()
                 .text_color(muted_foreground)
+        })
+}
+
+/// One row of the Packages screen: name and type, then the description.
+/// Every row has the second line (see `release_summary` for why). `open`
+/// marks the package whose versions are showing above the list.
+pub(super) fn package_row(ix: usize, package: &Package, open: bool, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let visibility = package.visibility.clone();
+    let description = package
+        .description
+        .clone()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or_else(|| "No description".to_string());
+    ListItem::new(("helm-package", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(foreground)
+                                .child(package.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(package.package_type.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(description),
+                ),
+        )
+        .suffix(move |_, _| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(visibility.clone()),
+                )
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .xsmall()
+                    .text_color(muted_foreground),
+                )
         })
 }
 

@@ -99,8 +99,15 @@ Phase A moves the lines; this is the phase that removes them.
 - **Loaders: done.** `src/loading.rs` has `load_with` and `load_for_repo`; fifteen loaders use them (456 lines became 173).
 - **State and load state per section: done for every list.** `src/section.rs` adds `Section<T>`: rows, load state, last error, cursor and focus handle together. Thirteen lists are on it: issues, pull requests, releases, packages, tags, branches, collaborators, commits, workflow runs, deployments, the two security alert lists, repositories, invitations and organisations. Each replaced three loose fields on `HelmPanel`, and the ones that load from GitHub no longer share the panel-wide spinner and error.
 - **Still on the panel-wide state, on purpose:** sign-in, and the three screens that show one thing, not a list (organisation detail, a user's profile, traffic).
-- **List screens: not started.** The repeated header, spinner, error, empty and row scaffolding is still written out in each render function. `activity_list_states` already does part of this for four screens and is the starting point.
-- **Checked by:** build and the crate's tests (13, five of them new for `Section`) after every commit. **Not yet tried in the running app.**
+- **List screens: done.** `src/list_view.rs` has the shared screen (`list_screen`) on `gpui_component`'s `List`, and `src/lists.rs` builds each screen's list. All thirteen lists use it. A screen is now its header, its labels and a function that draws one row.
+- **What that changed for the user:**
+  - Keyboard selection and scrolling are the widget's, the same on every screen, and only rows in view are drawn.
+  - Headers stay while a list loads or after a failure, and a failed load shows GitHub's reason.
+  - The widget draws every row of a list at one height, so three rows were redesigned: a release's and a package's row are always two lines, and a package's versions open in a block above the list in place of unfolding inside its row.
+  - Security and Invitations are each one list with two headed sections. An empty section is left out, so Security's header states both counts.
+  - Invitations are accepted and declined only with their buttons. Enter used to accept and Space to decline; the widget treats a click on a row as Enter, so keeping that would let a stray click accept one.
+- **Line count:** the crate is at about 7,500 lines, down from 7,989. The plan's estimate of about 5,000 was too optimistic: each screen keeps its own row-drawing code, which is most of its bulk. What changed is the shape. The largest file is about 720 lines, and loading, list scaffolding and keyboard handling each exist once.
+- **Checked by:** build and the crate's tests (16) after every commit. Tags, issues and the first eight lists were tried by hand in the app; the last five (organisations, security, repositories, collaborators, invitations, packages) have **not** been yet.
 
 ### Done when
 
