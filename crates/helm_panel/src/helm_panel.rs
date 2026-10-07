@@ -165,6 +165,7 @@ pub struct HelmPanel {
     account: String,
     scopes: Vec<String>,
     org_logins: Section<String>,
+    org_logins_list: ListView,
     user: Option<GitHubUser>,
     /// Pending repo invitations the signed-in user hasn't accepted yet —
     /// just a count, surfaced as the hint badge on the Profile screen's
@@ -217,7 +218,7 @@ pub struct HelmPanel {
 
     /// Populated by [`Self::load_branches`] for the `Branches` screen.
     branches: Section<Branch>,
-    branches_list: ListView<Branch>,
+    branches_list: ListView,
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
     collaborators: Section<Collaborator>,
@@ -226,11 +227,11 @@ pub struct HelmPanel {
     // loaded on screen entry and kept while drilling; `set_screen` clears
     // them along with `selected_repo` when leaving the repo-drilled screens.
     issues: Section<Issue>,
-    issues_list: ListView<Issue>,
+    issues_list: ListView,
     issues_filter: String,
     /// Row `up`/`down`/`enter` act on, within `issues`.
     pulls: Section<Pull>,
-    pulls_list: ListView<Pull>,
+    pulls_list: ListView,
     pulls_filter: String,
     /// The issue/PR drilled into from `Issues`/`Pulls` — mutually exclusive
     /// (only one of the two is ever `Some` at a time), cleared whenever
@@ -245,22 +246,24 @@ pub struct HelmPanel {
     detail_comments: Vec<Comment>,
     detail_comments_state: LoadState,
     releases: Section<Release>,
-    releases_list: ListView<Release>,
+    releases_list: ListView,
     packages: Section<Package>,
     package_versions: Vec<PackageVersion>,
     package_versions_error: Option<String>,
     expanded_package: Option<String>,
     traffic: Option<RepoTraffic>,
     commits: Section<CommitSummary>,
-    commits_list: ListView<CommitSummary>,
+    commits_list: ListView,
     workflow_runs: Section<WorkflowRun>,
-    workflow_runs_list: ListView<WorkflowRun>,
+    workflow_runs_list: ListView,
     deployments: Section<Deployment>,
-    deployments_list: ListView<Deployment>,
+    deployments_list: ListView,
     tags: Section<Tag>,
-    tags_list: ListView<Tag>,
+    tags_list: ListView,
     dependabot_alerts: Section<serde_json::Value>,
     secret_scanning_alerts: Section<serde_json::Value>,
+    /// Both kinds of alert in one list, as two headed sections.
+    security_list: ListView,
 
     // Pending repo invitations shown on the Profile screen's Invitations
     // screen — `repo_invitation_count` above is just the badge for that row.
@@ -321,6 +324,17 @@ impl HelmPanel {
                 account: String::new(),
                 scopes: Vec::new(),
                 org_logins: Section::new(cx),
+                org_logins_list: ListView::new(
+                    |panel| &panel.org_logins,
+                    orgs::org_row,
+                    |this, ix, _, cx| {
+                        if let Some(org) = this.org_logins.items.get(ix).cloned() {
+                            this.select_org(org, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 user: None,
                 repo_invitation_count: 0,
                 selected_org: None,
@@ -446,6 +460,29 @@ impl HelmPanel {
                 ),
                 dependabot_alerts: Section::new(cx),
                 secret_scanning_alerts: Section::new(cx),
+                // Read-only: an alert has no detail screen to open.
+                security_list: ListView::sectioned(
+                    vec!["Dependabot alerts", "Secret scanning alerts"],
+                    |panel, section| match section {
+                        0 => panel.dependabot_alerts.items.len(),
+                        _ => panel.secret_scanning_alerts.items.len(),
+                    },
+                    |panel, ix, cx| match ix.section {
+                        0 => Some(insights::dependabot_row(
+                            ix.row,
+                            panel.dependabot_alerts.items.get(ix.row)?,
+                            cx,
+                        )),
+                        _ => Some(insights::secret_scanning_row(
+                            ix.row,
+                            panel.secret_scanning_alerts.items.get(ix.row)?,
+                            cx,
+                        )),
+                    },
+                    |_, _, _, _| {},
+                    window,
+                    cx,
+                ),
                 invitations: Section::new(cx),
                 org_invitations: Vec::new(),
                 viewed_user: None,

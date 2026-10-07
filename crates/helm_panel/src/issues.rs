@@ -141,7 +141,7 @@ impl HelmPanel {
             ));
 
         self.list_screen(
-            &self.issues,
+            self.issues.status(),
             &self.issues_list,
             Some(filter_row.into_any_element()),
             ListLabels {

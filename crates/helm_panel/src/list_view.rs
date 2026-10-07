@@ -10,9 +10,9 @@
 //! rows in view, and scrolls by itself. It asks one thing in return: every
 //! row of a list must be the same height.
 //!
-//! The rows themselves stay where they were, in the screen's [`Section`] on
-//! the panel. [`RowsDelegate`] reads them from there when the list is drawn,
-//! so there is one copy of the data and nothing to keep in step.
+//! The rows themselves stay where they were, on the panel. [`RowsDelegate`]
+//! reads them from there when the list is drawn, so there is one copy of the
+//! data and nothing to keep in step.
 
 use std::rc::Rc;
 
@@ -23,27 +23,35 @@ use gpui_component::{
 
 use super::*;
 
-/// Draws row `ix` of a list. Selection highlighting and clicks are the
-/// list's business, so a row sets neither.
-type RowFn<T> = Rc<dyn Fn(usize, &T, &App) -> ListItem>;
+/// How many rows a section of the list has.
+type CountFn = Rc<dyn Fn(&HelmPanel, usize) -> usize>;
 
-/// What happens when a row is clicked, or `enter` is pressed on it.
-type ConfirmFn = fn(&mut HelmPanel, usize, &mut Window, &mut Context<HelmPanel>);
+/// Draws one row. Selection highlighting and clicks are the list's
+/// business, so a row sets neither. `None` skips the row, for one that
+/// went away between counting and drawing.
+type RowFn = Rc<dyn Fn(&HelmPanel, IndexPath, &App) -> Option<ListItem>>;
 
-pub(super) struct RowsDelegate<T: 'static> {
+pub(super) struct RowsDelegate {
     panel: WeakEntity<HelmPanel>,
-    section: fn(&HelmPanel) -> &Section<T>,
-    row: RowFn<T>,
+    /// One title per section. Empty for a list that is a single run of rows
+    /// with no heading.
+    titles: Vec<&'static str>,
+    count: CountFn,
+    row: RowFn,
     selected: Option<IndexPath>,
 }
 
-impl<T: 'static> ListDelegate for RowsDelegate<T> {
+impl ListDelegate for RowsDelegate {
     type Item = ListItem;
 
-    fn items_count(&self, _section: usize, cx: &App) -> usize {
+    fn sections_count(&self, _cx: &App) -> usize {
+        self.titles.len().max(1)
+    }
+
+    fn items_count(&self, section: usize, cx: &App) -> usize {
         self.panel
             .upgrade()
-            .map_or(0, |panel| (self.section)(panel.read(cx)).items.len())
+            .map_or(0, |panel| (self.count)(panel.read(cx), section))
     }
 
     fn render_item(
@@ -53,8 +61,29 @@ impl<T: 'static> ListDelegate for RowsDelegate<T> {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
         let panel = self.panel.upgrade()?;
-        let item = (self.section)(panel.read(cx)).items.get(ix.row)?;
-        Some((self.row)(ix.row, item, cx))
+        (self.row)(panel.read(cx), ix, cx)
+    }
+
+    /// A section's heading. The list leaves out a section with no rows,
+    /// heading included, so a screen that needs to say "none" says it in
+    /// its own header.
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let title = *self.titles.get(section)?;
+        Some(
+            div()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(cx.theme().muted_foreground)
+                .child(title),
+        )
     }
 
     fn set_selected_index(
@@ -68,23 +97,47 @@ impl<T: 'static> ListDelegate for RowsDelegate<T> {
 }
 
 /// One screen's list widget. Created once with the panel and kept for its
-/// lifetime; it shows whatever its [`Section`] holds at the time.
-pub(super) struct ListView<T: 'static> {
-    state: Entity<ListState<RowsDelegate<T>>>,
+/// lifetime; it shows whatever the panel holds at the time.
+pub(super) struct ListView {
+    state: Entity<ListState<RowsDelegate>>,
     _confirm: Subscription,
 }
 
-impl<T: 'static> ListView<T> {
-    pub(super) fn new(
+impl ListView {
+    /// A list over one [`Section`]. `on_confirm` runs when a row is clicked
+    /// or `enter` is pressed on it.
+    pub(super) fn new<T: 'static>(
         section: fn(&HelmPanel) -> &Section<T>,
         row: impl Fn(usize, &T, &App) -> ListItem + 'static,
-        on_confirm: ConfirmFn,
+        on_confirm: fn(&mut HelmPanel, usize, &mut Window, &mut Context<HelmPanel>),
+        window: &mut Window,
+        cx: &mut Context<HelmPanel>,
+    ) -> Self {
+        Self::sectioned(
+            Vec::new(),
+            move |panel, _| section(panel).items.len(),
+            move |panel, ix, cx| Some(row(ix.row, section(panel).items.get(ix.row)?, cx)),
+            move |panel, ix, window, cx| on_confirm(panel, ix.row, window, cx),
+            window,
+            cx,
+        )
+    }
+
+    /// A list of several headed sections, or one whose rows are not simply
+    /// a [`Section`]'s items (a filtered view, say). `count` and `row` read
+    /// what they need from the panel.
+    pub(super) fn sectioned(
+        titles: Vec<&'static str>,
+        count: impl Fn(&HelmPanel, usize) -> usize + 'static,
+        row: impl Fn(&HelmPanel, IndexPath, &App) -> Option<ListItem> + 'static,
+        on_confirm: impl Fn(&mut HelmPanel, IndexPath, &mut Window, &mut Context<HelmPanel>) + 'static,
         window: &mut Window,
         cx: &mut Context<HelmPanel>,
     ) -> Self {
         let delegate = RowsDelegate {
             panel: cx.weak_entity(),
-            section,
+            titles,
+            count: Rc::new(count),
             row: Rc::new(row),
             selected: None,
         };
@@ -94,13 +147,31 @@ impl<T: 'static> ListView<T> {
             window,
             move |this, _list, event: &ListEvent, window, cx| {
                 if let ListEvent::Confirm(ix) = event {
-                    on_confirm(this, ix.row, window, cx);
+                    on_confirm(this, *ix, window, cx);
                 }
             },
         );
         ListView {
             state,
             _confirm: confirm,
+        }
+    }
+}
+
+/// What a list screen needs to know about its data to choose between the
+/// spinner, the error, the empty line and the rows.
+pub(super) struct ListStatus {
+    pub(super) state: LoadState,
+    pub(super) error: String,
+    pub(super) is_empty: bool,
+}
+
+impl<T> SectionData<T> {
+    pub(super) fn status(&self) -> ListStatus {
+        ListStatus {
+            state: self.state,
+            error: self.error.clone(),
+            is_empty: self.items.is_empty(),
         }
     }
 }
@@ -114,11 +185,11 @@ pub(super) struct ListLabels {
 
 impl HelmPanel {
     /// A whole list screen: `header` (always shown, whatever the list is
-    /// doing), then the section's spinner, error, empty line or rows.
-    pub(super) fn list_screen<T: 'static>(
+    /// doing), then the spinner, error, empty line or rows.
+    pub(super) fn list_screen(
         &self,
-        section: &Section<T>,
-        list: &ListView<T>,
+        status: ListStatus,
+        list: &ListView,
         header: Option<gpui::AnyElement>,
         labels: ListLabels,
         retry: impl Fn(&mut Self, &mut Context<Self>) + 'static,
@@ -134,7 +205,7 @@ impl HelmPanel {
                 .child(text.to_string())
         };
 
-        let body = if section.state == LoadState::Loading {
+        let body = if status.state == LoadState::Loading {
             centered()
                 .child(
                     h_flex()
@@ -144,18 +215,18 @@ impl HelmPanel {
                         .child(line(labels.loading)),
                 )
                 .into_any_element()
-        } else if section.state == LoadState::Error {
+        } else if status.state == LoadState::Error {
             v_flex()
                 .gap_3()
                 .p_4()
                 .child(line(labels.error))
                 // The reason GitHub gave, so a failure is not just "failed".
-                .when(!section.error.is_empty(), |column| {
+                .when(!status.error.is_empty(), |column| {
                     column.child(
                         div()
                             .text_xs()
                             .text_color(muted_foreground)
-                            .child(section.error.clone()),
+                            .child(status.error.clone()),
                     )
                 })
                 .child(
@@ -165,7 +236,7 @@ impl HelmPanel {
                         .on_click(cx.listener(move |this, _, _, cx| retry(this, cx))),
                 )
                 .into_any_element()
-        } else if section.items.is_empty() {
+        } else if status.is_empty {
             centered().child(line(labels.empty)).into_any_element()
         } else {
             let state = list.state.clone();

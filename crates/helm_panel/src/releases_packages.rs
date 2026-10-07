@@ -134,7 +134,7 @@ impl HelmPanel {
             );
 
         self.list_screen(
-            &self.releases,
+            self.releases.status(),
             &self.releases_list,
             Some(header.into_any_element()),
             ListLabels {
@@ -397,7 +397,7 @@ impl HelmPanel {
     /// The Tags screen.
     pub(super) fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            &self.tags,
+            self.tags.status(),
             &self.tags_list,
             None,
             ListLabels {

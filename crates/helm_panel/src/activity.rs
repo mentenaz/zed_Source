@@ -61,7 +61,7 @@ impl HelmPanel {
     /// The Commits screen — recent commits with GitHub author avatars.
     pub(super) fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            &self.commits,
+            self.commits.status(),
             &self.commits_list,
             None,
             ListLabels {
@@ -80,7 +80,7 @@ impl HelmPanel {
     /// than a detail pane embedded in this panel.
     pub(super) fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            &self.workflow_runs,
+            self.workflow_runs.status(),
             &self.workflow_runs_list,
             None,
             ListLabels {
@@ -96,7 +96,7 @@ impl HelmPanel {
     /// The Deployments screen.
     pub(super) fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            &self.deployments,
+            self.deployments.status(),
             &self.deployments_list,
             None,
             ListLabels {

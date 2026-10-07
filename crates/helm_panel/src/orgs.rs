@@ -24,65 +24,20 @@ impl HelmPanel {
 
     /// The org list — mirrors the old `OrgListScreen`.
     pub(super) fn render_org_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
-
-        if self.org_logins.items.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No organizations"),
-                )
-                .into_any_element();
-        }
-
-        let len = self.org_logins.items.len();
-        let cursor = self.org_logins.cursor;
-        v_flex()
-            .id("helm-org-list")
-            .track_focus(&self.org_logins.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.org_logins.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.org_logins.cursor = step_selected(this.org_logins.cursor, len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.org_logins.cursor = step_selected(this.org_logins.cursor, len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(org) = this.org_logins.cursor.and_then(|ix| this.org_logins.items.get(ix)).cloned()
-                else {
-                    return;
-                };
-                this.select_org(org, cx);
-            }))
-            .py_1()
-            .children(self.org_logins.items.clone().into_iter().enumerate().map(|(ix, org)| {
-                let click_org = org.clone();
-                ListItem::new(format!("helm-org-{org}"))
-                    .selected(cursor == Some(ix))
-                    .child(div().text_color(foreground).child(org))
-                    .suffix(move |_, _| {
-                        Icon::new(IconName::ChevronRight)
-                            .xsmall()
-                            .text_color(muted_foreground)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.org_logins.cursor = Some(ix);
-                        this.select_org(click_org.clone(), cx)
-                    }))
-            }))
-            .into_any_element()
+        self.list_screen(
+            self.org_logins.status(),
+            &self.org_logins_list,
+            None,
+            // The organisations arrive with sign-in, so this list has no
+            // load of its own to wait for or to fail.
+            ListLabels {
+                loading: "Loading organizations…",
+                error: "Failed to load organizations",
+                empty: "No organizations",
+            },
+            |_, _| {},
+            cx,
+        )
     }
 
     /// The selected org's detail — mirrors the old `OrgDetailScreen`.
@@ -214,4 +169,17 @@ impl HelmPanel {
             )
             .into_any_element()
     }
+}
+
+/// One row of the Organizations screen.
+pub(super) fn org_row(ix: usize, org: &String, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    ListItem::new(("helm-org", ix))
+        .child(div().text_color(foreground).child(org.clone()))
+        .suffix(move |_, _| {
+            Icon::new(IconName::ChevronRight)
+                .xsmall()
+                .text_color(muted_foreground)
+        })
 }

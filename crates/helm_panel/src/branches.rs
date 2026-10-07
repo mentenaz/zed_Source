@@ -23,7 +23,7 @@ impl HelmPanel {
     /// loading/error/empty states.
     pub(super) fn render_branches(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            &self.branches,
+            self.branches.status(),
             &self.branches_list,
             None,
             ListLabels {
