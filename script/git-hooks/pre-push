@@ -1,14 +1,18 @@
 #!/bin/sh
 # Runs the fork's unit tests before a push, and stops the push if any fail.
 #
-# Upstream's CI (`.github/workflows/run_tests.yml`) only runs for the
-# zed-industries organisation, so without this nothing tests the fork's own
-# crates before they leave this machine. See `script/test-fork-crates.ps1`
-# for what is run: the crates this fork adds, not upstream Zed's.
+# Optional, and off by default. The same tests run on GitHub for every push
+# to main (`.github/workflows/fork_tests.yml`), which is the normal way they
+# are run: on a developer machine this build competes with the editor and
+# the app for memory and delays every push. Use the hook if you want a
+# failure to stop a push before it leaves the machine. See
+# `script/test-fork-crates.ps1` for what is run: the crates this fork adds,
+# not upstream Zed's.
 #
-# Turn it on once per clone:
+# Turn it on for a clone, and off again:
 #
 #     git config core.hooksPath script/git-hooks
+#     git config --unset core.hooksPath
 #
 # To push without running the tests (a docs-only change, say):
 #

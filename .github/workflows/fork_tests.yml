@@ -1,0 +1,58 @@
+name: fork_tests
+
+# Runs the unit tests of the crates this fork adds on top of upstream Zed
+# (script/test-fork-crates.ps1), on every push to main and on pull requests.
+#
+# Upstream's own run_tests.yml is gated to the zed-industries organisation,
+# so it is inert here; without this workflow nothing tests the fork's crates.
+#
+# This replaces running the same script from a local pre-push hook. The hook
+# is still in script/git-hooks for anyone who wants it, but it is off by
+# default: on a developer machine the test build competes with the editor
+# and the app for memory, and it delays every push.
+#
+# The result shows as a check on the commit. A failure does not undo the
+# push; it is a signal to fix forward.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  # A CI build is thrown away, so incremental state and debug info only cost
+  # time and disk. The hosted runner has little of the latter.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an older run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test_fork_crates:
+    # Windows, because that is where the fork is developed and several of
+    # its backends have Windows-only code paths (registry lookups, PATH
+    # handling) that a Linux run would not compile.
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Test the fork's crates
+        shell: pwsh
+        # The hosted runner has 4 cores; the script's default of 8 jobs is
+        # sized for a developer machine.
+        run: ./script/test-fork-crates.ps1 -Jobs 4

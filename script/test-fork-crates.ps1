@@ -2,10 +2,10 @@
 #
 # Upstream's own CI (`.github/workflows/run_tests.yml`) only runs for the
 # zed-industries organisation, so nothing runs these automatically here.
-# The pre-push hook in `script/git-hooks` runs this before every push and
-# stops the push if a test fails. Turn the hook on once per clone:
-#
-#   git config core.hooksPath script/git-hooks
+# GitHub runs this for every push to main and for pull requests
+# (`.github/workflows/fork_tests.yml`). There is also an optional pre-push
+# hook in `script/git-hooks`, off by default, that runs it locally and stops
+# the push on a failure.
 #
 # It can also be run by hand:
 #
