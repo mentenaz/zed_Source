@@ -57,143 +57,21 @@ impl HelmPanel {
         );
     }
 
-    /// Shared loading/error/empty states for the read-only repo-activity
-    /// lists below (Commits/Actions/Deployments/Tags) — same shape as
-    /// `render_invitations`/`render_branches`, factored out since there are
-    /// four of them.
-    pub(super) fn activity_list_states(
-        &self,
-        state: LoadState,
-        loading_label: &'static str,
-        error_label: &'static str,
-        empty_label: &'static str,
-        is_empty: bool,
-        retry: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let muted_foreground = cx.theme().muted_foreground;
-
-        if state == LoadState::Loading {
-            return Some(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .p_4()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Spinner::new().small())
-                            .child(div().text_sm().text_color(muted_foreground).child(loading_label)),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if state == LoadState::Error {
-            return Some(
-                v_flex()
-                    .gap_3()
-                    .p_4()
-                    .child(div().text_sm().text_color(muted_foreground).child(error_label))
-                    .child(
-                        Button::new("activity-retry")
-                            .outline()
-                            .label("Retry")
-                            .on_click(cx.listener(move |this, _, _, cx| retry(this, cx))),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if is_empty {
-            return Some(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .p_4()
-                    .child(div().text_sm().text_color(muted_foreground).child(empty_label))
-                    .into_any_element(),
-            );
-        }
-        None
-    }
 
     /// The Commits screen — recent commits with GitHub author avatars.
     pub(super) fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(el) = self.activity_list_states(
-            self.commits.state,
-            "Loading commits…",
-            "Failed to load commits",
-            "No commits found",
-            self.commits.items.is_empty(),
+        self.list_screen(
+            &self.commits,
+            &self.commits_list,
+            None,
+            ListLabels {
+                loading: "Loading commits…",
+                error: "Failed to load commits",
+                empty: "No commits found",
+            },
             |this, cx| this.load_commits(cx),
             cx,
-        ) {
-            return el;
-        }
-
-        let foreground = cx.theme().foreground;
-        let muted_foreground = cx.theme().muted_foreground;
-        // Read-only list — no click action, so up/down + a selection
-        // highlight only (see `render_branches`'s identical reasoning).
-        let commits_len = self.commits.items.len();
-        let commits_cursor = self.commits.cursor;
-
-        v_flex()
-            .id("helm-commits-list")
-            .track_focus(&self.commits.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.commits.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.commits.cursor = step_selected(this.commits.cursor, commits_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.commits.cursor =
-                    step_selected(this.commits.cursor, commits_len, false);
-                cx.notify();
-            }))
-            .py_1()
-            .children(self.commits.items.iter().enumerate().map(|(ix, commit)| {
-                let short_sha: String = commit.sha.chars().take(7).collect();
-                let author = commit
-                    .author
-                    .as_ref()
-                    .map(|a| a.login.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let avatar_url = commit
-                    .author
-                    .as_ref()
-                    .map(|a| a.avatar_url.clone())
-                    .unwrap_or_default();
-
-                ListItem::new(format!("helm-commit-{}", commit.sha))
-                    .selected(commits_cursor == Some(ix))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Avatar::new()
-                                    .src(avatar_url)
-                                    .name(author.clone())
-                                    .with_size(px(20.)),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family("Cascadia Mono")
-                                    .text_color(foreground)
-                                    .child(short_sha),
-                            )
-                            .child(div().text_xs().text_color(muted_foreground).child(author)),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element()
+        )
     }
 
     /// The Actions screen — recent CI workflow runs with status/conclusion.
@@ -201,154 +79,136 @@ impl HelmPanel {
     /// workspace tab (`select_workflow_run` → `WorkflowRunItem`), rather
     /// than a detail pane embedded in this panel.
     pub(super) fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(el) = self.activity_list_states(
-            self.workflow_runs.state,
-            "Loading workflow runs…",
-            "Failed to load workflow runs",
-            "No workflow runs found",
-            self.workflow_runs.items.is_empty(),
+        self.list_screen(
+            &self.workflow_runs,
+            &self.workflow_runs_list,
+            None,
+            ListLabels {
+                loading: "Loading workflow runs…",
+                error: "Failed to load workflow runs",
+                empty: "No workflow runs found",
+            },
             |this, cx| this.load_workflow_runs(cx),
             cx,
-        ) {
-            return el;
-        }
-
-        let foreground = cx.theme().foreground;
-        let muted_foreground = cx.theme().muted_foreground;
-        let success = cx.theme().success;
-        let danger = cx.theme().danger;
-        let runs_len = self.workflow_runs.items.len();
-        let runs_cursor = self.workflow_runs.cursor;
-        let runs_for_open = self.workflow_runs.items.clone();
-
-        v_flex()
-            .id("helm-workflow-runs-list")
-            .track_focus(&self.workflow_runs.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.workflow_runs.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.workflow_runs.cursor =
-                    step_selected(this.workflow_runs.cursor, runs_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.workflow_runs.cursor =
-                    step_selected(this.workflow_runs.cursor, runs_len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
-                let Some(run) = this.workflow_runs.cursor.and_then(|ix| runs_for_open.get(ix))
-                else {
-                    return;
-                };
-                this.select_workflow_run(run.clone(), window, cx);
-            }))
-            .py_1()
-            .children(self.workflow_runs.items.iter().enumerate().map(|(ix, run)| {
-                let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
-                let color = match status_label.as_str() {
-                    "success" => success,
-                    "failure" | "cancelled" | "timed_out" => danger,
-                    _ => muted_foreground,
-                };
-                let run_for_click = run.clone();
-
-                ListItem::new(format!("helm-run-{}", run.id))
-                    .selected(runs_cursor == Some(ix))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .text_color(foreground)
-                                    .child(run.name.clone()),
-                            )
-                            .child(div().text_xs().text_color(muted_foreground).child(format!(
-                                "#{} · {}",
-                                run.run_number,
-                                run.head_branch.clone().unwrap_or_default()
-                            ))),
-                    )
-                    .suffix(move |_, _| {
-                        div().text_xs().text_color(color).child(status_label.clone())
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.workflow_runs.cursor = Some(ix);
-                        this.select_workflow_run(run_for_click.clone(), window, cx);
-                    }))
-                    .into_any_element()
-            }))
-            .into_any_element()
+        )
     }
 
     /// The Deployments screen.
     pub(super) fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(el) = self.activity_list_states(
-            self.deployments.state,
-            "Loading deployments…",
-            "Failed to load deployments",
-            "No deployments found",
-            self.deployments.items.is_empty(),
+        self.list_screen(
+            &self.deployments,
+            &self.deployments_list,
+            None,
+            ListLabels {
+                loading: "Loading deployments…",
+                error: "Failed to load deployments",
+                empty: "No deployments found",
+            },
             |this, cx| this.load_deployments(cx),
             cx,
-        ) {
-            return el;
-        }
-
-        let foreground = cx.theme().foreground;
-        let muted_foreground = cx.theme().muted_foreground;
-        let deployments_len = self.deployments.items.len();
-        let deployments_cursor = self.deployments.cursor;
-
-        v_flex()
-            .id("helm-deployments-list")
-            .track_focus(&self.deployments.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.deployments.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.deployments.cursor =
-                    step_selected(this.deployments.cursor, deployments_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.deployments.cursor =
-                    step_selected(this.deployments.cursor, deployments_len, false);
-                cx.notify();
-            }))
-            .py_1()
-            .children(self.deployments.items.iter().enumerate().map(|(ix, dep)| {
-                let short_sha: String = dep.sha.chars().take(7).collect();
-                ListItem::new(format!("helm-deployment-{}", dep.id))
-                    .selected(deployments_cursor == Some(ix))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .text_color(foreground)
-                                    .child(dep.environment.clone()),
-                            )
-                            .child(div().text_xs().text_color(muted_foreground).child(format!(
-                                "{} · {short_sha}",
-                                dep.r#ref
-                            ))),
-                    )
-                    .suffix({
-                        let status = dep.status.clone();
-                        move |_, _| div().text_xs().text_color(muted_foreground).child(status.clone())
-                    })
-                    .into_any_element()
-            }))
-            .into_any_element()
+        )
     }
+}
+
+/// One row of the Commits screen: the author's avatar, the short commit id
+/// and the author's login.
+pub(super) fn commit_row(ix: usize, commit: &CommitSummary, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let short_sha: String = commit.sha.chars().take(7).collect();
+    let author = commit
+        .author
+        .as_ref()
+        .map(|a| a.login.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let avatar_url = commit
+        .author
+        .as_ref()
+        .map(|a| a.avatar_url.clone())
+        .unwrap_or_default();
+    ListItem::new(("helm-commit", ix)).child(
+        h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Avatar::new()
+                    .src(avatar_url)
+                    .name(author.clone())
+                    .with_size(px(20.)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_family("Cascadia Mono")
+                    .text_color(foreground)
+                    .child(short_sha),
+            )
+            .child(div().text_xs().text_color(muted_foreground).child(author)),
+    )
+}
+
+/// One row of the Actions screen: the workflow's name, its run number and
+/// branch, and how the run ended (or its status while it is still going).
+pub(super) fn workflow_run_row(ix: usize, run: &WorkflowRun, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
+    let color = match status_label.as_str() {
+        "success" => cx.theme().success,
+        "failure" | "cancelled" | "timed_out" => cx.theme().danger,
+        _ => muted_foreground,
+    };
+    ListItem::new(("helm-run", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(foreground)
+                        .child(run.name.clone()),
+                )
+                .child(div().text_xs().text_color(muted_foreground).child(format!(
+                    "#{} · {}",
+                    run.run_number,
+                    run.head_branch.clone().unwrap_or_default()
+                ))),
+        )
+        .suffix(move |_, _| div().text_xs().text_color(color).child(status_label.clone()))
+}
+
+/// One row of the Deployments screen: the environment, the ref and short
+/// commit deployed, and the deployment's status.
+pub(super) fn deployment_row(ix: usize, deployment: &Deployment, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let short_sha: String = deployment.sha.chars().take(7).collect();
+    let status = deployment.status.clone();
+    ListItem::new(("helm-deployment", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(foreground)
+                        .child(deployment.environment.clone()),
+                )
+                .child(div().text_xs().text_color(muted_foreground).child(format!(
+                    "{} · {short_sha}",
+                    deployment.r#ref
+                ))),
+        )
+        .suffix(move |_, _| {
+            div()
+                .text_xs()
+                .text_color(muted_foreground)
+                .child(status.clone())
+        })
 }

@@ -217,6 +217,7 @@ pub struct HelmPanel {
 
     /// Populated by [`Self::load_branches`] for the `Branches` screen.
     branches: Section<Branch>,
+    branches_list: ListView<Branch>,
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
     collaborators: Section<Collaborator>,
@@ -229,6 +230,7 @@ pub struct HelmPanel {
     issues_filter: String,
     /// Row `up`/`down`/`enter` act on, within `issues`.
     pulls: Section<Pull>,
+    pulls_list: ListView<Pull>,
     pulls_filter: String,
     /// The issue/PR drilled into from `Issues`/`Pulls` — mutually exclusive
     /// (only one of the two is ever `Some` at a time), cleared whenever
@@ -243,14 +245,18 @@ pub struct HelmPanel {
     detail_comments: Vec<Comment>,
     detail_comments_state: LoadState,
     releases: Section<Release>,
+    releases_list: ListView<Release>,
     packages: Section<Package>,
     package_versions: Vec<PackageVersion>,
     package_versions_error: Option<String>,
     expanded_package: Option<String>,
     traffic: Option<RepoTraffic>,
     commits: Section<CommitSummary>,
+    commits_list: ListView<CommitSummary>,
     workflow_runs: Section<WorkflowRun>,
+    workflow_runs_list: ListView<WorkflowRun>,
     deployments: Section<Deployment>,
+    deployments_list: ListView<Deployment>,
     tags: Section<Tag>,
     tags_list: ListView<Tag>,
     dependabot_alerts: Section<serde_json::Value>,
@@ -332,6 +338,27 @@ impl HelmPanel {
                 clone_target_dir: None,
                 workspace,
                 branches: Section::new(cx),
+                // Read-only. A row needs the repository's default branch to
+                // mark it, which the panel knows and the row does not.
+                branches_list: ListView::new(
+                    |panel| &panel.branches,
+                    {
+                        let panel: WeakEntity<Self> = cx.weak_entity();
+                        move |ix: usize, branch: &Branch, cx: &App| {
+                            let default_branch: String = panel
+                                .upgrade()
+                                .and_then(|panel| {
+                                    let repo = panel.read(cx).selected_repo.as_ref()?;
+                                    Some(repo.default_branch.clone())
+                                })
+                                .unwrap_or_default();
+                            branches::branch_row(ix, branch, &default_branch, cx)
+                        }
+                    },
+                    |_, _, _, _| {},
+                    window,
+                    cx,
+                ),
                 collaborators: Section::new(cx),
                 issues: Section::new(cx),
                 issues_list: ListView::new(
@@ -347,20 +374,67 @@ impl HelmPanel {
                 ),
                 issues_filter: "open".into(),
                 pulls: Section::new(cx),
+                pulls_list: ListView::new(
+                    |panel| &panel.pulls,
+                    pulls::pull_row,
+                    |this, ix, _, cx| {
+                        if let Some(pr) = this.pulls.items.get(ix).cloned() {
+                            this.open_pr_detail(pr, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 pulls_filter: "open".into(),
                 selected_issue: None,
                 selected_pr: None,
                 detail_comments: Vec::new(),
                 detail_comments_state: LoadState::Idle,
                 releases: Section::new(cx),
+                releases_list: ListView::new(
+                    |panel| &panel.releases,
+                    releases_packages::release_row,
+                    |this, ix, _, cx| {
+                        if let Some(release) = this.releases.items.get(ix) {
+                            cx.open_url(&release.html_url);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 packages: Section::new(cx),
                 package_versions: Vec::new(),
                 package_versions_error: None,
                 expanded_package: None,
                 traffic: None,
                 commits: Section::new(cx),
+                commits_list: ListView::new(
+                    |panel| &panel.commits,
+                    activity::commit_row,
+                    |_, _, _, _| {},
+                    window,
+                    cx,
+                ),
                 workflow_runs: Section::new(cx),
+                workflow_runs_list: ListView::new(
+                    |panel| &panel.workflow_runs,
+                    activity::workflow_run_row,
+                    |this, ix, window, cx| {
+                        if let Some(run) = this.workflow_runs.items.get(ix).cloned() {
+                            this.select_workflow_run(run, window, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 deployments: Section::new(cx),
+                deployments_list: ListView::new(
+                    |panel| &panel.deployments,
+                    activity::deployment_row,
+                    |_, _, _, _| {},
+                    window,
+                    cx,
+                ),
                 tags: Section::new(cx),
                 // Tags are read-only: nothing happens on `enter` or a click.
                 tags_list: ListView::new(

@@ -108,9 +108,7 @@ impl HelmPanel {
     /// prerelease badges, and asset download summary; rows open in the
     /// browser.
     pub(super) fn render_releases(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let warning = cx.theme().warning;
 
         let header = h_flex()
             .items_center()
@@ -135,198 +133,18 @@ impl HelmPanel {
                     })),
             );
 
-        if self.releases.state == LoadState::Loading {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(cx.theme().border))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .p_4()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(Spinner::new().small())
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted_foreground)
-                                        .child("Loading releases…"),
-                                ),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.releases.state == LoadState::Error {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(cx.theme().border))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Failed to load releases"),
-                        )
-                        .child(
-                            Button::new("releases-retry")
-                                .outline()
-                                .label("Retry")
-                                .on_click(cx.listener(|this, _, _, cx| this.load_releases(cx))),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.releases.items.is_empty() {
-            return v_flex()
-                .child(header)
-                .child(div().h_px().w_full().bg(cx.theme().border))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .p_4()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("No releases yet"),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        let releases_len = self.releases.items.len();
-        let releases_cursor = self.releases.cursor;
-        let releases_urls: Vec<String> =
-            self.releases.items.iter().map(|r| r.html_url.clone()).collect();
-        let releases_list = v_flex()
-            .id("helm-releases-list")
-            .track_focus(&self.releases.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.releases.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.releases.cursor = step_selected(this.releases.cursor, releases_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.releases.cursor =
-                    step_selected(this.releases.cursor, releases_len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(url) = this.releases.cursor.and_then(|ix| releases_urls.get(ix))
-                else {
-                    return;
-                };
-                cx.open_url(url);
-            }))
-            .py_1()
-            .children(self.releases.items.iter().enumerate().map(|(ix, release)| {
-                let tag = release.tag_name.clone();
-                let title = release
-                    .name
-                    .clone()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| tag.clone());
-                let draft = release.draft;
-                let prerelease = release.prerelease;
-                let body_preview = release.body.as_deref().map(|b| {
-                    let mut trimmed: String = b.chars().take(120).collect();
-                    if b.chars().count() > 120 {
-                        trimmed.push('…');
-                    }
-                    trimmed
-                });
-                let asset_count = release.assets.len();
-                let url = release.html_url.clone();
-                ListItem::new(format!("helm-release-{}", release.tag_name))
-                    .selected(releases_cursor == Some(ix))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .text_color(foreground)
-                                            .child(title),
-                                    )
-                                    .when(draft, |row| {
-                                        row.child(
-                                            div()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_full()
-                                                .text_xs()
-                                                .bg(muted_foreground.opacity(0.15))
-                                                .text_color(muted_foreground)
-                                                .child("draft"),
-                                        )
-                                    })
-                                    .when(prerelease, |row| {
-                                        row.child(
-                                            div()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_full()
-                                                .text_xs()
-                                                .bg(warning.opacity(0.15))
-                                                .text_color(warning)
-                                                .child("pre-release"),
-                                        )
-                                    }),
-                            )
-                            .when_some(body_preview, |col, body| {
-                                col.child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(muted_foreground)
-                                        .child(body),
-                                )
-                            })
-                            .when(asset_count > 0, |col| {
-                                col.child(div().text_xs().text_color(muted_foreground).child(
-                                    format!(
-                                        "{asset_count} asset{}",
-                                        if asset_count == 1 { "" } else { "s" }
-                                    ),
-                                ))
-                            }),
-                    )
-                    .suffix(move |_, _| {
-                        Icon::new(IconName::ExternalLink)
-                            .xsmall()
-                            .text_color(muted_foreground)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.releases.cursor = Some(ix);
-                        cx.open_url(&url);
-                    }))
-            }));
-
-        v_flex()
-            .child(header)
-            .child(div().h_px().w_full().bg(cx.theme().border))
-            .child(releases_list)
-            .into_any_element()
+        self.list_screen(
+            &self.releases,
+            &self.releases_list,
+            Some(header.into_any_element()),
+            ListLabels {
+                loading: "Loading releases…",
+                error: "Failed to load releases",
+                empty: "No releases yet",
+            },
+            |this, cx| this.load_releases(cx),
+            cx,
+        )
     }
 
     /// The Packages tab — owner-scoped package list; tapping a package
@@ -614,3 +432,142 @@ pub(super) fn tag_row(ix: usize, tag: &Tag, cx: &App) -> ListItem {
                 .child(short_sha.clone())
         })
 }
+
+/// The second line of a release's row: how many assets it has, then the
+/// start of its notes.
+///
+/// Every row gets this line, with a placeholder when there is nothing to
+/// say, because the list draws all of its rows at one height.
+pub(super) fn release_summary(release: &Release) -> String {
+    let assets = match release.assets.len() {
+        0 => None,
+        1 => Some("1 asset".to_string()),
+        count => Some(format!("{count} assets")),
+    };
+    let notes = release
+        .body
+        .as_deref()
+        .map(|body| body.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|body| !body.is_empty())
+        .map(|body| {
+            let mut preview: String = body.chars().take(120).collect();
+            if body.chars().count() > 120 {
+                preview.push('…');
+            }
+            preview
+        });
+    match (assets, notes) {
+        (Some(assets), Some(notes)) => format!("{assets} · {notes}"),
+        (Some(assets), None) => assets,
+        (None, Some(notes)) => notes,
+        (None, None) => "No release notes".to_string(),
+    }
+}
+
+/// One row of the Releases screen: its title with draft and pre-release
+/// badges, and a one-line summary.
+pub(super) fn release_row(ix: usize, release: &Release, cx: &App) -> ListItem {
+    let muted_foreground = cx.theme().muted_foreground;
+    let foreground = cx.theme().foreground;
+    let warning = cx.theme().warning;
+    let title = release
+        .name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| release.tag_name.clone());
+    let badge = |text: &'static str, color: gpui::Hsla| {
+        div()
+            .px_1p5()
+            .py_0p5()
+            .rounded_full()
+            .text_xs()
+            .bg(color.opacity(0.15))
+            .text_color(color)
+            .child(text)
+    };
+    ListItem::new(("helm-release", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(foreground)
+                                .child(title),
+                        )
+                        .when(release.draft, |row| row.child(badge("draft", muted_foreground)))
+                        .when(release.prerelease, |row| {
+                            row.child(badge("pre-release", warning))
+                        }),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(release_summary(release)),
+                ),
+        )
+        .suffix(move |_, _| {
+            Icon::new(IconName::ExternalLink)
+                .xsmall()
+                .text_color(muted_foreground)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(body: Option<&str>, assets: usize) -> Release {
+        let assets: Vec<serde_json::Value> = (0..assets)
+            .map(|n| serde_json::json!({ "name": format!("asset-{n}.zip") }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "tag_name": "v1.0.0",
+            "name": "One",
+            "body": body,
+            "draft": false,
+            "prerelease": false,
+            "html_url": "https://github.com/o/r/releases/tag/v1.0.0",
+            "assets": assets,
+        }))
+        .expect("a release the backend's type accepts")
+    }
+
+    #[test]
+    fn a_release_row_always_has_a_second_line() {
+        // The list draws every row at one height, so no row may drop the line.
+        assert_eq!(release_summary(&release(None, 0)), "No release notes");
+        assert_eq!(release_summary(&release(Some("   
+  "), 0)), "No release notes");
+        assert_eq!(release_summary(&release(None, 1)), "1 asset");
+        assert_eq!(release_summary(&release(None, 3)), "3 assets");
+        assert_eq!(release_summary(&release(Some("Fixes"), 0)), "Fixes");
+        assert_eq!(release_summary(&release(Some("Fixes"), 2)), "2 assets · Fixes");
+    }
+
+    #[test]
+    fn release_notes_are_flattened_to_one_line_and_cut_at_120() {
+        assert_eq!(
+            release_summary(&release(Some("## Changes
+
+- one
+- two"), 0)),
+            "## Changes - one - two"
+        );
+        let long = "x".repeat(200);
+        let summary = release_summary(&release(Some(&long), 0));
+        assert_eq!(summary.chars().count(), 121);
+        assert!(summary.ends_with('…'));
+    }
+}
+
