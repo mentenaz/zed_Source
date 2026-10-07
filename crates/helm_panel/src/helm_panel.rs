@@ -19,6 +19,7 @@ mod collaborators;
 mod branches;
 mod pulls;
 mod issues;
+mod list_view;
 mod loading;
 mod releases_packages;
 mod insights;
@@ -73,6 +74,7 @@ use crate::backend::github::{
 };
 use crate::backend::on_tokio;
 use changes::*;
+use list_view::*;
 use collaborators::*;
 use repository_modal::*;
 use section::*;
@@ -223,6 +225,7 @@ pub struct HelmPanel {
     // loaded on screen entry and kept while drilling; `set_screen` clears
     // them along with `selected_repo` when leaving the repo-drilled screens.
     issues: Section<Issue>,
+    issues_list: ListView<Issue>,
     issues_filter: String,
     /// Row `up`/`down`/`enter` act on, within `issues`.
     pulls: Section<Pull>,
@@ -249,6 +252,7 @@ pub struct HelmPanel {
     workflow_runs: Section<WorkflowRun>,
     deployments: Section<Deployment>,
     tags: Section<Tag>,
+    tags_list: ListView<Tag>,
     dependabot_alerts: Section<serde_json::Value>,
     secret_scanning_alerts: Section<serde_json::Value>,
 
@@ -330,6 +334,17 @@ impl HelmPanel {
                 branches: Section::new(cx),
                 collaborators: Section::new(cx),
                 issues: Section::new(cx),
+                issues_list: ListView::new(
+                    |panel| &panel.issues,
+                    issues::issue_row,
+                    |this, ix, _, cx| {
+                        if let Some(issue) = this.issues.items.get(ix).cloned() {
+                            this.open_issue_detail(issue, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ),
                 issues_filter: "open".into(),
                 pulls: Section::new(cx),
                 pulls_filter: "open".into(),
@@ -347,6 +362,14 @@ impl HelmPanel {
                 workflow_runs: Section::new(cx),
                 deployments: Section::new(cx),
                 tags: Section::new(cx),
+                // Tags are read-only: nothing happens on `enter` or a click.
+                tags_list: ListView::new(
+                    |panel| &panel.tags,
+                    releases_packages::tag_row,
+                    |_, _, _, _| {},
+                    window,
+                    cx,
+                ),
                 dependabot_alerts: Section::new(cx),
                 secret_scanning_alerts: Section::new(cx),
                 invitations: Section::new(cx),

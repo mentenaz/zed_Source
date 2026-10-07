@@ -578,55 +578,39 @@ impl HelmPanel {
 
     /// The Tags screen.
     pub(super) fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(el) = self.activity_list_states(
-            self.tags.state,
-            "Loading tags…",
-            "Failed to load tags",
-            "No tags found",
-            self.tags.items.is_empty(),
+        self.list_screen(
+            &self.tags,
+            &self.tags_list,
+            None,
+            ListLabels {
+                loading: "Loading tags…",
+                error: "Failed to load tags",
+                empty: "No tags found",
+            },
             |this, cx| this.load_tags(cx),
             cx,
-        ) {
-            return el;
-        }
-
-        let foreground = cx.theme().foreground;
-        let muted_foreground = cx.theme().muted_foreground;
-        let tags_len = self.tags.items.len();
-        let tags_cursor = self.tags.cursor;
-
-        v_flex()
-            .id("helm-tags-list")
-            .track_focus(&self.tags.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.tags.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.tags.cursor = step_selected(this.tags.cursor, tags_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.tags.cursor = step_selected(this.tags.cursor, tags_len, false);
-                cx.notify();
-            }))
-            .py_1()
-            .children(self.tags.items.iter().enumerate().map(|(ix, tag)| {
-                let short_sha: String = tag.commit.sha.chars().take(7).collect();
-                ListItem::new(format!("helm-tag-{}", tag.name))
-                    .selected(tags_cursor == Some(ix))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_family("Cascadia Mono")
-                            .text_color(foreground)
-                            .child(tag.name.clone()),
-                    )
-                    .suffix(move |_, _| {
-                        div().text_xs().text_color(muted_foreground).child(short_sha.clone())
-                    })
-                    .into_any_element()
-            }))
-            .into_any_element()
+        )
     }
+}
+
+/// One row of the Tags screen: the tag's name and the short commit it
+/// points at.
+pub(super) fn tag_row(ix: usize, tag: &Tag, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let short_sha: String = tag.commit.sha.chars().take(7).collect();
+    ListItem::new(("helm-tag", ix))
+        .child(
+            div()
+                .text_sm()
+                .font_family("Cascadia Mono")
+                .text_color(foreground)
+                .child(tag.name.clone()),
+        )
+        .suffix(move |_, _| {
+            div()
+                .text_xs()
+                .text_color(muted_foreground)
+                .child(short_sha.clone())
+        })
 }

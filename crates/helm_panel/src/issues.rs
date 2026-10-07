@@ -109,10 +109,6 @@ impl HelmPanel {
     /// The Issues tab — filterable list of `self.selected_repo`'s issues
     /// (PRs filtered out), each row opening its page in the browser.
     pub(super) fn render_issues(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
-        let success = cx.theme().success;
-        let danger = cx.theme().danger;
 
         let filter_row = h_flex()
             .items_center()
@@ -144,175 +140,18 @@ impl HelmPanel {
                 cx,
             ));
 
-        if self.issues.state == LoadState::Loading {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading issues…"),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        if self.issues.state == LoadState::Error {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load issues"),
-                )
-                .child(
-                    Button::new("issues-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_issues(cx))),
-                )
-                .into_any_element();
-        }
-
-        if self.issues.items.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No issues found"),
-                )
-                .into_any_element();
-        }
-
-        let issues_len = self.issues.items.len();
-        let issues_cursor = self.issues.cursor;
-        let issues_list = v_flex()
-            .id("helm-issues-list")
-            .track_focus(&self.issues.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.issues.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.issues.cursor = step_selected(this.issues.cursor, issues_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.issues.cursor = step_selected(this.issues.cursor, issues_len, false);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(issue) = this.issues.cursor.and_then(|ix| this.issues.items.get(ix)).cloned()
-                else {
-                    return;
-                };
-                this.open_issue_detail(issue, cx);
-            }))
-            .py_1()
-            .children(self.issues.items.iter().enumerate().map(|(ix, issue)| {
-                let number = issue.number;
-                let title = issue.title.clone();
-                let state = if issue.state == "closed" {
-                    "closed"
-                } else {
-                    "open"
-                };
-                let author = issue
-                    .user
-                    .as_ref()
-                    .map(|u| u.login.clone())
-                    .unwrap_or_default();
-                let comments = issue.comments;
-                let labels = issue.labels.clone();
-                let issue_for_click = issue.clone();
-                ListItem::new(format!("helm-issue-{number}"))
-                    .selected(issues_cursor == Some(ix))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .text_color(if state == "closed" {
-                                        muted_foreground
-                                    } else {
-                                        foreground
-                                    })
-                                    .child(title),
-                            )
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child(format!("#{number} · {author}")),
-                                    )
-                                    .when(comments > 0, |row| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted_foreground)
-                                                .child(format!("{comments} comments")),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .suffix(move |_, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().text_xs().text_color(if state == "closed" {
-                                danger
-                            } else {
-                                success
-                            }))
-                            .children(labels.iter().map(|label| {
-                                div()
-                                    .px_1p5()
-                                    .rounded_full()
-                                    .text_xs()
-                                    .bg(muted_foreground.opacity(0.15))
-                                    .text_color(muted_foreground)
-                                    .child(label.name.clone())
-                            }))
-                            .child(
-                                Icon::new(IconName::ChevronRight)
-                                    .xsmall()
-                                    .text_color(muted_foreground),
-                            )
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.issues.cursor = Some(ix);
-                        this.open_issue_detail(issue_for_click.clone(), cx);
-                    }))
-            }));
-
-        v_flex()
-            .child(filter_row)
-            .child(div().h_px().w_full().bg(cx.theme().border))
-            .child(issues_list)
-            .into_any_element()
+        self.list_screen(
+            &self.issues,
+            &self.issues_list,
+            Some(filter_row.into_any_element()),
+            ListLabels {
+                loading: "Loading issues…",
+                error: "Failed to load issues",
+                empty: "No issues found",
+            },
+            |this, cx| this.load_issues(cx),
+            cx,
+        )
     }
 
     /// The open issue's own view: title/number/state/author/labels, full
@@ -510,4 +349,76 @@ impl HelmPanel {
             }))
             .into_any_element()
     }
+}
+
+/// One row of the Issues screen: title, number and author, comment count,
+/// and the issue's labels.
+pub(super) fn issue_row(ix: usize, issue: &Issue, cx: &App) -> ListItem {
+    let muted_foreground = cx.theme().muted_foreground;
+    let foreground = cx.theme().foreground;
+    let number = issue.number;
+    let closed = issue.state == "closed";
+    let author = issue
+        .user
+        .as_ref()
+        .map(|u| u.login.clone())
+        .unwrap_or_default();
+    let comments = issue.comments;
+    let labels = issue.labels.clone();
+    ListItem::new(("helm-issue", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(if closed {
+                            muted_foreground
+                        } else {
+                            foreground
+                        })
+                        .child(issue.title.clone()),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(format!("#{number} · {author}")),
+                        )
+                        .when(comments > 0, |row| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child(format!("{comments} comments")),
+                            )
+                        }),
+                ),
+        )
+        .suffix(move |_, _| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .children(labels.iter().map(|label| {
+                    div()
+                        .px_1p5()
+                        .rounded_full()
+                        .text_xs()
+                        .bg(muted_foreground.opacity(0.15))
+                        .text_color(muted_foreground)
+                        .child(label.name.clone())
+                }))
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(muted_foreground),
+                )
+        })
 }
