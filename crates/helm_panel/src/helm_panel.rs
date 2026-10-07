@@ -221,9 +221,7 @@ pub struct HelmPanel {
     branches: Section<Branch>,
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
-    collaborators: Vec<Collaborator>,
-    collaborators_list_cursor: Option<usize>,
-    collaborators_list_focus: FocusHandle,
+    collaborators: Section<Collaborator>,
 
     // Repo-detail tab caches (Issues/Pulls/Releases/Packages/Traffic) —
     // loaded on screen entry and kept while drilling; `set_screen` clears
@@ -354,9 +352,7 @@ impl HelmPanel {
                 clone_target_dir: None,
                 workspace,
                 branches: Section::new(cx),
-                collaborators: Vec::new(),
-                collaborators_list_cursor: None,
-                collaborators_list_focus: cx.focus_handle(),
+                collaborators: Section::new(cx),
                 issues: Section::new(cx),
                 issues_filter: "open".into(),
                 pulls: Section::new(cx),

@@ -11,12 +11,12 @@ impl HelmPanel {
     /// Loads the collaborator list for `self.selected_repo` — mirrors
     /// `load_repos`'s shape.
     pub(super) fn load_collaborators(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.collaborators,
             |repo, gh_state| async move {
                 gh_get_collaborators(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, collaborators| this.collaborators = collaborators,
         );
     }
 
@@ -78,7 +78,7 @@ impl HelmPanel {
                     })),
             );
 
-        if self.load_state == LoadState::Loading {
+        if self.collaborators.state == LoadState::Loading {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(border))
@@ -104,7 +104,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.collaborators.state == LoadState::Error {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(border))
@@ -130,7 +130,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.collaborators.is_empty() {
+        if self.collaborators.items.is_empty() {
             return v_flex()
                 .child(header)
                 .child(div().h_px().w_full().bg(border))
@@ -151,8 +151,8 @@ impl HelmPanel {
         }
 
         let view = cx.entity();
-        let collab_len = self.collaborators.len();
-        let collab_cursor = self.collaborators_list_cursor;
+        let collab_len = self.collaborators.items.len();
+        let collab_cursor = self.collaborators.cursor;
 
         v_flex()
             .child(header)
@@ -160,25 +160,25 @@ impl HelmPanel {
             .child(
                 v_flex()
                     .id("helm-collaborators-list")
-                    .track_focus(&self.collaborators_list_focus)
+                    .track_focus(&self.collaborators.focus)
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        window.focus(&this.collaborators_list_focus, cx);
+                        window.focus(&this.collaborators.focus, cx);
                     }))
                     .key_context("HelmRowList")
                     .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                        this.collaborators_list_cursor =
-                            step_selected(this.collaborators_list_cursor, collab_len, true);
+                        this.collaborators.cursor =
+                            step_selected(this.collaborators.cursor, collab_len, true);
                         cx.notify();
                     }))
                     .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                        this.collaborators_list_cursor =
-                            step_selected(this.collaborators_list_cursor, collab_len, false);
+                        this.collaborators.cursor =
+                            step_selected(this.collaborators.cursor, collab_len, false);
                         cx.notify();
                     }))
                     .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
                         let Some(login) = this
-                            .collaborators_list_cursor
-                            .and_then(|ix| this.collaborators.get(ix))
+                            .collaborators.cursor
+                            .and_then(|ix| this.collaborators.items.get(ix))
                             .map(|c| c.login.clone())
                         else {
                             return;
@@ -186,7 +186,7 @@ impl HelmPanel {
                         this.open_user_profile(login, cx);
                     }))
                     .py_1()
-                    .children(self.collaborators.iter().enumerate().map(|(ix, collab)| {
+                    .children(self.collaborators.items.iter().enumerate().map(|(ix, collab)| {
                         let login = collab.login.clone();
                         let role_name = collab.role_name.clone();
 
@@ -262,7 +262,7 @@ impl HelmPanel {
                         }
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.collaborators_list_cursor = Some(ix);
+                        this.collaborators.cursor = Some(ix);
                         this.open_user_profile(login.clone(), cx);
                     }))
                     }))
