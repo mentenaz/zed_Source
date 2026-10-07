@@ -300,129 +300,48 @@ impl HelmPanel {
                 .into_any_element()
         };
 
-        let nav_row = |id: &'static str, icon: IconName, label: &'static str| {
-            ListItem::new(id)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(Icon::new(icon).xsmall().text_color(muted_foreground))
-                        .child(div().text_color(foreground).child(label)),
-                )
-                .suffix(move |_, _| {
-                    Icon::new(IconName::ChevronRight)
-                        .xsmall()
-                        .text_color(muted_foreground)
-                })
-        };
-
         v_flex()
-            .child(header_row)
-            .child(Separator::horizontal())
-            .children(topics_row)
-            .child(details)
-            .child(clone_section)
-            .child(Separator::horizontal())
+            .size_full()
             .child(
-                nav_row("helm-repo-branches", IconName::Git, "Branches").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Branches, cx);
-                        this.load_branches(cx);
-                    },
-                )),
+                v_flex()
+                    .flex_none()
+                    .child(header_row)
+                    .child(Separator::horizontal())
+                    .children(topics_row)
+                    .child(details)
+                    .child(clone_section)
+                    .child(Separator::horizontal()),
             )
+            // The sections take the height that is left. In a panel too
+            // short for that they keep a few rows' worth, and the screen
+            // scrolls as a whole.
             .child(
-                nav_row("helm-repo-collaborators", IconName::User, "Collaborators").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Collaborators, cx);
-                        this.load_collaborators(cx);
-                    }),
-                ),
-            )
-            .child(
-                nav_row("helm-repo-issues", IconName::Inbox, "Issues").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Issues, cx);
-                        this.load_issues(cx);
-                    },
-                )),
-            )
-            .child(
-                nav_row("helm-repo-pulls", IconName::Redo, "Pull requests").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Pulls, cx);
-                        this.load_pulls(cx);
-                    },
-                )),
-            )
-            .child(
-                nav_row(
-                    "helm-repo-releases",
-                    IconName::GalleryVerticalEnd,
-                    "Releases",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.navigate_to(HelmScreen::Releases, cx);
-                    this.load_releases(cx);
-                })),
-            )
-            .child(
-                nav_row("helm-repo-packages", IconName::HardDrive, "Packages").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Packages, cx);
-                        this.load_packages(cx);
-                    }),
-                ),
-            )
-            .child(
-                nav_row("helm-repo-traffic", IconName::ChartPie, "Traffic").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Traffic, cx);
-                        this.load_traffic(cx);
-                    },
-                )),
-            )
-            .child(
-                nav_row("helm-repo-commits", IconName::Git, "Commits").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Commits, cx);
-                        this.load_commits(cx);
-                    },
-                )),
-            )
-            .child(
-                nav_row("helm-repo-actions", IconName::SquareTerminal, "Actions").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.navigate_to(HelmScreen::WorkflowRuns, cx);
-                        this.load_workflow_runs(cx);
-                    }),
-                ),
-            )
-            .child(
-                nav_row("helm-repo-deployments", IconName::Globe, "Deployments").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Deployments, cx);
-                        this.load_deployments(cx);
-                    }),
-                ),
-            )
-            .child(
-                nav_row("helm-repo-tags", IconName::Asterisk, "Tags").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Tags, cx);
-                        this.load_tags(cx);
-                    },
-                )),
-            )
-            .child(
-                nav_row("helm-repo-security", IconName::TriangleAlert, "Security").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.navigate_to(HelmScreen::Security, cx);
-                        this.load_security(cx);
-                    }),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_h(px(200.))
+                    .child(self.repo_sections_list.element()),
             )
             .into_any_element()
+    }
+
+    /// Opens one of the repository's sections and starts loading it.
+    pub(super) fn open_repo_section(&mut self, screen: HelmScreen, cx: &mut Context<Self>) {
+        self.navigate_to(screen, cx);
+        match screen {
+            HelmScreen::Branches => self.load_branches(cx),
+            HelmScreen::Collaborators => self.load_collaborators(cx),
+            HelmScreen::Issues => self.load_issues(cx),
+            HelmScreen::Pulls => self.load_pulls(cx),
+            HelmScreen::Releases => self.load_releases(cx),
+            HelmScreen::Packages => self.load_packages(cx),
+            HelmScreen::Traffic => self.load_traffic(cx),
+            HelmScreen::Commits => self.load_commits(cx),
+            HelmScreen::WorkflowRuns => self.load_workflow_runs(cx),
+            HelmScreen::Deployments => self.load_deployments(cx),
+            HelmScreen::Tags => self.load_tags(cx),
+            HelmScreen::Security => self.load_security(cx),
+            _ => {}
+        }
     }
 
     /// Opens the "Edit repository" dialog, prefilled from `self.selected_repo`.
@@ -433,6 +352,43 @@ impl HelmPanel {
 
         self.open_workspace_modal(HelmModalKind::EditRepo(repo), window, cx);
     }
+}
+
+/// The sections of a repository, in the order its screen lists them.
+pub(super) fn repo_sections() -> [(HelmScreen, IconName, &'static str); 12] {
+    [
+        (HelmScreen::Branches, IconName::Git, "Branches"),
+        (HelmScreen::Collaborators, IconName::User, "Collaborators"),
+        (HelmScreen::Issues, IconName::Inbox, "Issues"),
+        (HelmScreen::Pulls, IconName::Redo, "Pull requests"),
+        (HelmScreen::Releases, IconName::GalleryVerticalEnd, "Releases"),
+        (HelmScreen::Packages, IconName::HardDrive, "Packages"),
+        (HelmScreen::Traffic, IconName::ChartPie, "Traffic"),
+        (HelmScreen::Commits, IconName::Git, "Commits"),
+        (HelmScreen::WorkflowRuns, IconName::SquareTerminal, "Actions"),
+        (HelmScreen::Deployments, IconName::Globe, "Deployments"),
+        (HelmScreen::Tags, IconName::Asterisk, "Tags"),
+        (HelmScreen::Security, IconName::TriangleAlert, "Security"),
+    ]
+}
+
+/// One row of a repository's sections.
+pub(super) fn repo_section_row(ix: usize, icon: IconName, label: &'static str, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    ListItem::new(("helm-repo-section", ix))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(icon).xsmall().text_color(muted_foreground))
+                .child(div().text_color(foreground).child(label)),
+        )
+        .suffix(move |_, _| {
+            Icon::new(IconName::ChevronRight)
+                .xsmall()
+                .text_color(muted_foreground)
+        })
 }
 
 /// Which repositories the search box leaves, as positions in `repos`, in

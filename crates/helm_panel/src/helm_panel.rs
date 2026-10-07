@@ -172,6 +172,8 @@ pub struct HelmPanel {
     repos_page: u32,
     repos_last_page: u32,
     repos_list: ListView,
+    /// The sections of the repository that is open.
+    repo_sections_list: ListView,
     repo_search: Entity<InputState>,
     /// Row `up`/`down`/`enter` act on, within the filtered repo list
     /// `render_repo_list` computes from `repos` + `repo_search` — an index
@@ -327,6 +329,7 @@ impl HelmPanel {
                 repos_page: 1,
                 repos_last_page: 1,
                 repos_list: lists::repos_list(window, cx),
+                repo_sections_list: lists::repo_sections_list(window, cx),
                 repo_search,
                 selected_repo: None,
                 clone_url_copied: false,

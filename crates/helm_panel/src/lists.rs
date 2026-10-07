@@ -75,6 +75,24 @@ pub(super) fn repos_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> Li
     )
 }
 
+pub(super) fn repo_sections_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
+    ListView::sectioned(
+        Vec::new(),
+        |_, _| repos::repo_sections().len(),
+        |_, ix, cx| {
+            let (_, icon, label) = repos::repo_sections().into_iter().nth(ix.row)?;
+            Some(repos::repo_section_row(ix.row, icon, label, cx))
+        },
+        |this, ix, _, cx| {
+            if let Some((screen, _, _)) = repos::repo_sections().into_iter().nth(ix.row) {
+                this.open_repo_section(screen, cx);
+            }
+        },
+        window,
+        cx,
+    )
+}
+
 /// Read-only. A row needs the repository's default branch to
 /// mark it, which the panel knows and the row does not.
 pub(super) fn branches_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {

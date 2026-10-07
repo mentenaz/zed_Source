@@ -26,6 +26,49 @@ pub(super) fn loading_screen(label: &'static str, cx: &App) -> gpui::AnyElement 
         .into_any_element()
 }
 
+/// One muted line in the middle of the space a screen has: "nothing here",
+/// in whatever words fit.
+pub(super) fn note_screen(text: &'static str, cx: &App) -> gpui::AnyElement {
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .p_4()
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// What a screen shows when the one thing it is about could not be fetched:
+/// what failed, the reason GitHub gave, and a way to try again when there
+/// is one. The same three lines a list screen shows.
+pub(super) fn failed_screen(
+    label: &'static str,
+    reason: &str,
+    retry: Option<Button>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let muted_foreground = cx.theme().muted_foreground;
+    v_flex()
+        .gap_3()
+        .p_4()
+        .child(div().text_sm().text_color(muted_foreground).child(label))
+        .when(!reason.is_empty(), |column| {
+            column.child(
+                div()
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child(reason.to_string()),
+            )
+        })
+        .children(retry)
+        .into_any_element()
+}
+
 /// A small rounded label: an issue's label, a repository's topic, "default"
 /// beside a branch.
 pub(super) fn chip(text: impl Into<SharedString>) -> Pill {

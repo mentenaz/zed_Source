@@ -261,53 +261,19 @@ impl HelmPanel {
     /// (see that field's doc comment). Each comment's body renders as
     /// markdown too, same as the issue/PR body above it.
     pub(super) fn render_comment_thread(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
         let border = cx.theme().border;
 
         if self.detail_comments_state == LoadState::Loading {
-            return v_flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child("Loading comments…"),
-                        ),
-                )
-                .into_any_element();
+            return loading_screen("Loading comments…", cx);
         }
 
         if self.detail_comments_state == LoadState::Error {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load comments"),
-                )
-                .into_any_element();
+            return failed_screen("Failed to load comments", &self.error_msg, None, cx);
         }
 
         if self.detail_comments.is_empty() {
-            return v_flex()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No comments yet"),
-                )
-                .into_any_element();
+            return note_screen("No comments yet", cx);
         }
 
         v_flex()

@@ -91,83 +91,14 @@ impl HelmPanel {
         )
     }
 
-    /// Opens the "Add collaborator" dialog: a username input plus a
-    /// permission dropdown, matching GitHub's own permission levels.
+    /// Opens the "Add collaborator" dialog: a username and one of GitHub's
+    /// permission levels.
     pub(super) fn open_add_collaborator_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_workspace_modal(HelmModalKind::AddCollaborator, window, cx);
-        return;
-
-        /*
-        let username = cx.new(|cx| InputState::new(window, cx).placeholder("GitHub username"));
-        let permission = Rc::new(Cell::new(0usize));
-        let view = cx.entity();
-
-        window.open_dialog(cx, move |dialog, _, _| {
-            let username = username.clone();
-            let permission = permission.clone();
-            let view = view.clone();
-            let permission_label = COLLABORATOR_PERMISSIONS[permission.get()];
-
-            dialog
-                .title("Add collaborator")
-                .child(
-                    v_flex().gap_3().child(Input::new(&username)).child(
-                        Button::new("add-collaborator-permission")
-                            .outline()
-                            .label(permission_label)
-                            .dropdown_menu({
-                                let permission = permission.clone();
-                                move |menu, _, _| {
-                                    COLLABORATOR_PERMISSIONS.iter().enumerate().fold(
-                                        menu,
-                                        |menu, (ix, perm)| {
-                                            let permission = permission.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(*perm)
-                                                    .checked(ix == permission.get())
-                                                    .on_click(move |_, window, _| {
-                                                        permission.set(ix);
-                                                        window.refresh();
-                                                    }),
-                                            )
-                                        },
-                                    )
-                                }
-                            }),
-                    ),
-                )
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            DialogClose::new()
-                                .child(Button::new("cancel").outline().label("Cancel")),
-                        )
-                        .child(
-                            DialogAction::new().child(
-                                Button::new("add-collaborator-confirm")
-                                    .primary()
-                                    .label("Add"),
-                            ),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    let login = username.read(cx).value().trim().to_string();
-                    let perm = COLLABORATOR_PERMISSIONS[permission.get()].to_string();
-                    if login.is_empty() {
-                        return false;
-                    }
-                    view.update(cx, |this, cx| {
-                        this.handle_set_collaborator_permission(login, perm, window, cx);
-                    });
-                    true
-                })
-        });
-        */
     }
 
-    /// Confirms removing `login` from `self.selected_repo`'s collaborators —
-    /// same danger-variant `AlertDialog` shape as the editor's "Disregard
-    /// changes" confirm.
+    /// Asks before removing `login` from `self.selected_repo`'s
+    /// collaborators.
     pub(super) fn open_remove_collaborator_confirm(
         &mut self,
         login: String,
@@ -175,36 +106,6 @@ impl HelmPanel {
         cx: &mut Context<Self>,
     ) {
         self.open_workspace_modal(HelmModalKind::RemoveCollaborator(login), window, cx);
-        return;
-
-        /*
-        let view = cx.entity();
-
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let view = view.clone();
-            let login = login.clone();
-
-            alert
-                .title("Remove collaborator?")
-                .description(format!(
-                    "{login} will lose access to this repository immediately."
-                ))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text("Remove")
-                        .cancel_text("Cancel")
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let login = login.clone();
-                    view.update(cx, |this, cx| {
-                        this.handle_remove_collaborator(login, window, cx);
-                    });
-                    true
-                })
-        });
-        */
     }
 }
 

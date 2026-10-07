@@ -79,29 +79,23 @@ impl HelmPanel {
     /// then the top referrers and paths. An empty repo shows the "no traffic
     /// data yet" state (views/clones are `None` for 202/404 repos).
     pub(super) fn render_traffic(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
 
         if self.load_state == LoadState::Loading {
             return loading_screen("Loading traffic…", cx);
         }
 
         if self.load_state == LoadState::Error {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load traffic"),
-                )
-                .child(
+            return failed_screen(
+                "Failed to load traffic",
+                &self.error_msg,
+                Some(
                     Button::new("traffic-retry")
                         .outline()
                         .label("Retry")
                         .on_click(cx.listener(|this, _, _, cx| this.load_traffic(cx))),
-                )
-                .into_any_element();
+                ),
+                cx,
+            );
         }
 
         let traffic = self.traffic.clone().unwrap_or_default();
@@ -110,15 +104,10 @@ impl HelmPanel {
             || !traffic.referrers.is_empty()
             || !traffic.paths.is_empty();
         if !has_any {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(div().text_sm().text_color(muted_foreground).child(
-                    "No traffic data yet — GitHub releases it for repositories with enough views.",
-                ))
-                .into_any_element();
+            return note_screen(
+                "No traffic data yet — GitHub releases it for repositories with enough views.",
+                cx,
+            );
         }
 
         let counts = |count: u64, uniques: u64| {

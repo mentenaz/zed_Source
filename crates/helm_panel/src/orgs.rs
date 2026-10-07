@@ -52,26 +52,18 @@ impl HelmPanel {
         }
 
         let Some(org) = self.org_detail.clone() else {
-            return v_flex()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("Failed to load"),
-                )
-                .child(
-                    Button::new("org-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(org) = this.selected_org.clone() {
-                                this.load_org(org, cx);
-                            }
-                        })),
-                )
-                .into_any_element();
+            return failed_screen(
+                "Failed to load organization",
+                &self.error_msg,
+                Some(Button::new("org-retry").outline().label("Retry").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(org) = this.selected_org.clone() {
+                            this.load_org(org, cx);
+                        }
+                    }),
+                )),
+                cx,
+            );
         };
 
         let total_repos = org.public_repos + org.total_private_repos.unwrap_or(0);
