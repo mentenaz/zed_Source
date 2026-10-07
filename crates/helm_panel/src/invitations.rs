@@ -65,253 +65,155 @@ impl HelmPanel {
     /// The Invitations screen — pending repo invitations with Accept/Decline
     /// actions that round-trip against the GitHub API.
     pub(super) fn render_invitations(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
+        self.list_screen(
+            ListStatus {
+                // Invitations are refreshed in the background whenever this
+                // screen is shown, so there is no spinner or error to draw.
+                state: LoadState::Idle,
+                error: String::new(),
+                is_empty: self.invitations.items.is_empty() && self.org_invitations.is_empty(),
+            },
+            &self.invitations_list,
+            None,
+            ListLabels {
+                loading: "Loading invitations…",
+                error: "Failed to load invitations",
+                empty: "No pending invitations",
+            },
+            |this, cx| this.load_repo_invitations(cx),
+            cx,
+        )
+    }
+}
 
-        if self.invitations.items.is_empty() && self.org_invitations.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_4()
+/// Accept and Decline, as every invitation row ends with them. Accepting or
+/// declining is only ever done with these buttons: a click on the row, or
+/// `enter`, does nothing, so an invitation cannot be accepted by accident.
+fn invitation_buttons(
+    key: impl std::fmt::Display,
+    accept: impl Fn(&mut HelmPanel, &mut Window, &mut Context<HelmPanel>) + Clone + 'static,
+    decline: impl Fn(&mut HelmPanel, &mut Window, &mut Context<HelmPanel>) + Clone + 'static,
+    panel: WeakEntity<HelmPanel>,
+) -> gpui::Div {
+    let accept_panel = panel.clone();
+    let decline_panel = panel;
+    h_flex()
+        .items_center()
+        .gap_2()
+        .child(
+            Button::new(format!("helm-invitation-accept-{key}"))
+                .primary()
+                .xsmall()
+                .label("Accept")
+                .on_click(move |_, window, cx| {
+                    accept_panel
+                        .update(cx, |this, cx| accept(this, window, cx))
+                        .ok();
+                }),
+        )
+        .child(
+            Button::new(format!("helm-invitation-decline-{key}"))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Delete)
+                .tooltip("Decline invitation")
+                .on_click(move |_, window, cx| {
+                    decline_panel
+                        .update(cx, |this, cx| decline(this, window, cx))
+                        .ok();
+                }),
+        )
+}
+
+/// One organisation invitation: the organisation and the role offered.
+pub(super) fn org_invitation_row(
+    ix: usize,
+    invitation: &OrgInvitation,
+    panel: &WeakEntity<HelmPanel>,
+    cx: &App,
+) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let org = invitation.organization.login.clone();
+    let role = invitation.role.clone();
+    let panel = panel.clone();
+    ListItem::new(("helm-org-invitation", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
                 .child(
                     div()
+                        .truncate()
                         .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No pending invitations"),
+                        .font_semibold()
+                        .text_color(foreground)
+                        .child(org.clone()),
                 )
-                .into_any_element();
-        }
-
-        let view = cx.entity();
-
-        // Org invitations are listed before repo invitations with no visual
-        // separator between them, so `invitations.cursor` indexes this
-        // one combined, display-order list rather than either `Vec` alone.
-        enum Invite {
-            Org(String),
-            Repo(u64),
-        }
-        let combined: Vec<Invite> = self
-            .org_invitations
-            .iter()
-            .map(|inv| Invite::Org(inv.organization.login.clone()))
-            .chain(self.invitations.items.iter().map(|inv| Invite::Repo(inv.id)))
-            .collect();
-        let combined_len = combined.len();
-        let cursor = self.invitations.cursor;
-
-        let org_rows = self.org_invitations.iter().enumerate().map(|(ix, inv)| {
-            let org_login = inv.organization.login.clone();
-            let role = inv.role.clone();
-            let org_accept = org_login.clone();
-            let org_decline = org_login.clone();
-            let view_accept = view.clone();
-            let view_decline = view.clone();
-
-            ListItem::new(format!("helm-org-invitation-{}", inv.organization.login))
-                .selected(cursor == Some(ix))
                 .child(
-                    v_flex()
-                        .gap_0p5()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(foreground)
-                                .child(inv.organization.login.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(format!("Organization · role: {role}")),
-                        ),
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("role: {role}")),
+                ),
+        )
+        .suffix(move |_, _| {
+            let accept_org = org.clone();
+            let decline_org = org.clone();
+            invitation_buttons(
+                format!("org-{org}"),
+                move |this, window, cx| {
+                    this.handle_accept_org_invitation(accept_org.clone(), window, cx)
+                },
+                move |this, window, cx| {
+                    this.handle_decline_org_invitation(decline_org.clone(), window, cx)
+                },
+                panel.clone(),
+            )
+        })
+}
+
+/// One repository invitation: the repository, whether it is private, the
+/// permission offered and who sent it.
+pub(super) fn repo_invitation_row(
+    ix: usize,
+    invitation: &RepoInvitation,
+    panel: &WeakEntity<HelmPanel>,
+    cx: &App,
+) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let id = invitation.id;
+    let visibility = if invitation.repository.private {
+        "private"
+    } else {
+        "public"
+    };
+    let panel = panel.clone();
+    ListItem::new(("helm-repo-invitation", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(foreground)
+                        .child(invitation.repository.full_name.clone()),
                 )
-                .suffix({
-                    move |_, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Button::new(format!("helm-org-invitation-accept-{org_login}"))
-                                    .primary()
-                                    .xsmall()
-                                    .label("Accept")
-                                    .on_click({
-                                        let view = view_accept.clone();
-                                        let org = org_accept.clone();
-                                        move |_, window, cx| {
-                                            view.update(cx, |this, cx| {
-                                                this.handle_accept_org_invitation(
-                                                    org.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new(format!("helm-org-invitation-decline-{org_decline}"))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Delete)
-                                    .tooltip("Decline invitation")
-                                    .on_click({
-                                        let view = view_decline.clone();
-                                        let org = org_decline.clone();
-                                        move |_, window, cx| {
-                                            view.update(cx, |this, cx| {
-                                                this.handle_decline_org_invitation(
-                                                    org.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }),
-                            )
-                    }
-                })
-        });
-
-        let org_count = self.org_invitations.len();
-        let combined_for_open = combined;
-        let combined_for_act: Vec<(bool, String)> = self
-            .org_invitations
-            .iter()
-            .map(|inv| (true, inv.organization.login.clone()))
-            .chain(self.invitations.items.iter().map(|inv| (false, inv.id.to_string())))
-            .collect();
-
-        v_flex()
-            .id("helm-invitations-list")
-            .track_focus(&self.invitations.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.invitations.focus, cx);
-            }))
-            .key_context("HelmRowList")
-            .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.invitations.cursor =
-                    step_selected(this.invitations.cursor, combined_len, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.invitations.cursor =
-                    step_selected(this.invitations.cursor, combined_len, false);
-                cx.notify();
-            }))
-            // Enter accepts the selected row's invitation...
-            .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
-                let Some(invite) = this.invitations.cursor.and_then(|ix| combined_for_open.get(ix))
-                else {
-                    return;
-                };
-                match invite {
-                    Invite::Org(login) => this.handle_accept_org_invitation(login.clone(), window, cx),
-                    Invite::Repo(id) => this.handle_accept_invitation(*id, window, cx),
-                }
-            }))
-            // ...Space declines it — the Invitations screen's rows have no
-            // separate "view" action for Enter to be the safe default of, so
-            // Accept/Decline (its only two actions) split Enter/Space instead.
-            .on_action(cx.listener(move |this, _: &ActSelectedRow, window, cx| {
-                let Some((is_org, key)) =
-                    this.invitations.cursor.and_then(|ix| combined_for_act.get(ix))
-                else {
-                    return;
-                };
-                if *is_org {
-                    this.handle_decline_org_invitation(key.clone(), window, cx);
-                } else if let Ok(id) = key.parse() {
-                    this.handle_decline_invitation(id, window, cx);
-                }
-            }))
-            .py_1()
-            .children(org_rows)
-            .children(self.invitations.items.iter().enumerate().map(|(ix, inv)| {
-                let full_name = inv.repository.full_name.clone();
-                let private = inv.repository.private;
-                let inviter = inv.inviter.login.clone();
-                let permissions = inv.permissions.clone();
-                let id_accept = inv.id;
-                let id_decline = inv.id;
-                let view_accept = view.clone();
-                let view_decline = view.clone();
-
-                ListItem::new(format!("helm-invitation-{}", inv.id))
-                    .selected(cursor == Some(org_count + ix))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .text_color(foreground)
-                                    .child(full_name),
-                            )
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child(if private { "private" } else { "public" }),
-                                    )
-                                    .child(
-                                        div().text_xs().text_color(muted_foreground).child(
-                                            format!("{permissions} · invited by @{inviter}"),
-                                        ),
-                                    ),
-                            ),
-                    )
-                    .suffix({
-                        move |_, _| {
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Button::new(("helm-invitation-accept", id_accept))
-                                        .primary()
-                                        .xsmall()
-                                        .label("Accept")
-                                        .on_click({
-                                            let view = view_accept.clone();
-                                            move |_, window, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.handle_accept_invitation(
-                                                        id_accept, window, cx,
-                                                    );
-                                                });
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    Button::new(("helm-invitation-decline", id_decline))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Delete)
-                                        .tooltip("Decline invitation")
-                                        .on_click({
-                                            let view = view_decline.clone();
-                                            move |_, window, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.handle_decline_invitation(
-                                                        id_decline, window, cx,
-                                                    );
-                                                });
-                                            }
-                                        }),
-                                )
-                        }
-                    })
-            }))
-            .into_any_element()
-    }
+                .child(div().truncate().text_xs().text_color(muted_foreground).child(format!(
+                    "{visibility} · {} · invited by @{}",
+                    invitation.permissions, invitation.inviter.login
+                ))),
+        )
+        .suffix(move |_, _| {
+            invitation_buttons(
+                format!("repo-{id}"),
+                move |this, window, cx| this.handle_accept_invitation(id, window, cx),
+                move |this, window, cx| this.handle_decline_invitation(id, window, cx),
+                panel.clone(),
+            )
+        })
 }

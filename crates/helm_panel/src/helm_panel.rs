@@ -274,6 +274,9 @@ pub struct HelmPanel {
     // Pending repo invitations shown on the Profile screen's Invitations
     // screen — `repo_invitation_count` above is just the badge for that row.
     invitations: Section<RepoInvitation>,
+    /// Organisation and repository invitations in one list, as two headed
+    /// sections.
+    invitations_list: ListView,
     /// Pending org invitations, shown on the same Invitations screen — listed
     /// above `invitations` with no visual separator, so `invitations.cursor`
     /// covers both as one combined, index-shared list (org invitations first,
@@ -528,6 +531,35 @@ impl HelmPanel {
                     cx,
                 ),
                 invitations: Section::new(cx),
+                invitations_list: {
+                    let row_panel: WeakEntity<Self> = cx.weak_entity();
+                    ListView::sectioned(
+                        vec!["Organizations", "Repositories"],
+                        |panel, section| match section {
+                            0 => panel.org_invitations.len(),
+                            _ => panel.invitations.items.len(),
+                        },
+                        move |panel, ix, cx| match ix.section {
+                            0 => Some(invitations::org_invitation_row(
+                                ix.row,
+                                panel.org_invitations.get(ix.row)?,
+                                &row_panel,
+                                cx,
+                            )),
+                            _ => Some(invitations::repo_invitation_row(
+                                ix.row,
+                                panel.invitations.items.get(ix.row)?,
+                                &row_panel,
+                                cx,
+                            )),
+                        },
+                        // Nothing on a click or `enter`: see
+                        // `invitations::invitation_buttons`.
+                        |_, _, _, _| {},
+                        window,
+                        cx,
+                    )
+                },
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };
