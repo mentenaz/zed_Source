@@ -1,11 +1,12 @@
 //! GitHub REST API commands (was part of `github.rs`).
 //!
-//! `gh_api_fetch` resolves the token (cached or via `gh auth token`) and hits
-//! the REST endpoint, returning deserialized data. All endpoint functions are
-//! thin wrappers over it.
+//! `send` resolves the token (cached or via `gh auth token`) and makes the
+//! request; `error::interpret` turns the answer into a value or a
+//! [`GhError`]. All endpoint functions are thin wrappers over those two.
 
 use serde::de::DeserializeOwned;
 
+use super::error::{GhError, RawResponse, interpret, interpret_empty};
 use super::gh_cmd;
 use super::types::{
     Branch, Collaborator, Comment, CommitSummary, Deployment, GhState, GitHubUser,
@@ -14,81 +15,104 @@ use super::types::{
     WorkflowJob, WorkflowRun,
 };
 
+/// The access token: the cached one, or a fresh one from `gh auth token`.
+async fn token(state: &GhState) -> Result<String, GhError> {
+    if let Some(token) = &*state.token.read().await {
+        return Ok(token.clone());
+    }
+    match gh_cmd().arg("auth").arg("token").output().await {
+        Ok(out) if out.status.success() => {
+            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            *state.token.write().await = Some(token.clone());
+            Ok(token)
+        }
+        Ok(out) => Err(GhError::Cli(format!(
+            "gh auth token failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))),
+        Err(e) => Err(GhError::Cli(format!("Failed to run gh: {e}"))),
+    }
+}
+
+/// Sends one request and returns what came back, whatever its status. This
+/// is the only function in the crate that touches the network; deciding
+/// what the answer means is [`interpret`]'s job.
+async fn send(
+    state: &GhState,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+) -> Result<RawResponse, GhError> {
+    let token = token(state).await?;
+    let base = state.base_url.read().await.clone();
+    let url = format!("{base}{path}");
+
+    let mut request = state
+        .client
+        .request(method.parse().unwrap_or(reqwest::Method::GET), &url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "mentenaz-forge");
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| GhError::Network(e.to_string()))?;
+    let number = |name: &str| -> Option<u64> {
+        response
+            .headers()
+            .get(name)?
+            .to_str()
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let status = response.status().as_u16();
+    let rate_remaining = number("x-ratelimit-remaining");
+    let rate_reset = number("x-ratelimit-reset");
+    let retry_after = number("retry-after");
+    let body = response
+        .text()
+        .await
+        .map_err(|e| GhError::Network(e.to_string()))?;
+    Ok(RawResponse {
+        status,
+        body,
+        rate_remaining,
+        rate_reset,
+        retry_after,
+    })
+}
+
 async fn gh_api_fetch<T: DeserializeOwned>(
     state: &GhState,
     path: &str,
     method: &str,
     body: Option<serde_json::Value>,
-) -> Result<T, String> {
-    let token = {
-        let read_guard = state.token.read().await;
-        if let Some(t) = &*read_guard {
-            t.clone()
-        } else {
-            drop(read_guard);
-            match gh_cmd().arg("auth").arg("token").output().await {
-                Ok(out) if out.status.success() => {
-                    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    *state.token.write().await = Some(token.clone());
-                    token
-                }
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    return Err(format!("gh auth token failed: {}", err));
-                }
-                Err(e) => return Err(format!("Failed to run gh: {}", e)),
-            }
-        }
-    };
-
-    let base = state.base_url.read().await.clone();
-    let url = format!("{}{}", base, path);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-
-    let mut req = client
-        .request(method.parse().unwrap_or(reqwest::Method::GET), &url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "mentenaz-forge");
-
-    if let Some(b) = body {
-        req = req.json(&b);
-    }
-
-    let res = req
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {}", e))?;
-    let status = res.status();
-    if !status.is_success() {
-        let txt = res.text().await.unwrap_or_else(|_| "<no body>".to_string());
-        return Err(format!("GitHub API {}: {}", status.as_u16(), txt));
-    }
-    res.json::<T>()
-        .await
-        .map_err(|e| format!("Failed to parse JSON: {}", e))
+) -> Result<T, GhError> {
+    interpret(&send(state, path, method, body).await?)
 }
 
-/// No-content variant that ignores an empty (200/201/204) response body.
+/// For a request whose answer carries nothing worth reading. GitHub replies
+/// 204 with an empty body to most deletes and some updates.
 async fn gh_api_no_content(
     state: &GhState,
     path: &str,
     method: &str,
     body: Option<serde_json::Value>,
-) -> Result<(), String> {
-    let _: serde_json::Value = gh_api_fetch(state, path, method, body).await?;
-    Ok(())
+) -> Result<(), GhError> {
+    interpret_empty(&send(state, path, method, body).await?)
 }
 
-pub async fn gh_get_current_user(state: &GhState) -> Result<GitHubUser, String> {
+pub async fn gh_get_current_user(state: &GhState) -> Result<GitHubUser, GhError> {
     gh_api_fetch(state, "/user", "GET", None).await
 }
 
-pub async fn gh_get_repos(owner: String, state: &GhState) -> Result<Vec<Repo>, String> {
+pub async fn gh_get_repos(owner: String, state: &GhState) -> Result<Vec<Repo>, GhError> {
     let path = if owner == "self" {
         "/user/repos?per_page=100&sort=updated&affiliation=owner".to_string()
     } else {
@@ -97,7 +121,7 @@ pub async fn gh_get_repos(owner: String, state: &GhState) -> Result<Vec<Repo>, S
     gh_api_fetch(state, &path, "GET", None).await
 }
 
-pub async fn gh_get_repo(owner: String, name: String, state: &GhState) -> Result<Repo, String> {
+pub async fn gh_get_repo(owner: String, name: String, state: &GhState) -> Result<Repo, GhError> {
     gh_api_fetch(state, &format!("/repos/{}/{}", owner, name), "GET", None).await
 }
 
@@ -109,7 +133,7 @@ pub async fn gh_list_recent_commits(
     owner: String,
     name: String,
     state: &GhState,
-) -> Result<Vec<CommitSummary>, String> {
+) -> Result<Vec<CommitSummary>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/commits?per_page=100", owner, name),
@@ -119,7 +143,7 @@ pub async fn gh_list_recent_commits(
     .await
 }
 
-pub async fn gh_create_repo(opts: serde_json::Value, state: &GhState) -> Result<Repo, String> {
+pub async fn gh_create_repo(opts: serde_json::Value, state: &GhState) -> Result<Repo, GhError> {
     let (path, body) = if let Some(org) = opts.get("owner").and_then(|o| o.as_str()) {
         let path = format!("/orgs/{}/repos", org);
         let mut b = opts.clone();
@@ -137,7 +161,7 @@ pub async fn gh_get_branches(
     owner: String,
     name: String,
     state: &GhState,
-) -> Result<Vec<Branch>, String> {
+) -> Result<Vec<Branch>, GhError> {
     let path = format!("/repos/{}/{}/branches?per_page=100", owner, name);
     gh_api_fetch(state, &path, "GET", None).await
 }
@@ -147,12 +171,12 @@ pub async fn gh_update_repo(
     name: String,
     changes: serde_json::Value,
     state: &GhState,
-) -> Result<Repo, String> {
+) -> Result<Repo, GhError> {
     let path = format!("/repos/{}/{}", owner, name);
     gh_api_fetch(state, &path, "PATCH", Some(changes)).await
 }
 
-pub async fn gh_get_org_detail(org: String, state: &GhState) -> Result<OrgDetail, String> {
+pub async fn gh_get_org_detail(org: String, state: &GhState) -> Result<OrgDetail, GhError> {
     gh_api_fetch(state, &format!("/orgs/{}", org), "GET", None).await
 }
 
@@ -160,7 +184,7 @@ pub async fn gh_get_collaborators(
     owner: String,
     name: String,
     state: &GhState,
-) -> Result<Vec<Collaborator>, String> {
+) -> Result<Vec<Collaborator>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/collaborators?per_page=100", owner, name),
@@ -170,7 +194,7 @@ pub async fn gh_get_collaborators(
     .await
 }
 
-pub async fn gh_get_org_logins(state: &GhState) -> Result<Vec<String>, String> {
+pub async fn gh_get_org_logins(state: &GhState) -> Result<Vec<String>, GhError> {
     let memberships: Vec<serde_json::Value> =
         gh_api_fetch(state, "/user/memberships/orgs?per_page=100", "GET", None).await?;
     let mut out = Vec::new();
@@ -191,7 +215,7 @@ pub async fn gh_get_org_logins(state: &GhState) -> Result<Vec<String>, String> {
 /// Same endpoint/shape as [`gh_get_org_logins`], filtered to `state ==
 /// "pending"` instead of `"active"` — the memberships GitHub hasn't been
 /// accepted or declined yet.
-pub async fn gh_list_org_invitations(state: &GhState) -> Result<Vec<OrgInvitation>, String> {
+pub async fn gh_list_org_invitations(state: &GhState) -> Result<Vec<OrgInvitation>, GhError> {
     let memberships: Vec<serde_json::Value> =
         gh_api_fetch(state, "/user/memberships/orgs?per_page=100", "GET", None).await?;
     let mut out = Vec::new();
@@ -205,7 +229,7 @@ pub async fn gh_list_org_invitations(state: &GhState) -> Result<Vec<OrgInvitatio
     Ok(out)
 }
 
-pub async fn gh_get_user(username: String, state: &GhState) -> Result<GitHubUserDetail, String> {
+pub async fn gh_get_user(username: String, state: &GhState) -> Result<GitHubUserDetail, GhError> {
     let path = format!("/users/{}", username);
     gh_api_fetch(state, &path, "GET", None).await
 }
@@ -214,7 +238,7 @@ pub async fn gh_list_workflow_runs(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<WorkflowRun>, String> {
+) -> Result<Vec<WorkflowRun>, GhError> {
     let resp: serde_json::Value = gh_api_fetch(
         state,
         &format!("/repos/{}/{}/actions/runs?per_page=50&page=1", owner, repo),
@@ -237,7 +261,7 @@ pub async fn gh_get_workflow_run(
     repo: String,
     run_id: u64,
     state: &GhState,
-) -> Result<WorkflowRun, String> {
+) -> Result<WorkflowRun, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/actions/runs/{}", owner, repo, run_id),
@@ -256,7 +280,7 @@ pub async fn gh_get_workflow_run_jobs(
     repo: String,
     run_id: u64,
     state: &GhState,
-) -> Result<Vec<WorkflowJob>, String> {
+) -> Result<Vec<WorkflowJob>, GhError> {
     let resp: serde_json::Value = gh_api_fetch(
         state,
         &format!(
@@ -278,7 +302,7 @@ pub async fn gh_list_deployments(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<Deployment>, String> {
+) -> Result<Vec<Deployment>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/deployments?per_page=50", owner, repo),
@@ -293,7 +317,7 @@ pub async fn gh_list_issues(
     repo: String,
     state_filter: String,
     state: &GhState,
-) -> Result<Vec<Issue>, String> {
+) -> Result<Vec<Issue>, GhError> {
     gh_api_fetch(
         state,
         &format!(
@@ -311,7 +335,7 @@ pub async fn gh_list_pulls(
     repo: String,
     state_filter: String,
     state: &GhState,
-) -> Result<Vec<Pull>, String> {
+) -> Result<Vec<Pull>, GhError> {
     gh_api_fetch(
         state,
         &format!(
@@ -332,7 +356,7 @@ pub async fn gh_list_issue_comments(
     repo: String,
     number: u64,
     state: &GhState,
-) -> Result<Vec<Comment>, String> {
+) -> Result<Vec<Comment>, GhError> {
     gh_api_fetch(
         state,
         &format!(
@@ -349,7 +373,7 @@ pub async fn gh_list_releases(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<Release>, String> {
+) -> Result<Vec<Release>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/releases?per_page=50", owner, repo),
@@ -363,7 +387,7 @@ pub async fn gh_list_tags(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<Tag>, String> {
+) -> Result<Vec<Tag>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/tags?per_page=100", owner, repo),
@@ -381,7 +405,7 @@ pub async fn gh_create_pull(
     title: String,
     body: Option<String>,
     state: &GhState,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GhError> {
     let payload = serde_json::json!({
         "title": title,
         "head": head,
@@ -406,7 +430,7 @@ pub async fn gh_create_release(
     draft: Option<bool>,
     prerelease: Option<bool>,
     state: &GhState,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GhError> {
     let payload = serde_json::json!({
         "tag_name": tag_name,
         "name": name,
@@ -427,7 +451,7 @@ pub async fn gh_list_dependabot_alerts(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/dependabot/alerts?per_page=100", owner, repo),
@@ -441,7 +465,7 @@ pub async fn gh_list_secret_scanning_alerts(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, GhError> {
     gh_api_fetch(
         state,
         &format!(
@@ -458,7 +482,7 @@ pub async fn gh_get_traffic_views(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<TrafficViews, String> {
+) -> Result<TrafficViews, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/traffic/views", owner, repo),
@@ -472,7 +496,7 @@ pub async fn gh_get_traffic_clones(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<TrafficClones, String> {
+) -> Result<TrafficClones, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/traffic/clones", owner, repo),
@@ -486,7 +510,7 @@ pub async fn gh_get_traffic_referrers(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<TrafficReferrer>, String> {
+) -> Result<Vec<TrafficReferrer>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/traffic/popular/referrers", owner, repo),
@@ -500,7 +524,7 @@ pub async fn gh_get_traffic_paths(
     owner: String,
     repo: String,
     state: &GhState,
-) -> Result<Vec<TrafficPath>, String> {
+) -> Result<Vec<TrafficPath>, GhError> {
     gh_api_fetch(
         state,
         &format!("/repos/{}/{}/traffic/popular/paths", owner, repo),
@@ -510,13 +534,13 @@ pub async fn gh_get_traffic_paths(
     .await
 }
 
-pub async fn gh_list_packages(owner: String, state: &GhState) -> Result<Vec<Package>, String> {
+pub async fn gh_list_packages(owner: String, state: &GhState) -> Result<Vec<Package>, GhError> {
     // The API only accepts one `package_type` per request, so run one call
     // per type and merge. The org path is tried first (org-owner repos), the
     // user path as fallback (same login, individual account).
     let types = ["container", "npm", "maven", "rubygems", "nuget", "pip"];
     let mut combined: Vec<Package> = Vec::new();
-    let mut last_err: Option<String> = None;
+    let mut last_err: Option<GhError> = None;
     for pkg_type in types {
         let org_path = format!(
             "/orgs/{}/packages?per_page=100&package_type={}",
@@ -553,7 +577,7 @@ pub async fn gh_list_package_versions(
     pkg_type: String,
     pkg_name: String,
     state: &GhState,
-) -> Result<Vec<PackageVersion>, String> {
+) -> Result<Vec<PackageVersion>, GhError> {
     // The versions endpoint lives under a different prefix depending on who
     // owns the package (org, the authenticated user, or another user) — try
     // each in turn, first success wins.
@@ -571,24 +595,27 @@ pub async fn gh_list_package_versions(
             owner, pkg_type, pkg_name
         ),
     ];
-    let mut last_err = String::new();
+    let mut last_err = None;
     for path in paths {
         match gh_api_fetch::<Vec<PackageVersion>>(state, &path, "GET", None).await {
             Ok(versions) => return Ok(versions),
-            Err(e) => last_err = e,
+            Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err)
+    // `paths` is never empty, so there is always a last error to report.
+    Err(last_err.unwrap_or(GhError::NotFound {
+        message: "no package versions found".to_string(),
+    }))
 }
 
 pub async fn gh_update_user(
     changes: serde_json::Value,
     state: &GhState,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GhError> {
     gh_api_fetch(state, "/user", "PATCH", Some(changes)).await
 }
 
-pub async fn gh_get_repo_invitations(state: &GhState) -> Result<Vec<RepoInvitation>, String> {
+pub async fn gh_get_repo_invitations(state: &GhState) -> Result<Vec<RepoInvitation>, GhError> {
     gh_api_fetch(
         state,
         "/user/repository_invitations?per_page=100",
@@ -598,7 +625,7 @@ pub async fn gh_get_repo_invitations(state: &GhState) -> Result<Vec<RepoInvitati
     .await
 }
 
-pub async fn gh_accept_repo_invitation(invitation_id: u64, state: &GhState) -> Result<(), String> {
+pub async fn gh_accept_repo_invitation(invitation_id: u64, state: &GhState) -> Result<(), GhError> {
     gh_api_no_content(
         state,
         &format!("/user/repository_invitations/{}", invitation_id),
@@ -608,7 +635,7 @@ pub async fn gh_accept_repo_invitation(invitation_id: u64, state: &GhState) -> R
     .await
 }
 
-pub async fn gh_decline_repo_invitation(invitation_id: u64, state: &GhState) -> Result<(), String> {
+pub async fn gh_decline_repo_invitation(invitation_id: u64, state: &GhState) -> Result<(), GhError> {
     gh_api_no_content(
         state,
         &format!("/user/repository_invitations/{}", invitation_id),
@@ -618,7 +645,7 @@ pub async fn gh_decline_repo_invitation(invitation_id: u64, state: &GhState) -> 
     .await
 }
 
-pub async fn gh_accept_org_invitation(org: String, state: &GhState) -> Result<(), String> {
+pub async fn gh_accept_org_invitation(org: String, state: &GhState) -> Result<(), GhError> {
     let body = serde_json::json!({ "state": "active" });
     gh_api_no_content(
         state,
@@ -629,7 +656,7 @@ pub async fn gh_accept_org_invitation(org: String, state: &GhState) -> Result<()
     .await
 }
 
-pub async fn gh_decline_org_invitation(org: String, state: &GhState) -> Result<(), String> {
+pub async fn gh_decline_org_invitation(org: String, state: &GhState) -> Result<(), GhError> {
     gh_api_no_content(
         state,
         &format!("/user/memberships/orgs/{}", org),
@@ -645,7 +672,7 @@ pub async fn gh_add_collaborator(
     username: String,
     permission: String,
     state: &GhState,
-) -> Result<(), String> {
+) -> Result<(), GhError> {
     let body = serde_json::json!({ "permission": permission });
     gh_api_no_content(
         state,
@@ -661,7 +688,7 @@ pub async fn gh_remove_collaborator(
     repo: String,
     username: String,
     state: &GhState,
-) -> Result<(), String> {
+) -> Result<(), GhError> {
     gh_api_no_content(
         state,
         &format!("/repos/{}/{}/collaborators/{}", owner, repo, username),
@@ -676,7 +703,7 @@ pub async fn gh_update_topics(
     repo: String,
     topics: Vec<String>,
     state: &GhState,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GhError> {
     let body = serde_json::json!({ "names": topics });
     gh_api_fetch(
         state,

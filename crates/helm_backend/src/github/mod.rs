@@ -4,11 +4,13 @@
 //! - `mod`: types, `GhState`, `gh_cmd` helper
 //! - `cli`: gh CLI auth (login/logout/token/status/scopes)
 //! - `api`: REST API fetch helpers + endpoint functions
+//! - `error`: `GhError`, and turning an HTTP answer into a value or an error
 //! - `clone`: `gh repo clone` with streaming (event-log) output
 
 mod api;
 mod cli;
 mod clone;
+mod error;
 mod types;
 
 pub use api::{
@@ -27,6 +29,7 @@ pub use cli::{
     gh_auth_status, gh_check_cli, gh_ensure_scope, gh_login, gh_logout,
 };
 pub use clone::gh_clone_repo;
+pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
 
 pub use types::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,

@@ -57,7 +57,8 @@ use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
 use helm_backend::github::{
-    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,
+    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
+    GhState,
     GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
     Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
     gh_accept_org_invitation, gh_accept_repo_invitation, gh_add_collaborator, gh_auth_status,
@@ -566,19 +567,6 @@ mod tests {
 
     fn scopes(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn permission_errors_are_recognized_by_status() {
-        assert!(is_permission_error("GitHub API 401: {\"message\":\"Bad credentials\"}"));
-        assert!(is_permission_error("GitHub API 403: {\"message\":\"Forbidden\"}"));
-        assert!(is_permission_error("GitHub API 404: {\"message\":\"Not Found\"}"));
-
-        // Validation, server and transport failures are not about the token.
-        assert!(!is_permission_error("GitHub API 422: {\"message\":\"Validation Failed\"}"));
-        assert!(!is_permission_error("GitHub API 500: oops"));
-        assert!(!is_permission_error("Network error: timed out"));
-        assert!(!is_permission_error("gh auth token failed: GitHub API 403"));
     }
 
     #[test]

@@ -69,14 +69,15 @@ impl HelmPanel {
     /// `section` picks the section out of the panel. It is called once
     /// before the request and once after, so it is a plain function, not
     /// a closure that captures anything.
-    pub(super) fn load_section_with<T, Fut>(
+    pub(super) fn load_section_with<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
         fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        Fut: Future<Output = Result<Vec<T>, String>> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<Vec<T>, E>> + Send + 'static,
     {
         section(self).begin();
         cx.notify();
@@ -84,7 +85,7 @@ impl HelmPanel {
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(gh_state)).await;
             this.update(cx, |this, cx| {
-                section(this).finish(result);
+                section(this).finish(result.map_err(|error| error.to_string()));
                 cx.notify();
             })
             .ok();
@@ -94,14 +95,15 @@ impl HelmPanel {
 
     /// [`Self::load_section_with`] for rows that belong to the repository
     /// the user drilled into. Does nothing when no repository is selected.
-    pub(super) fn load_section<T, Fut>(
+    pub(super) fn load_section<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        Fut: Future<Output = Result<Vec<T>, String>> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<Vec<T>, E>> + Send + 'static,
     {
         let Some(repo) = self.selected_repo.clone() else {
             return;

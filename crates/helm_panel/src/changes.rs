@@ -90,8 +90,11 @@ impl HelmAction {
 
     /// Makes the API call(s). Returns the resulting repository for the two
     /// actions that produce one (create and edit), `None` otherwise.
-    pub(super) async fn perform(self, repo: Option<Repo>, gh_state: &GhState) -> Result<Option<Repo>, String> {
-        let selected = || repo.clone().ok_or_else(|| "No repository selected".to_string());
+    pub(super) async fn perform(self, repo: Option<Repo>, gh_state: &GhState) -> Result<Option<Repo>, GhError> {
+        let selected = || {
+            repo.clone()
+                .ok_or_else(|| GhError::Other("No repository selected".to_string()))
+        };
         match self {
             HelmAction::CreateRepo { opts } => gh_create_repo(opts, gh_state).await.map(Some),
             HelmAction::EditRepo { changes, topics } => {
@@ -200,16 +203,6 @@ pub(super) fn missing_scope_message(scope: &str) -> String {
     format!("Missing '{scope}' scope.")
 }
 
-/// Whether a `gh_api_fetch` error is one a missing scope produces. GitHub
-/// answers 403 for an insufficient scope, 404 when the scope is so
-/// insufficient the resource isn't visible to the token at all, and 401 for
-/// a token it no longer accepts.
-pub(super) fn is_permission_error(error: &str) -> bool {
-    ["GitHub API 401", "GitHub API 403", "GitHub API 404"]
-        .iter()
-        .any(|prefix| error.starts_with(prefix))
-}
-
 /// Whether a token carrying `granted` satisfies `needed`, counting the one
 /// parent scope that implies it (`admin:org` includes `write:org`).
 pub(super) fn token_has_scope(granted: &[String], needed: &str) -> bool {
@@ -241,7 +234,7 @@ impl HelmPanel {
             let (result, scope_check) = on_tokio(async move {
                 let result = performed.perform(repo, &gh_state).await;
                 let scope_check = match &result {
-                    Err(error) if may_reauthorize && is_permission_error(error) => {
+                    Err(error) if may_reauthorize && error.is_permission() => {
                         match gh_auth_status().await {
                             Ok(Some(info)) if token_has_scope(&info.scopes, scope) => {
                                 TokenScopeCheck::HasScope

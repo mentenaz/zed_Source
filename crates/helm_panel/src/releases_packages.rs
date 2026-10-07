@@ -56,7 +56,7 @@ impl HelmPanel {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(versions) => this.package_versions = versions,
-                    Err(e) => this.package_versions_error = Some(e),
+                    Err(e) => this.package_versions_error = Some(e.to_string()),
                 }
                 cx.notify();
             })

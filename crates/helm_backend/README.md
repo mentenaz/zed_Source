@@ -45,13 +45,44 @@ channels that the streaming operations (sign-in, clone) report progress on.
 | Insights | the four `gh_get_traffic_*` functions, `gh_list_dependabot_alerts`, `gh_list_secret_scanning_alerts` |
 | Cloning | `gh_clone_repo` |
 
+## Errors
+
+Every API function returns `Result<_, GhError>`. The variants say what kind
+of failure it was, so a caller can decide what to do instead of reading the
+message:
+
+| Variant | Meaning |
+| --- | --- |
+| `Unauthorized`, `Forbidden`, `NotFound` | 401, 403, 404. `is_permission()` is true for these: they are what a missing token scope looks like |
+| `RateLimited` | 403 or 429 with the limit used up, with the reset time or the wait GitHub asked for. Not a permission error, although it arrives as a 403 |
+| `Validation` | 422, with GitHub's per-field reasons in the message |
+| `Status` | Any other status of 400 or above |
+| `Network` | No answer: no connection, timeout, DNS |
+| `Parse` | The answer was not the JSON expected |
+| `Cli` | `gh` could not be run, or would not hand over a token |
+| `Other` | Something wrong before GitHub was asked |
+
+`GhError` implements `Display`, and converts into a `String`, for code that
+only shows the message. The sign-in functions (`gh_login` and the rest of
+`cli.rs`) still return `Result<_, String>`.
+
+`interpret` and `interpret_empty` are the whole rule for turning an HTTP
+answer into a value or an error. They take a plain `RawResponse`, which is
+what lets them be tested without a network.
+
 ## Behaviour worth knowing
 
 - **Lists return one page.** Every list asks GitHub for up to 100 items (50
   in a few places) and stops. An account with more than 100 repositories
   gets the first 100. Pagination is phase D of the plan.
-- **Nothing is cached** except the token, and the rate-limit headers are not
-  read. Both are phase E.
+- **Nothing is cached** except the token. The rate-limit headers are read
+  only to recognise a used-up limit; nothing tracks how much is left. Both
+  are phase E.
+- **A request that returns nothing is not parsed.** GitHub answers most
+  deletes and some updates with 204 and an empty body. These used to be
+  read as JSON, which an empty body is not.
+- **One HTTP client is shared** by every request, on `GhState`, so
+  connections are reused.
 - **Sign-in and clone report progress on channels.** `gh_login` and
   `gh_clone_repo` send each line of `gh`'s output to `GhState::auth_tx` and
   `clone_tx`. A host subscribes before starting them.
@@ -64,6 +95,7 @@ channels that the streaming operations (sign-in, clone) report progress on.
 | `src/github/mod.rs` | What the crate exports, and `gh_cmd` |
 | `src/github/cli.rs` | `gh auth`: check, status, login, scopes, logout |
 | `src/github/api.rs` | The REST endpoints, over one request function |
+| `src/github/error.rs` | `GhError`, and turning an HTTP answer into a value or an error |
 | `src/github/clone.rs` | `gh repo clone` with streamed output |
 | `src/github/types.rs` | Response types and `GhState` |
 
@@ -73,15 +105,17 @@ Done:
 
 - The code is in its own crate, and `helm_panel` no longer depends on
   `reqwest` or tokio directly.
+- Typed errors, with the answer-to-error rule tested without a network.
+- One HTTP client reused across requests.
 
-Not done yet, in the order planned:
+Not done yet:
 
-- Typed errors in place of strings (not found, forbidden, rate limited,
-  network), and one HTTP client reused across requests.
-- Splitting each call into building the request, sending it, and parsing
-  the answer, with unit tests on the first and last.
+- Splitting each endpoint into "build the request" and "send it", so the
+  paths and bodies of the forty or so endpoints can be unit-tested too.
+  Today only the answer side is.
 - The decision on whether to keep `reqwest` and tokio or move to the app's
-  shared HTTP client.
+  shared HTTP client. Sending is now one function (`send` in `api.rs`), so
+  that change would be confined to it and to the two places that run `gh`.
 
 ## Development
 
@@ -90,5 +124,8 @@ cargo check -p helm_backend -j 8
 cargo test -p helm_backend -j 8
 ```
 
-There are no tests yet; they come with the split described above. To run
-the tests of every fork crate at once: `script/test-fork-crates.ps1`.
+The tests cover `error.rs`: each status to its error, telling a used-up
+rate limit from a missing scope, the rate-limit message, GitHub's field
+errors, and empty answers. None of them uses the network.
+
+To run the tests of every fork crate at once: `script/test-fork-crates.ps1`.

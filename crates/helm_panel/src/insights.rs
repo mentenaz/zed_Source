@@ -26,7 +26,8 @@ impl HelmPanel {
                 let paths = gh_get_traffic_paths(owner.clone(), name.clone(), &gh_state)
                     .await
                     .unwrap_or_default();
-                Ok(RepoTraffic {
+                // Never fails as a whole: a part that fails is shown as empty.
+                Ok::<_, GhError>(RepoTraffic {
                     views,
                     clones,
                     referrers,

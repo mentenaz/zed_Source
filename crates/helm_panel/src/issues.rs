@@ -18,7 +18,7 @@ impl HelmPanel {
                     gh_list_issues(repo.owner.login, repo.name, filter, &gh_state).await?;
                 // GitHub's issues endpoint returns pull requests too.
                 issues.retain(|issue| issue.pull_request.is_none());
-                Ok(issues)
+                Ok::<_, GhError>(issues)
             },
         );
     }
@@ -59,7 +59,7 @@ impl HelmPanel {
                     }
                     Err(e) => {
                         this.detail_comments_state = LoadState::Error;
-                        this.error_msg = e;
+                        this.error_msg = e.to_string();
                     }
                 }
                 cx.notify();

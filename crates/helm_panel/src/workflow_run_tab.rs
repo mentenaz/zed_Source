@@ -170,7 +170,7 @@ impl WorkflowRunItem {
                             }
                             Err(e) => {
                                 this.load_state = LoadState::Error;
-                                this.error_msg = e;
+                                this.error_msg = e.to_string();
                             }
                         }
                         if let Ok(jobs) = jobs_result {

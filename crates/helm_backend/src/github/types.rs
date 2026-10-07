@@ -514,6 +514,8 @@ pub enum CloneEvent {
 /// Simple in-memory token/base-url cache. Owned by `AppState` and shared via
 /// `Arc`; replaces Tauri's `State<GhState>`.
 pub struct GhState {
+    /// One HTTP client for every request, so connections are reused.
+    pub client: reqwest::Client,
     pub token: tokio::sync::RwLock<Option<String>>,
     pub base_url: tokio::sync::RwLock<String>,
     pub auth_tx: tokio::sync::broadcast::Sender<GhAuthEvent>,
@@ -524,7 +526,13 @@ impl Default for GhState {
     fn default() -> Self {
         let (auth_tx, _) = tokio::sync::broadcast::channel(16);
         let (clone_tx, _) = tokio::sync::broadcast::channel(256);
+        // A client that cannot be built with a timeout is still a client.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         Self {
+            client,
             token: tokio::sync::RwLock::new(None),
             base_url: tokio::sync::RwLock::new("https://api.github.com".to_string()),
             auth_tx,

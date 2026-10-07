@@ -15,14 +15,15 @@ impl HelmPanel {
     ///
     /// While the request is in flight the panel is `Loading`. It ends `Idle`
     /// with the result stored, or `Error` with the message in `error_msg`.
-    pub(super) fn load_with<T, Fut>(
+    pub(super) fn load_with<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
         store: impl FnOnce(&mut Self, T) + 'static,
     ) where
         T: Send + 'static,
-        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         self.load_state = LoadState::Loading;
         self.error_msg.clear();
@@ -38,7 +39,7 @@ impl HelmPanel {
                     }
                     Err(e) => {
                         this.load_state = LoadState::Error;
-                        this.error_msg = e;
+                        this.error_msg = e.to_string();
                     }
                 }
                 cx.notify();
@@ -50,14 +51,15 @@ impl HelmPanel {
 
     /// [`Self::load_with`] for something that belongs to the repository the
     /// user drilled into. Does nothing when no repository is selected.
-    pub(super) fn load_for_repo<T, Fut>(
+    pub(super) fn load_for_repo<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
         store: impl FnOnce(&mut Self, T) + 'static,
     ) where
         T: Send + 'static,
-        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let Some(repo) = self.selected_repo.clone() else {
             return;

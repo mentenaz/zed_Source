@@ -72,7 +72,7 @@ impl HelmPanel {
             let outcome = on_tokio(async move {
                 let info = match gh_auth_status().await {
                     Ok(info) => info,
-                    Err(e) => return AuthOutcome::Failed(e),
+                    Err(e) => return AuthOutcome::Failed(e.to_string()),
                 };
                 let Some(info) = info else {
                     return AuthOutcome::NotLoggedIn;
@@ -85,11 +85,11 @@ impl HelmPanel {
                 }
                 let orgs = match gh_get_org_logins(&gh_state).await {
                     Ok(o) => o,
-                    Err(e) => return AuthOutcome::Failed(e),
+                    Err(e) => return AuthOutcome::Failed(e.to_string()),
                 };
                 let user = match gh_get_current_user(&gh_state).await {
                     Ok(u) => u,
-                    Err(e) => return AuthOutcome::Failed(e),
+                    Err(e) => return AuthOutcome::Failed(e.to_string()),
                 };
                 AuthOutcome::Ready {
                     account: info.account,
