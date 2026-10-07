@@ -9,13 +9,13 @@ impl HelmPanel {
         if self.selected_repo.is_none() {
             return;
         }
-        self.branches.clear();
-        self.load_for_repo(
+        self.branches.items.clear();
+        self.load_section(
             cx,
+            |this| &mut this.branches,
             |repo, gh_state| async move {
                 gh_get_branches(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, branches| this.branches = branches,
         );
     }
 
@@ -25,7 +25,7 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
 
-        if self.load_state == LoadState::Loading {
+        if self.branches.state == LoadState::Loading {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -46,7 +46,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.load_state == LoadState::Error {
+        if self.branches.state == LoadState::Error {
             return v_flex()
                 .gap_3()
                 .p_4()
@@ -65,7 +65,7 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        if self.branches.is_empty() {
+        if self.branches.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -89,25 +89,25 @@ impl HelmPanel {
         // Read-only list — branch rows have no click action, so this wires
         // up/down + a selection highlight only, no `OpenSelectedRow` (Enter
         // falls through as a no-op, matching what clicking a row already did).
-        let len = self.branches.len();
-        let cursor = self.branches_list_cursor;
+        let len = self.branches.items.len();
+        let cursor = self.branches.cursor;
         v_flex()
             .id("helm-branches-list")
-            .track_focus(&self.branches_list_focus)
+            .track_focus(&self.branches.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.branches_list_focus, cx);
+                window.focus(&this.branches.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, true);
+                this.branches.cursor = step_selected(this.branches.cursor, len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.branches_list_cursor = step_selected(this.branches_list_cursor, len, false);
+                this.branches.cursor = step_selected(this.branches.cursor, len, false);
                 cx.notify();
             }))
             .py_1()
-            .children(self.branches.iter().enumerate().map(|(ix, branch)| {
+            .children(self.branches.items.iter().enumerate().map(|(ix, branch)| {
                 let is_default = branch.name == default_branch;
                 let protected = branch.protected;
                 ListItem::new(format!("helm-branch-{}", branch.name))

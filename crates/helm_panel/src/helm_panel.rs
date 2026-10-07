@@ -218,9 +218,7 @@ pub struct HelmPanel {
     workspace: WeakEntity<Workspace>,
 
     /// Populated by [`Self::load_branches`] for the `Branches` screen.
-    branches: Vec<Branch>,
-    branches_list_cursor: Option<usize>,
-    branches_list_focus: FocusHandle,
+    branches: Section<Branch>,
     /// Populated by [`Self::load_collaborators`] for the `Collaborators`
     /// screen.
     collaborators: Vec<Collaborator>,
@@ -355,9 +353,7 @@ impl HelmPanel {
                 clone_succeeded_path: None,
                 clone_target_dir: None,
                 workspace,
-                branches: Vec::new(),
-                branches_list_cursor: None,
-                branches_list_focus: cx.focus_handle(),
+                branches: Section::new(cx),
                 collaborators: Vec::new(),
                 collaborators_list_cursor: None,
                 collaborators_list_focus: cx.focus_handle(),
