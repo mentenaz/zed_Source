@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is in progress. Phases C to E are not started.
+**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is in progress. Phases D and E are not started.
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
@@ -123,6 +123,15 @@ Move `src/backend/` into a new `helm_backend` crate, in the role `npm_backend`, 
 - **Typed errors** in place of strings: not found, forbidden (with the scope it needs when that is the cause), rate limited (with the reset time), validation, network, unexpected answer. The panel's scope-retry logic then matches on a variant instead of searching the message text for "403".
 - **One HTTP client**, created once, not one per request as now.
 - **Decision 2 from the audit is made here:** stay on `reqwest` and tokio, or move to the app's shared HTTP client. See section 10.
+
+### Progress (7 October 2026)
+
+- **The crate exists.** `crates/helm_backend` holds sign-in, the REST endpoints, cloning and the response types. `helm_panel` no longer depends on `reqwest`, `reqwest_client` or tokio.
+- **Typed errors: done.** `GhError` replaces strings in every API function, and the panel's scope retry asks `error.is_permission()` in place of matching on "GitHub API 403". The request function is split into `send` (the only network code) and `interpret` (pure, with nine tests).
+- **One HTTP client: done.** It lives on `GhState`.
+- **Found and fixed on the way:** a used-up rate limit arrives as a 403 and used to send the user to re-authorize; requests answered with an empty 204 were parsed as JSON.
+- **Not done:** splitting each endpoint into "build the request" and "send it", so paths and bodies can be tested; and decision 3 below (the HTTP stack), which is now confined to `send` and the two places that run `gh`.
+- **Not yet tried in the running app.**
 
 ### Done when
 
