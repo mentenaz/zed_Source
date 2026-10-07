@@ -27,7 +27,7 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
 
-        if self.org_logins.is_empty() {
+        if self.org_logins.items.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -42,32 +42,32 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let len = self.org_logins.len();
-        let cursor = self.org_list_cursor;
+        let len = self.org_logins.items.len();
+        let cursor = self.org_logins.cursor;
         v_flex()
             .id("helm-org-list")
-            .track_focus(&self.org_list_focus)
+            .track_focus(&self.org_logins.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.org_list_focus, cx);
+                window.focus(&this.org_logins.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.org_list_cursor = step_selected(this.org_list_cursor, len, true);
+                this.org_logins.cursor = step_selected(this.org_logins.cursor, len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.org_list_cursor = step_selected(this.org_list_cursor, len, false);
+                this.org_logins.cursor = step_selected(this.org_logins.cursor, len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, _, cx| {
-                let Some(org) = this.org_list_cursor.and_then(|ix| this.org_logins.get(ix)).cloned()
+                let Some(org) = this.org_logins.cursor.and_then(|ix| this.org_logins.items.get(ix)).cloned()
                 else {
                     return;
                 };
                 this.select_org(org, cx);
             }))
             .py_1()
-            .children(self.org_logins.clone().into_iter().enumerate().map(|(ix, org)| {
+            .children(self.org_logins.items.clone().into_iter().enumerate().map(|(ix, org)| {
                 let click_org = org.clone();
                 ListItem::new(format!("helm-org-{org}"))
                     .selected(cursor == Some(ix))
@@ -78,7 +78,7 @@ impl HelmPanel {
                             .text_color(muted_foreground)
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.org_list_cursor = Some(ix);
+                        this.org_logins.cursor = Some(ix);
                         this.select_org(click_org.clone(), cx)
                     }))
             }))

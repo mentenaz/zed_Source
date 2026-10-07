@@ -111,7 +111,7 @@ impl HelmPanel {
                     } => {
                         this.account = account;
                         this.scopes = scopes;
-                        this.org_logins = orgs;
+                        this.org_logins.items = orgs;
                         this.user = Some(user);
                         this.load_state = LoadState::Idle;
                         this.error_msg.clear();

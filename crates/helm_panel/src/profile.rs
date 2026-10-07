@@ -106,11 +106,11 @@ impl HelmPanel {
             },
         ]
         .into_iter()
-        .chain(if !self.org_logins.is_empty() {
+        .chain(if !self.org_logins.items.is_empty() {
             Some(NavRow {
                 id: "orgs",
                 label: "Organizations",
-                hint: Some(self.org_logins.len().to_string()),
+                hint: Some(self.org_logins.items.len().to_string()),
             })
         } else {
             None
@@ -322,7 +322,7 @@ impl HelmPanel {
             },
         ]
         .into_iter()
-        .filter(|item| item.id != "orgs" || !self.org_logins.is_empty())
+        .filter(|item| item.id != "orgs" || !self.org_logins.items.is_empty())
         .collect();
 
         let foreground = cx.theme().foreground;

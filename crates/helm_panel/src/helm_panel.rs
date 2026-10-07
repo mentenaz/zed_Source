@@ -162,9 +162,7 @@ pub struct HelmPanel {
     // Session (populated once authenticated)
     account: String,
     scopes: Vec<String>,
-    org_logins: Vec<String>,
-    org_list_cursor: Option<usize>,
-    org_list_focus: FocusHandle,
+    org_logins: Section<String>,
     user: Option<GitHubUser>,
     /// Pending repo invitations the signed-in user hasn't accepted yet —
     /// just a count, surfaced as the hint badge on the Profile screen's
@@ -312,9 +310,7 @@ impl HelmPanel {
                 code_copied: false,
                 account: String::new(),
                 scopes: Vec::new(),
-                org_logins: Vec::new(),
-                org_list_cursor: None,
-                org_list_focus: cx.focus_handle(),
+                org_logins: Section::new(cx),
                 user: None,
                 repo_invitation_count: 0,
                 selected_org: None,
