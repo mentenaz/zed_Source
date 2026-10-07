@@ -67,12 +67,12 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s tags.
     pub(super) fn load_tags(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.tags,
             |repo, gh_state| async move {
                 gh_list_tags(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, tags| this.tags = tags,
         );
     }
 
@@ -579,10 +579,11 @@ impl HelmPanel {
     /// The Tags screen.
     pub(super) fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(el) = self.activity_list_states(
+            self.tags.state,
             "Loading tags…",
             "Failed to load tags",
             "No tags found",
-            self.tags.is_empty(),
+            self.tags.items.is_empty(),
             |this, cx| this.load_tags(cx),
             cx,
         ) {
@@ -591,26 +592,26 @@ impl HelmPanel {
 
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
-        let tags_len = self.tags.len();
-        let tags_cursor = self.tags_list_cursor;
+        let tags_len = self.tags.items.len();
+        let tags_cursor = self.tags.cursor;
 
         v_flex()
             .id("helm-tags-list")
-            .track_focus(&self.tags_list_focus)
+            .track_focus(&self.tags.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.tags_list_focus, cx);
+                window.focus(&this.tags.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.tags_list_cursor = step_selected(this.tags_list_cursor, tags_len, true);
+                this.tags.cursor = step_selected(this.tags.cursor, tags_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.tags_list_cursor = step_selected(this.tags_list_cursor, tags_len, false);
+                this.tags.cursor = step_selected(this.tags.cursor, tags_len, false);
                 cx.notify();
             }))
             .py_1()
-            .children(self.tags.iter().enumerate().map(|(ix, tag)| {
+            .children(self.tags.items.iter().enumerate().map(|(ix, tag)| {
                 let short_sha: String = tag.commit.sha.chars().take(7).collect();
                 ListItem::new(format!("helm-tag-{}", tag.name))
                     .selected(tags_cursor == Some(ix))

@@ -6,23 +6,23 @@ use super::*;
 impl HelmPanel {
     /// Loads `self.selected_repo`'s recent commits (Commits screen).
     pub(super) fn load_commits(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.commits,
             |repo, gh_state| async move {
                 gh_list_recent_commits(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, commits| this.commits = commits,
         );
     }
 
     /// Loads `self.selected_repo`'s recent Actions/CI workflow runs.
     pub(super) fn load_workflow_runs(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.workflow_runs,
             |repo, gh_state| async move {
                 gh_list_workflow_runs(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, runs| this.workflow_runs = runs,
         );
     }
 
@@ -48,12 +48,12 @@ impl HelmPanel {
 
     /// Loads `self.selected_repo`'s deployments.
     pub(super) fn load_deployments(&mut self, cx: &mut Context<Self>) {
-        self.load_for_repo(
+        self.load_section(
             cx,
+            |this| &mut this.deployments,
             |repo, gh_state| async move {
                 gh_list_deployments(repo.owner.login, repo.name, &gh_state).await
             },
-            |this, deployments| this.deployments = deployments,
         );
     }
 
@@ -63,6 +63,7 @@ impl HelmPanel {
     /// four of them.
     pub(super) fn activity_list_states(
         &self,
+        state: LoadState,
         loading_label: &'static str,
         error_label: &'static str,
         empty_label: &'static str,
@@ -72,7 +73,7 @@ impl HelmPanel {
     ) -> Option<gpui::AnyElement> {
         let muted_foreground = cx.theme().muted_foreground;
 
-        if self.load_state == LoadState::Loading {
+        if state == LoadState::Loading {
             return Some(
                 v_flex()
                     .flex_1()
@@ -89,7 +90,7 @@ impl HelmPanel {
                     .into_any_element(),
             );
         }
-        if self.load_state == LoadState::Error {
+        if state == LoadState::Error {
             return Some(
                 v_flex()
                     .gap_3()
@@ -121,10 +122,11 @@ impl HelmPanel {
     /// The Commits screen — recent commits with GitHub author avatars.
     pub(super) fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(el) = self.activity_list_states(
+            self.commits.state,
             "Loading commits…",
             "Failed to load commits",
             "No commits found",
-            self.commits.is_empty(),
+            self.commits.items.is_empty(),
             |this, cx| this.load_commits(cx),
             cx,
         ) {
@@ -135,27 +137,27 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         // Read-only list — no click action, so up/down + a selection
         // highlight only (see `render_branches`'s identical reasoning).
-        let commits_len = self.commits.len();
-        let commits_cursor = self.commits_list_cursor;
+        let commits_len = self.commits.items.len();
+        let commits_cursor = self.commits.cursor;
 
         v_flex()
             .id("helm-commits-list")
-            .track_focus(&self.commits_list_focus)
+            .track_focus(&self.commits.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.commits_list_focus, cx);
+                window.focus(&this.commits.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.commits_list_cursor = step_selected(this.commits_list_cursor, commits_len, true);
+                this.commits.cursor = step_selected(this.commits.cursor, commits_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.commits_list_cursor =
-                    step_selected(this.commits_list_cursor, commits_len, false);
+                this.commits.cursor =
+                    step_selected(this.commits.cursor, commits_len, false);
                 cx.notify();
             }))
             .py_1()
-            .children(self.commits.iter().enumerate().map(|(ix, commit)| {
+            .children(self.commits.items.iter().enumerate().map(|(ix, commit)| {
                 let short_sha: String = commit.sha.chars().take(7).collect();
                 let author = commit
                     .author
@@ -200,10 +202,11 @@ impl HelmPanel {
     /// than a detail pane embedded in this panel.
     pub(super) fn render_workflow_runs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(el) = self.activity_list_states(
+            self.workflow_runs.state,
             "Loading workflow runs…",
             "Failed to load workflow runs",
             "No workflow runs found",
-            self.workflow_runs.is_empty(),
+            self.workflow_runs.items.is_empty(),
             |this, cx| this.load_workflow_runs(cx),
             cx,
         ) {
@@ -214,36 +217,36 @@ impl HelmPanel {
         let muted_foreground = cx.theme().muted_foreground;
         let success = cx.theme().success;
         let danger = cx.theme().danger;
-        let runs_len = self.workflow_runs.len();
-        let runs_cursor = self.workflow_runs_list_cursor;
-        let runs_for_open = self.workflow_runs.clone();
+        let runs_len = self.workflow_runs.items.len();
+        let runs_cursor = self.workflow_runs.cursor;
+        let runs_for_open = self.workflow_runs.items.clone();
 
         v_flex()
             .id("helm-workflow-runs-list")
-            .track_focus(&self.workflow_runs_list_focus)
+            .track_focus(&self.workflow_runs.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.workflow_runs_list_focus, cx);
+                window.focus(&this.workflow_runs.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.workflow_runs_list_cursor =
-                    step_selected(this.workflow_runs_list_cursor, runs_len, true);
+                this.workflow_runs.cursor =
+                    step_selected(this.workflow_runs.cursor, runs_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.workflow_runs_list_cursor =
-                    step_selected(this.workflow_runs_list_cursor, runs_len, false);
+                this.workflow_runs.cursor =
+                    step_selected(this.workflow_runs.cursor, runs_len, false);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
-                let Some(run) = this.workflow_runs_list_cursor.and_then(|ix| runs_for_open.get(ix))
+                let Some(run) = this.workflow_runs.cursor.and_then(|ix| runs_for_open.get(ix))
                 else {
                     return;
                 };
                 this.select_workflow_run(run.clone(), window, cx);
             }))
             .py_1()
-            .children(self.workflow_runs.iter().enumerate().map(|(ix, run)| {
+            .children(self.workflow_runs.items.iter().enumerate().map(|(ix, run)| {
                 let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
                 let color = match status_label.as_str() {
                     "success" => success,
@@ -275,7 +278,7 @@ impl HelmPanel {
                         div().text_xs().text_color(color).child(status_label.clone())
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.workflow_runs_list_cursor = Some(ix);
+                        this.workflow_runs.cursor = Some(ix);
                         this.select_workflow_run(run_for_click.clone(), window, cx);
                     }))
                     .into_any_element()
@@ -286,10 +289,11 @@ impl HelmPanel {
     /// The Deployments screen.
     pub(super) fn render_deployments(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(el) = self.activity_list_states(
+            self.deployments.state,
             "Loading deployments…",
             "Failed to load deployments",
             "No deployments found",
-            self.deployments.is_empty(),
+            self.deployments.items.is_empty(),
             |this, cx| this.load_deployments(cx),
             cx,
         ) {
@@ -298,28 +302,28 @@ impl HelmPanel {
 
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
-        let deployments_len = self.deployments.len();
-        let deployments_cursor = self.deployments_list_cursor;
+        let deployments_len = self.deployments.items.len();
+        let deployments_cursor = self.deployments.cursor;
 
         v_flex()
             .id("helm-deployments-list")
-            .track_focus(&self.deployments_list_focus)
+            .track_focus(&self.deployments.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                window.focus(&this.deployments_list_focus, cx);
+                window.focus(&this.deployments.focus, cx);
             }))
             .key_context("HelmRowList")
             .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                this.deployments_list_cursor =
-                    step_selected(this.deployments_list_cursor, deployments_len, true);
+                this.deployments.cursor =
+                    step_selected(this.deployments.cursor, deployments_len, true);
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                this.deployments_list_cursor =
-                    step_selected(this.deployments_list_cursor, deployments_len, false);
+                this.deployments.cursor =
+                    step_selected(this.deployments.cursor, deployments_len, false);
                 cx.notify();
             }))
             .py_1()
-            .children(self.deployments.iter().enumerate().map(|(ix, dep)| {
+            .children(self.deployments.items.iter().enumerate().map(|(ix, dep)| {
                 let short_sha: String = dep.sha.chars().take(7).collect();
                 ListItem::new(format!("helm-deployment-{}", dep.id))
                     .selected(deployments_cursor == Some(ix))
