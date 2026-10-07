@@ -116,8 +116,8 @@ impl HelmPanel {
                     Ok(CloneEvent::Done) => break,
                     // `Lagged` means missed events, not a dead channel —
                     // resync and keep listening; only `Closed` ends this loop.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(EventRecvError::Lagged(_)) => continue,
+                    Err(EventRecvError::Closed) => break,
                 };
                 let alive = this
                     .update(cx, |this, cx| {

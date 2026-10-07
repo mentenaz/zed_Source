@@ -9081,6 +9081,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm_backend"
+version = "0.1.0"
+dependencies = [
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zed-reqwest",
+]
+
+[[package]]
 name = "helm_panel"
 version = "0.1.0"
 dependencies = [
@@ -9088,14 +9099,12 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_flow",
+ "helm_backend",
  "log",
- "reqwest_client",
  "serde",
  "serde_json",
- "tokio",
  "ui",
  "workspace",
- "zed-reqwest",
 ]
 
 [[package]]

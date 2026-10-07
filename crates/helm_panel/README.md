@@ -161,28 +161,25 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/repository_modal.rs` | The modal used for Helm's forms and confirmations |
 | `src/workflow_run_tab.rs` | A workflow run as its own tab, with its jobs as a graph |
 | `src/widgets.rs` | Small shared helpers |
-| `src/backend.rs` | `on_tokio`, bridging tokio futures onto GPUI's `cx.spawn` |
-| `src/backend/github/mod.rs` | Types, `GhState`, the `gh_cmd` helper |
-| `src/backend/github/cli.rs` | `gh auth` — check, status, login, scopes, logout |
-| `src/backend/github/api.rs` | REST endpoints, all thin wrappers over `gh_api_fetch` |
-| `src/backend/github/clone.rs` | `gh repo clone` with streamed output |
-| `src/backend/github/types.rs` | Response types |
+
+The GitHub code itself (sign-in through `gh`, the REST endpoints, cloning,
+the response types) is in [`helm_backend`](../helm_backend/README.md).
 
 ### How requests work
 
-`gh_api_fetch` resolves the token (cached, or from `gh auth token`) and calls
-the GitHub REST API with `reqwest`. The backend is tokio-native, so UI code
-goes through `backend::on_tokio` rather than awaiting it directly on GPUI's
-executor.
+The panel calls [`helm_backend`](../helm_backend/README.md) for everything
+that touches GitHub. That crate runs on tokio, so UI code goes through
+`helm_backend::on_tokio` rather than awaiting it directly on GPUI's
+executor. In practice a screen never does that by hand: list screens load
+through `load_section` (`section.rs`) and the others through `load_with`
+(`loading.rs`).
 
 Streaming operations (login, clone) broadcast each output line through
 channels on `GhState`, which the progress screens subscribe to.
 
-To add an endpoint: add a wrapper in `api.rs`, a response type in
-`types.rs`, and a screen or section in `helm_panel.rs`.
-
-The workflow-run job graph is drawn with
-[`gpui_flow`](../gpui_flow/README.md).
+To add a list screen: add the endpoint and its response type in
+`helm_backend`, a `Section` field on the panel, a loader, a row function, an
+entry in `lists.rs`, and a render function that calls `list_screen`.
 
 ## Things to know
 

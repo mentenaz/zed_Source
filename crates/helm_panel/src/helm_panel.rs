@@ -1,12 +1,11 @@
 //! The "Helm" (GitHub) panel — Gate (CLI check) → Auth (login) → Menu, now
-//! backed by the real `crate::backend::github` module instead of a UI-only
+//! backed by the real `helm_backend::github` module instead of a UI-only
 //! screen flip. Ported from `Forge_Old/panels/github/{gate,auth,menu}.rs`,
-//! using `crate::backend::on_tokio` to bridge `github`'s tokio-native
+//! using `helm_backend::on_tokio` to bridge `github`'s tokio-native
 //! `reqwest`/`gh` CLI calls onto GPUI's own `cx.spawn`, and
 //! `gpui_component` elements (`Button`, `list::ListItem`, `Icon`,
 //! `Spinner`) instead of the old `forge_ui` crate.
 
-mod backend;
 mod changes;
 mod auth;
 mod navigation;
@@ -57,7 +56,7 @@ use gpui_component::{
 use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
-use crate::backend::github::{
+use helm_backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhState,
     GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull,
     Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
@@ -73,7 +72,7 @@ use crate::backend::github::{
     gh_list_secret_scanning_alerts, gh_list_tags, gh_list_workflow_runs, gh_login, gh_logout,
     gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
 };
-use crate::backend::on_tokio;
+use helm_backend::{EventRecvError, on_tokio};
 use changes::*;
 use list_view::*;
 use collaborators::*;
