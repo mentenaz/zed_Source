@@ -60,7 +60,7 @@ use helm_backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
     GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion,
     Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
-    fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
+    fetch_page, fetch_page_under, peek_page, peek_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
     gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo, gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
     gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
@@ -568,6 +568,38 @@ impl Render for HelmPanel {
                         HelmScreen::Security => self.render_security(cx).into_any_element(),
                     }),
             )
+            .children(show_nav.then(|| self.render_rate_limit(cx)).flatten())
+    }
+}
+
+impl HelmPanel {
+    /// The line at the foot of the panel saying how much of GitHub's hourly
+    /// allowance is left. Nothing until the first answer has come back.
+    fn render_rate_limit(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let rate = self.gh_state.rate_limit()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        // After the reset the count on record is the old window's.
+        if now >= rate.reset_at {
+            return None;
+        }
+        let color = if rate.is_low() {
+            cx.theme().warning
+        } else {
+            cx.theme().muted_foreground
+        };
+        Some(
+            div()
+                .flex_none()
+                .px_3()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(color)
+                .child(rate.summary(now)),
+        )
     }
 }
 

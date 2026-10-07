@@ -23,6 +23,13 @@ pub(super) struct Section<T> {
     pub(super) page: u32,
     /// The last page there is.
     pub(super) last_page: u32,
+    /// The rows are a remembered answer, shown while GitHub is asked
+    /// whether they are still right.
+    pub(super) refreshing: bool,
+    /// Counts page loads. An answer that arrives after a newer load began,
+    /// or after the screen was left, belongs to an older number and is
+    /// dropped (see [`Self::is_current`]).
+    load: u64,
 }
 
 impl<T> Default for Section<T> {
@@ -33,6 +40,8 @@ impl<T> Default for Section<T> {
             error: String::new(),
             page: 1,
             last_page: 1,
+            refreshing: false,
+            load: 0,
         }
     }
 }
@@ -46,6 +55,8 @@ impl<T> Section<T> {
         self.error.clear();
         self.page = 1;
         self.last_page = 1;
+        self.refreshing = false;
+        self.load += 1;
     }
 
     /// Marks a load as started. [`HelmPanel::load_section`] calls this; a
@@ -53,6 +64,7 @@ impl<T> Section<T> {
     pub(super) fn begin(&mut self) {
         self.state = LoadState::Loading;
         self.error.clear();
+        self.refreshing = false;
     }
 
     /// Stores a finished load. A failure keeps the rows already shown: the
@@ -76,14 +88,40 @@ impl<T> Section<T> {
     /// Marks a load of page `page` as started. The page is recorded now, so
     /// that the pager shows where the user asked to go while it loads, and
     /// a retry after a failure asks for the same page.
-    pub(super) fn begin_page(&mut self, page: u32) {
+    ///
+    /// Returns the load's number, to hand to [`Self::is_current`] when the
+    /// answer arrives.
+    pub(super) fn begin_page(&mut self, page: u32) -> u64 {
         self.begin();
         self.page = page.max(1);
         self.last_page = self.last_page.max(self.page);
+        self.load += 1;
+        self.load
+    }
+
+    /// Starts a load of a page whose last answer is remembered: shows that
+    /// answer at once, with no spinner, while GitHub is asked again.
+    /// Returns the load's number, as [`Self::begin_page`] does.
+    pub(super) fn begin_page_with(&mut self, remembered: Page<T>) -> u64 {
+        self.items = remembered.items;
+        self.page = remembered.page;
+        self.last_page = remembered.last_page;
+        self.state = LoadState::Idle;
+        self.error.clear();
+        self.refreshing = true;
+        self.load += 1;
+        self.load
+    }
+
+    /// Whether `load` is still the latest page load, so that its answer is
+    /// the one to show.
+    pub(super) fn is_current(&self, load: u64) -> bool {
+        self.load == load
     }
 
     /// Stores a finished load of one page.
     pub(super) fn finish_page(&mut self, result: Result<Page<T>, String>) {
+        self.refreshing = false;
         match result {
             Ok(page) => {
                 self.items = page.items;
@@ -165,11 +203,17 @@ impl HelmPanel {
 impl HelmPanel {
     /// Loads page `page` of one section's rows for the selected repository.
     /// Does nothing when no repository is selected.
+    ///
+    /// `peek` looks for the page among the answers already remembered. When
+    /// it is there the rows are shown at once and `fetch` only confirms or
+    /// replaces them; GitHub answers "not modified" for free when nothing
+    /// changed.
     pub(super) fn load_section_page<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
         page: u32,
+        peek: impl FnOnce(&Repo, &GhState) -> Option<Page<T>>,
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
@@ -179,13 +223,22 @@ impl HelmPanel {
         let Some(repo) = self.selected_repo.clone() else {
             return;
         };
-        section(self).begin_page(page);
-        cx.notify();
         let gh_state = self.gh_state.clone();
+        let load = match peek(&repo, &gh_state) {
+            Some(remembered) => section(self).begin_page_with(remembered),
+            None => section(self).begin_page(page),
+        };
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(repo, gh_state)).await;
             this.update(cx, |this, cx| {
-                section(this).finish_page(result.map_err(|error| error.to_string()));
+                let section = section(this);
+                // Another page was asked for, or the screen was left, while
+                // this one was on its way.
+                if section.is_current(load) {
+                    section.finish_page(result.map_err(|error| error.to_string()));
+                }
+                // Even a dropped answer changed how many requests are left.
                 cx.notify();
             })
             .ok();
@@ -200,13 +253,23 @@ impl HelmPanel {
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
         page: u32,
-        request: impl FnOnce(&Repo) -> requests::ApiRequest + Send + 'static,
+        request: impl Fn(&Repo) -> requests::ApiRequest + Send + 'static,
     ) where
         T: serde::de::DeserializeOwned + Send + 'static,
     {
-        self.load_section_page(cx, section, page, move |repo, gh_state| async move {
-            fetch_page::<T>(&gh_state, request(&repo), page, PAGE_SIZE).await
-        });
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        let remembered = request(&repo);
+        self.load_section_page(
+            cx,
+            section,
+            page,
+            move |_, gh_state| peek_page::<T>(gh_state, remembered, page, PAGE_SIZE),
+            move |repo, gh_state| async move {
+                fetch_page::<T>(&gh_state, request(&repo), page, PAGE_SIZE).await
+            },
+        );
     }
 }
 
@@ -309,6 +372,68 @@ mod tests {
         // Leaving the screen goes back to the start.
         section.clear();
         assert_eq!((section.page, section.last_page), (1, 1));
+    }
+
+    #[test]
+    fn a_remembered_page_is_shown_while_it_is_checked() {
+        let mut section = Section::<u32>::default();
+        let load = section.begin_page_with(Page {
+            items: vec![1, 2],
+            page: 2,
+            last_page: 5,
+        });
+        // The rows are there with no spinner, marked as being checked.
+        assert!(section.state == LoadState::Idle);
+        assert!(section.refreshing);
+        assert_eq!(section.items, vec![1, 2]);
+        assert_eq!((section.page, section.last_page), (2, 5));
+        assert!(section.status().refreshing);
+
+        assert!(section.is_current(load));
+        section.finish_page(Ok(Page {
+            items: vec![1, 2, 3],
+            page: 2,
+            last_page: 6,
+        }));
+        assert!(!section.refreshing);
+        assert_eq!(section.items, vec![1, 2, 3]);
+        assert_eq!(section.last_page, 6);
+
+        // A check that fails says so; it does not leave old rows standing
+        // as if they had been confirmed.
+        section.begin_page_with(Page {
+            items: vec![9],
+            page: 1,
+            last_page: 1,
+        });
+        section.finish_page(Err("offline".to_string()));
+        assert!(section.state == LoadState::Error);
+        assert!(!section.refreshing);
+    }
+
+    #[test]
+    fn only_the_latest_page_load_counts() {
+        let mut section = Section::<u32>::default();
+        // Next is clicked twice before the first answer arrives.
+        let first = section.begin_page(2);
+        let second = section.begin_page(3);
+        assert!(!section.is_current(first));
+        assert!(section.is_current(second));
+
+        // Leaving the screen drops whatever is still on its way.
+        section.clear();
+        assert!(!section.is_current(second));
+        assert!(!section.refreshing);
+
+        // A remembered page is a load like any other.
+        let third = section.begin_page_with(Page {
+            items: vec![1],
+            page: 1,
+            last_page: 1,
+        });
+        let fourth = section.begin_page(2);
+        assert!(!section.is_current(third));
+        assert!(section.is_current(fourth));
     }
 
     #[test]

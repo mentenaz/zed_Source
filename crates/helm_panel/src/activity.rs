@@ -25,6 +25,10 @@ impl HelmPanel {
             cx,
             |this| &mut this.workflow_runs,
             page,
+            move |repo, gh_state| {
+                let request = requests::workflow_runs(&repo.owner.login, &repo.name);
+                peek_page_under(gh_state, request, "workflow_runs", page, PAGE_SIZE)
+            },
             move |repo, gh_state| async move {
                 // GitHub wraps this list in an object, under `workflow_runs`.
                 let request = requests::workflow_runs(&repo.owner.login, &repo.name);

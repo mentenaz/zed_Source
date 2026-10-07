@@ -1,6 +1,6 @@
 # Helm: Phased Plan for the Foundation and the Big File
 
-**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is done in code and checked against the live API from a terminal, but not yet tried in the app. Phase D is done in code and checked against the live API, but not yet tried in the app. Phase E is not started.
+**Written:** 7 October 2026. **Status:** phase A is done (7 October 2026): checked by build, tests and a line-for-line comparison, and tried by hand in the running app. Phase B is done and was tried by hand in the app. Phase C is done in code and checked against the live API from a terminal, but not yet tried in the app. Phase D is done in code and checked against the live API, but not yet tried in the app. Phase E is done in code and checked against the live API, but not yet tried in the app; one item from it was left out (see section 7).
 **Companions:** `Helm_Future_Developments.md` (the roadmap) and `Helm_Phase0_Audit.md` (where the crate stands). This plan covers the roadmap's phase 0 and the restructuring that has to happen before phase 2.
 
 ---
@@ -170,6 +170,20 @@ Move `src/backend/` into a new `helm_backend` crate, in the role `npm_backend`, 
 - **A store.** One object owns fetched results, keyed by what was asked. Two screens asking for the same thing share one request, and a screen revisited inside a short window shows the stored result at once and refreshes in the background.
 - **After a change,** the store drops what that change makes stale, so the list the user returns to is current. The single write path (`HelmAction`) is the one place this hooks in.
 
+### As done (7 October 2026)
+
+- **Rate limits.** `helm_backend` reads the limit headers on every answer (`RateLimit` in `cache.rs`). The panel shows "4,961 of 5,000 requests left · resets in 41 min" along its foot, in the warning colour once under a tenth is left. When none is left, requests fail at once with the reset time and are not sent until then.
+- **Conditional requests.** Every `GET` answer is kept with its `ETag` (200 at most) and the tag is sent on the next request for the same thing. Checked against GitHub: asking for the same thing twice left the allowance where it was (4,961 before and after).
+- **Showing a list at once.** A paged list (issues, pull requests, branches, collaborators, releases, tags, commits, workflow runs, deployments) whose page is remembered shows it immediately, with a small spinner beside "Page 2 of 7" while GitHub is asked whether it changed. The store is the backend's remembered answers, keyed by the request's path and query; the panel keeps no second copy.
+- **After a change,** every remembered answer is dropped, not only the affected ones. It is done in the backend's one `send` function, so no action can forget to do it. Signing out, and signing in again for a new scope, drop them too.
+- **Found on the way:** an answer for a page could arrive after the user had moved to another page or left the screen, and overwrite what was showing. Each page load now has a number, and only the latest one's answer is used.
+
+Not done:
+
+- **Sharing one request between two callers.** Two screens asking for the same thing at the same moment still send two requests. No screen in the panel does this today, so it was left until one does.
+- **Lists that are not paged** (repositories, organisations, packages, invitations, comments, alerts) still show a spinner on return. Their requests are free when nothing changed, but the rows are not shown early: several of these join more than one request, and showing rows from before for a different repository or issue is a worse fault than a short spinner.
+- **Expiry by time.** There is none, because a remembered answer is always checked with GitHub before it counts as the answer.
+
 ### Done when
 
 - Going back and forth between two screens makes no new full requests when nothing changed.
@@ -203,6 +217,8 @@ Run after every phase, in the app started with `./script/run-isolated.ps1`. It c
 | 11 | Clone a small repository | Progress streams; the folder exists afterwards |
 | 12 | Open Organizations and Invitations | Lists load |
 | 13 | Sign out | Back to the sign-in prompt |
+| 14 | Open Commits, go to page 2, back to page 1 | Page 1 appears at once, with a small spinner by the page number for a moment |
+| 15 | Look at the foot of the panel while moving between lists you have already seen | The count of requests left does not go down |
 
 Items 9 to 11 change real things on GitHub or on disk: use a scratch repository.
 

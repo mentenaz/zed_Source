@@ -194,6 +194,7 @@ impl HelmPanel {
                 // `repos_shown` is the page of what the search box leaves,
                 // worked out at the top of `render`.
                 is_empty: self.repos_shown.is_empty(),
+                refreshing: false,
                 pager: Some(Pager {
                     page: self.repos_page,
                     last_page: self.repos_last_page,

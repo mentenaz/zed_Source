@@ -14,19 +14,27 @@ impl HelmPanel {
 
     pub(super) fn load_issues_page(&mut self, page: u32, cx: &mut Context<Self>) {
         let filter = self.issues_filter.clone();
+        let remembered_filter = filter.clone();
+        // GitHub's issues endpoint returns pull requests too, and counts
+        // them in its pages. Leaving them out means a page can show fewer
+        // than ten rows while more pages follow.
+        fn without_pulls(mut issues: Page<Issue>) -> Page<Issue> {
+            issues.items.retain(|issue| issue.pull_request.is_none());
+            issues
+        }
         self.load_section_page(
             cx,
             |this| &mut this.issues,
             page,
+            move |repo, gh_state| {
+                let request =
+                    requests::issues(&repo.owner.login, &repo.name, &remembered_filter);
+                peek_page(gh_state, request, page, PAGE_SIZE).map(without_pulls)
+            },
             move |repo, gh_state| async move {
                 let request = requests::issues(&repo.owner.login, &repo.name, &filter);
-                let mut issues: Page<Issue> =
-                    fetch_page(&gh_state, request, page, PAGE_SIZE).await?;
-                // GitHub's issues endpoint returns pull requests too, and
-                // counts them in its pages. Leaving them out means a page
-                // can show fewer than ten rows while more pages follow.
-                issues.items.retain(|issue| issue.pull_request.is_none());
-                Ok::<_, GhError>(issues)
+                let issues = fetch_page(&gh_state, request, page, PAGE_SIZE).await?;
+                Ok::<_, GhError>(without_pulls(issues))
             },
         );
     }

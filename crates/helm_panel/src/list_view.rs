@@ -165,6 +165,8 @@ pub(super) struct ListStatus {
     pub(super) state: LoadState,
     pub(super) error: String,
     pub(super) is_empty: bool,
+    /// The rows are a remembered answer that is being checked.
+    pub(super) refreshing: bool,
     /// Set for a list shown a page at a time.
     pub(super) pager: Option<Pager>,
 }
@@ -184,6 +186,7 @@ impl<T> Section<T> {
             state: self.state,
             error: self.error.clone(),
             is_empty: self.items.is_empty(),
+            refreshing: self.refreshing,
             pager: None,
         }
     }
@@ -302,10 +305,16 @@ impl HelmPanel {
                     .border_t_1()
                     .border_color(border)
                     .child(
-                        div()
+                        h_flex()
+                            .gap_2()
+                            .items_center()
                             .text_xs()
                             .text_color(muted_foreground)
-                            .child(format!("Page {} of {}", pager.page, pager.last_page)),
+                            .child(format!("Page {} of {}", pager.page, pager.last_page))
+                            // The rows are remembered ones, being checked.
+                            .when(status.refreshing, |row| {
+                                row.child(Spinner::new().xsmall())
+                            }),
                     )
                     .child(
                         Pagination::new("helm-list-pager")
