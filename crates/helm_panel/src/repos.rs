@@ -217,48 +217,12 @@ impl HelmPanel {
                 .children(repo.topics.iter().map(|topic| chip(topic.clone())))
         });
 
-        let info_row = |label: &'static str, value: String| {
-            v_flex()
-                .gap_0p5()
-                .px_3()
-                .py_2()
-                .child(div().text_xs().text_color(muted_foreground).child(label))
-                .child(div().text_sm().text_color(foreground).child(value))
-        };
-
-        let description_row = info_row(
-            "Description",
-            repo.description.clone().unwrap_or_else(|| "—".to_string()),
-        );
-        let homepage_row = info_row(
-            "Homepage",
-            repo.homepage.clone().unwrap_or_else(|| "—".to_string()),
-        );
-
         let copied = self.clone_url_copied;
-        let clone_url_row = h_flex()
+        let clone_url = h_flex()
             .items_center()
             .justify_between()
             .gap_2()
-            .px_3()
-            .py_2()
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_foreground)
-                            .child("Clone URL"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(foreground)
-                            .child(repo.clone_url.clone()),
-                    ),
-            )
+            .child(div().min_w_0().truncate().child(repo.clone_url.clone()))
             .child(
                 Button::new("helm-repo-copy-clone-url")
                     .ghost()
@@ -270,7 +234,24 @@ impl HelmPanel {
                     })
                     .tooltip(if copied { "Copied" } else { "Copy clone URL" })
                     .on_click(cx.listener(|this, _, _, cx| this.handle_copy_clone_url(cx))),
-            );
+            )
+            .into_any_element();
+        let details = div().px_3().py_2().child(
+            DescriptionList::vertical()
+                .bordered(false)
+                .columns(1)
+                .item(
+                    "Description",
+                    repo.description.clone().unwrap_or_else(|| "—".to_string()),
+                    1,
+                )
+                .item(
+                    "Homepage",
+                    repo.homepage.clone().unwrap_or_else(|| "—".to_string()),
+                    1,
+                )
+                .item("Clone URL", clone_url, 1),
+        );
 
         let workspace_root = self
             .workspace
@@ -339,10 +320,7 @@ impl HelmPanel {
             .child(header_row)
             .child(Separator::horizontal())
             .children(topics_row)
-            .child(description_row)
-            .child(homepage_row)
-            .child(Separator::horizontal())
-            .child(clone_url_row)
+            .child(details)
             .child(clone_section)
             .child(Separator::horizontal())
             .child(

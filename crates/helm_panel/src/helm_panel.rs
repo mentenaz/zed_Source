@@ -35,17 +35,20 @@ use std::time::Duration;
 
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, MouseButton,
     ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, TaskExt, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
+    Subscription, Task, TaskExt, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable as _, StyledExt,
+    ActiveTheme, Disableable, Icon, IconName, Selectable as _, Sizable as _, StyledExt,
     alert::Alert,
     avatar::Avatar,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
+    description_list::{DescriptionItem, DescriptionList},
+    group_box::GroupBox,
     h_flex,
     input::{Input, InputEvent, InputState},
+    link::Link,
     list::ListItem,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
@@ -92,15 +95,7 @@ use workspace::{
 actions!(
     helm_panel,
     [
-        ToggleFocus,
-        /// Moves the selection down one row in whichever list (repos,
-        /// issues) currently has focus.
-        SelectNextRow,
-        /// Moves the selection up one row, same scope as `SelectNextRow`.
-        SelectPrevRow,
-        /// Opens the selected row — the keyboard equivalent of clicking it
-        /// (drills into the repo / opens the issue detail).
-        OpenSelectedRow
+        ToggleFocus
     ]
 );
 
@@ -112,19 +107,6 @@ pub fn init(cx: &mut App) {
     })
     .detach();
 
-    // Every list screen in Helm — repos, issues, and (not yet ported to
-    // this pattern) everything else — was mouse-only before this: no way to
-    // even reach a row without clicking it, let alone drill into one. Scoped
-    // to `HelmRowList` (each list container sets that key context), matching
-    // how `gpui_component::table::data_table` scopes its own row-navigation
-    // bindings to `DataTable`, and identically to
-    // `npm_manager_panel`/`nuget_manager_panel`/`python_manager_panel`'s own
-    // per-crate `PACKAGE_LIST_CONTEXT`.
-    cx.bind_keys([
-        KeyBinding::new("down", SelectNextRow, Some("HelmRowList")),
-        KeyBinding::new("up", SelectPrevRow, Some("HelmRowList")),
-        KeyBinding::new("enter", OpenSelectedRow, Some("HelmRowList")),
-    ]);
 }
 
 pub struct HelmPanel {
@@ -174,12 +156,9 @@ pub struct HelmPanel {
     /// [`Self::set_screen`] lands on a screen that isn't `OrgDetail`.
     selected_org: Option<String>,
     org_detail: Option<OrgDetail>,
-    /// Row `up`/`down`/`enter` act on, within the Profile screen's own nav
-    /// menu (Repositories/Organizations/Invitations/Account Security) —
-    /// built fresh each render, not a stored `Vec`, so this indexes
-    /// whatever `render_profile` computed that same pass.
-    profile_menu_cursor: Option<usize>,
-    profile_menu_focus: FocusHandle,
+    /// The main menu and the Profile screen's menu.
+    menu_list: ListView,
+    profile_menu_list: ListView,
 
     // Repos
     repos: Section<Repo>,
@@ -340,8 +319,8 @@ impl HelmPanel {
                 repo_invitation_count: 0,
                 selected_org: None,
                 org_detail: None,
-                profile_menu_cursor: None,
-                profile_menu_focus: cx.focus_handle(),
+                menu_list: lists::menu_list(window, cx),
+                profile_menu_list: lists::profile_menu_list(window, cx),
                 repos: Section::default(),
                 repos_shown: Vec::new(),
                 repos_page: 1,
@@ -651,31 +630,6 @@ mod tests {
         assert!(!HelmAction::CreateRepo { opts: json.clone() }.needs_repo());
         assert!(!HelmAction::UpdateProfile { changes: json }.needs_repo());
         assert!(!HelmAction::AcceptRepoInvitation(1).needs_repo());
-    }
-
-    #[test]
-    fn step_selected_starts_at_the_nearest_end() {
-        assert_eq!(step_selected(None, 3, true), Some(0));
-        assert_eq!(step_selected(None, 3, false), Some(2));
-    }
-
-    #[test]
-    fn step_selected_wraps_at_both_ends() {
-        assert_eq!(step_selected(Some(0), 3, true), Some(1));
-        assert_eq!(step_selected(Some(2), 3, true), Some(0));
-        assert_eq!(step_selected(Some(0), 3, false), Some(2));
-        assert_eq!(step_selected(Some(1), 3, false), Some(0));
-        assert_eq!(step_selected(Some(0), 1, true), Some(0));
-        assert_eq!(step_selected(Some(0), 1, false), Some(0));
-    }
-
-    #[test]
-    fn step_selected_handles_empty_and_shrunken_lists() {
-        assert_eq!(step_selected(None, 0, true), None);
-        assert_eq!(step_selected(Some(4), 0, false), None);
-        // A selection left over from a longer list still lands in range.
-        assert!(step_selected(Some(9), 3, true).is_some_and(|ix| ix < 3));
-        assert!(step_selected(Some(9), 3, false).is_some_and(|ix| ix < 3));
     }
 
     #[test]

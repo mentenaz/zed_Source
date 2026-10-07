@@ -176,7 +176,6 @@ impl HelmPanel {
     /// have their own block instead, with a close button.
     fn render_package_versions(&self, package: String, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
 
         let title = h_flex()
             .items_center()
@@ -229,32 +228,24 @@ impl HelmPanel {
                 )
                 .into_any_element()
         } else {
-            v_flex()
+            div()
                 .id("helm-package-versions")
                 // A package can have a long history; the list of packages
                 // below still needs room.
                 .max_h(px(180.))
                 .overflow_y_scroll()
-                .children(self.package_versions.iter().map(|version| {
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(foreground)
-                                .child(version.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(short_date(&version.created_at)),
-                        )
-                }))
+                .px_3()
+                .py_1()
+                .child(
+                    DescriptionList::horizontal()
+                        .bordered(false)
+                        .columns(1)
+                        .label_width(relative(0.6))
+                        .children(self.package_versions.iter().map(|version| {
+                            DescriptionItem::new(version.name.clone())
+                                .value(short_date(&version.created_at))
+                        })),
+                )
                 .into_any_element()
         };
 

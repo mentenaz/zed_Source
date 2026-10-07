@@ -85,24 +85,30 @@ impl HelmPanel {
         .detach();
     }
 
-    /// Small Open/Closed/All toggle for the Issues and Pulls screens — the
-    /// active state is a primary button, the others ghost.
-    pub(super) fn state_filter_button(
+    /// The Open / Closed / All switch of the Issues and Pulls screens.
+    /// `current` is the filter in force.
+    pub(super) fn state_filter(
         &self,
         id: &'static str,
-        label: &'static str,
-        filter: &'static str,
-        active: bool,
+        current: &str,
         screen: HelmScreen,
         cx: &mut Context<Self>,
-    ) -> Button {
-        Button::new(id)
+    ) -> ButtonGroup {
+        const FILTERS: [(&str, &str); 3] =
+            [("Open", "open"), ("Closed", "closed"), ("All", "all")];
+        ButtonGroup::new(id)
+            .outline()
+            .compact()
             .small()
-            .when(active, |b| b.primary())
-            .when(!active, |b| b.ghost())
-            .label(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_tab_filter(screen, filter, cx);
+            .children(FILTERS.iter().enumerate().map(|(ix, (label, filter))| {
+                Button::new(("helm-state-filter", ix))
+                    .label(*label)
+                    .selected(current == *filter)
+            }))
+            .on_click(cx.listener(move |this, clicked: &Vec<usize>, _, cx| {
+                if let Some((_, filter)) = clicked.first().and_then(|ix| FILTERS.get(*ix)) {
+                    this.set_tab_filter(screen, filter, cx);
+                }
             }))
     }
 
@@ -126,35 +132,12 @@ impl HelmPanel {
     /// (PRs filtered out), each row opening its page in the browser.
     pub(super) fn render_issues(&self, cx: &mut Context<Self>) -> impl IntoElement {
 
-        let filter_row = h_flex()
-            .items_center()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .child(self.state_filter_button(
-                "helm-issues-open",
-                "Open",
-                "open",
-                self.issues_filter == "open",
-                HelmScreen::Issues,
-                cx,
-            ))
-            .child(self.state_filter_button(
-                "helm-issues-closed",
-                "Closed",
-                "closed",
-                self.issues_filter == "closed",
-                HelmScreen::Issues,
-                cx,
-            ))
-            .child(self.state_filter_button(
-                "helm-issues-all",
-                "All",
-                "all",
-                self.issues_filter == "all",
-                HelmScreen::Issues,
-                cx,
-            ));
+        let filter_row = h_flex().items_center().px_3().py_2().child(self.state_filter(
+            "helm-issues-filter",
+            &self.issues_filter,
+            HelmScreen::Issues,
+            cx,
+        ));
 
         self.list_screen(
             self.issues

@@ -68,33 +68,12 @@ impl HelmPanel {
             .px_3()
             .py_2()
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(self.state_filter_button(
-                        "helm-pulls-open",
-                        "Open",
-                        "open",
-                        self.pulls_filter == "open",
-                        HelmScreen::Pulls,
-                        cx,
-                    ))
-                    .child(self.state_filter_button(
-                        "helm-pulls-closed",
-                        "Closed",
-                        "closed",
-                        self.pulls_filter == "closed",
-                        HelmScreen::Pulls,
-                        cx,
-                    ))
-                    .child(self.state_filter_button(
-                        "helm-pulls-all",
-                        "All",
-                        "all",
-                        self.pulls_filter == "all",
-                        HelmScreen::Pulls,
-                        cx,
-                    )),
+                self.state_filter(
+                    "helm-pulls-filter",
+                    &self.pulls_filter,
+                    HelmScreen::Pulls,
+                    cx,
+                ),
             )
             .child(
                 Button::new("pulls-create")

@@ -159,6 +159,24 @@ impl ListView {
     }
 }
 
+impl ListView {
+    /// The list, for a screen to place. It takes whatever height its parent
+    /// has left, and a click anywhere in it gives it the keyboard.
+    pub(super) fn element(&self) -> impl IntoElement + use<> {
+        let state = self.state.clone();
+        div()
+            // The list draws only the rows in view, so it needs a height
+            // to fill: `flex_1` takes what is left, `min_h_0` lets it be
+            // shorter than its content.
+            .flex_1()
+            .min_h_0()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                state.update(cx, |list, cx| list.focus(window, cx));
+            })
+            .child(List::new(&self.state))
+    }
+}
+
 /// What a list screen needs to know about its data to choose between the
 /// spinner, the error, the empty line and the rows.
 pub(super) struct ListStatus {
@@ -271,18 +289,7 @@ impl HelmPanel {
         } else if status.is_empty {
             centered().child(line(labels.empty)).into_any_element()
         } else {
-            let state = list.state.clone();
-            div()
-                // The list draws only the rows in view, so it needs a height
-                // to fill: `flex_1` takes what the header leaves, `min_h_0`
-                // lets it be shorter than its content.
-                .flex_1()
-                .min_h_0()
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    state.update(cx, |list, cx| list.focus(window, cx));
-                })
-                .child(List::new(&list.state))
-                .into_any_element()
+            list.element().into_any_element()
         };
 
         // Back and Next, for a list with more than one page. Shown while a

@@ -80,7 +80,6 @@ impl HelmPanel {
     /// data yet" state (views/clones are `None` for 202/404 repos).
     pub(super) fn render_traffic(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
 
         if self.load_state == LoadState::Loading {
             return loading_screen("Loading traffic…", cx);
@@ -122,131 +121,76 @@ impl HelmPanel {
                 .into_any_element();
         }
 
-        let views_total = traffic.views.as_ref().map(|v| (v.count, v.uniques));
-        let clones_total = traffic.clones.as_ref().map(|c| (c.count, c.uniques));
-
-        let totals_row = h_flex()
-            .items_center()
-            .gap_4()
-            .px_3()
-            .py_2()
-            .text_sm()
-            .text_color(muted_foreground)
-            .when_some(views_total, |row, (count, uniques)| {
-                row.child(format!(
-                    "Views {} · {} unique",
-                    fmt_num(count),
-                    fmt_num(uniques)
-                ))
-            })
-            .when_some(clones_total, |row, (count, uniques)| {
-                row.child(format!(
-                    "Clones {} · {} unique",
-                    fmt_num(count),
-                    fmt_num(uniques)
-                ))
-            });
-
-        let daily_label = |title: &str| {
-            div()
-                .px_3()
-                .pt_2()
-                .pb_1()
-                .text_xs()
-                .font_semibold()
-                .text_color(muted_foreground)
-                .child(title.to_string())
+        let counts = |count: u64, uniques: u64| {
+            format!("{} · {} unique", fmt_num(count), fmt_num(uniques))
+        };
+        let table = |id: &'static str, title: &'static str, rows: Vec<(String, String)>| {
+            GroupBox::new().id(id).title(title).child(
+                DescriptionList::horizontal()
+                    .columns(1)
+                    .small()
+                    .label_width(relative(0.6))
+                    .children(
+                        rows.into_iter()
+                            .map(|(label, value)| DescriptionItem::new(label).value(value)),
+                    ),
+            )
         };
 
-        let mut col = v_flex()
-            .child(totals_row)
-            .child(Separator::horizontal());
-
-        if let Some(views) = traffic.views.clone() {
-            col = col.child(daily_label("Views (last 7 days)")).child(
-                v_flex().children(
-                    views
-                        .views
-                        .iter()
-                        .rev()
-                        .skip(views.views.len().saturating_sub(7))
-                        .map(|day| {
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .px_3()
-                                .py_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(foreground)
-                                        .child(short_date(&day.timestamp)),
-                                )
-                                .child(div().text_xs().text_color(muted_foreground).child(format!(
-                                    "{} · {} unique",
-                                    fmt_num(day.count),
-                                    fmt_num(day.uniques)
-                                )))
-                        }),
-                ),
-            );
+        let mut totals = DescriptionList::vertical().bordered(false).columns(2);
+        if let Some(views) = &traffic.views {
+            totals = totals.item("Views", counts(views.count, views.uniques), 1);
+        }
+        if let Some(clones) = &traffic.clones {
+            totals = totals.item("Clones", counts(clones.count, clones.uniques), 1);
         }
 
+        let mut page = v_flex().gap_4().p_3().child(totals);
+        if let Some(views) = &traffic.views {
+            page = page.child(table(
+                "helm-traffic-views",
+                "Views (last 7 days)",
+                // Newest day first.
+                views
+                    .views
+                    .iter()
+                    .rev()
+                    .take(7)
+                    .map(|day| (short_date(&day.timestamp), counts(day.count, day.uniques)))
+                    .collect(),
+            ));
+        }
         if !traffic.referrers.is_empty() {
-            col = col
-                .child(daily_label("Top referrers"))
-                .child(
-                    v_flex().children(traffic.referrers.iter().take(10).map(|r| {
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .px_3()
-                            .py_1()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(foreground)
-                                    .child(r.referrer.clone()),
-                            )
-                            .child(div().text_xs().text_color(muted_foreground).child(format!(
-                                "{} · {} unique",
-                                fmt_num(r.count),
-                                fmt_num(r.uniques)
-                            )))
-                    })),
-                );
-        }
-
-        if !traffic.paths.is_empty() {
-            col = col.child(daily_label("Top paths")).child(v_flex().children(
-                traffic.paths.iter().take(10).map(|p| {
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .font_family("Cascadia Mono")
-                                .text_color(foreground)
-                                .child(p.path.clone()),
+            page = page.child(table(
+                "helm-traffic-referrers",
+                "Top referrers",
+                traffic
+                    .referrers
+                    .iter()
+                    .take(10)
+                    .map(|referrer| {
+                        (
+                            referrer.referrer.clone(),
+                            counts(referrer.count, referrer.uniques),
                         )
-                        .child(div().text_xs().text_color(muted_foreground).child(format!(
-                            "{} · {} unique",
-                            fmt_num(p.count),
-                            fmt_num(p.uniques)
-                        )))
-                }),
+                    })
+                    .collect(),
+            ));
+        }
+        if !traffic.paths.is_empty() {
+            page = page.child(table(
+                "helm-traffic-paths",
+                "Top paths",
+                traffic
+                    .paths
+                    .iter()
+                    .take(10)
+                    .map(|path| (path.path.clone(), counts(path.count, path.uniques)))
+                    .collect(),
             ));
         }
 
-        col.into_any_element()
+        page.into_any_element()
     }
 
     /// The Security screen — dependabot and secret-scanning alerts, in two

@@ -76,59 +76,54 @@ impl HelmPanel {
 
         let total_repos = org.public_repos + org.total_private_repos.unwrap_or(0);
 
-        let stats_row = h_flex()
-            .items_center()
-            .gap_4()
-            .px_3()
-            .py_2()
-            .text_sm()
-            .text_color(muted_foreground)
-            .child(format!("Repos {}", fmt_num(total_repos)))
-            .child(format!("Followers {}", fmt_num(org.followers)));
+        let stats = div().px_3().py_2().child(
+            DescriptionList::vertical()
+                .bordered(false)
+                .columns(2)
+                .item("Repositories", fmt_num(total_repos), 1)
+                .item("Followers", fmt_num(org.followers), 1),
+        );
 
-        let info_row = |icon: IconName, value: String| {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .text_sm()
-                .child(Icon::new(icon).xsmall().text_color(muted_foreground))
-                .child(div().flex_1().min_w_0().text_color(foreground).child(value))
+        let link = |id: &'static str, text: String, url: String| {
+            Link::new(id).href(url).child(text).into_any_element()
         };
-
-        let mut info_rows = v_flex();
+        let has_about = org.location.is_some()
+            || org.email.is_some()
+            || org.blog.is_some()
+            || org.twitter_username.is_some();
+        let mut about = DescriptionList::horizontal()
+            .bordered(false)
+            .columns(1)
+            .label_width(px(80.));
         if let Some(location) = org.location.clone() {
-            info_rows = info_rows.child(info_row(IconName::Globe, location));
+            about = about.item("Location", location, 1);
         }
         if let Some(email) = org.email.clone() {
-            info_rows = info_rows.child(info_row(IconName::Inbox, email));
+            about = about.item("Email", email, 1);
         }
         if let Some(blog) = org.blog.clone() {
-            let url = blog.clone();
-            info_rows = info_rows.child(
-                info_row(IconName::ExternalLink, blog)
-                    .id("helm-org-blog")
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            );
+            about = about.item("Website", link("helm-org-blog", blog.clone(), blog), 1);
         }
         if let Some(twitter) = org.twitter_username.clone() {
-            info_rows = info_rows.child(
-                info_row(IconName::ExternalLink, format!("@{twitter}"))
-                    .id("helm-org-twitter")
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| {
-                        cx.open_url(&format!("https://x.com/{twitter}"));
-                    }),
+            about = about.item(
+                "X",
+                link(
+                    "helm-org-twitter",
+                    format!("@{twitter}"),
+                    format!("https://x.com/{twitter}"),
+                ),
+                1,
             );
         }
 
         v_flex()
-            .child(stats_row)
+            .child(stats)
             .child(Separator::horizontal())
-            .child(info_rows)
-            .child(Separator::horizontal())
+            .when(has_about, |column| {
+                column
+                    .child(div().px_3().py_2().child(about))
+                    .child(Separator::horizontal())
+            })
             .child(
                 ListItem::new("helm-org-repositories")
                     .child(div().text_color(foreground).child("Repositories"))

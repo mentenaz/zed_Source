@@ -6,6 +6,38 @@
 
 use super::*;
 
+pub(super) fn menu_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
+    ListView::sectioned(
+        Vec::new(),
+        |panel, _| panel.menu_rows().len(),
+        |panel, ix, cx| Some(profile::menu_row(ix.row, panel.menu_rows().get(ix.row)?, cx)),
+        |this, ix, window, cx| {
+            if let Some(id) = this.menu_rows().get(ix.row).map(|row| row.id) {
+                this.open_menu_row(id, window, cx);
+            }
+        },
+        window,
+        cx,
+    )
+}
+
+pub(super) fn profile_menu_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
+    ListView::sectioned(
+        Vec::new(),
+        |panel, _| panel.profile_rows().len(),
+        |panel, ix, cx| {
+            Some(profile::profile_row(ix.row, panel.profile_rows().get(ix.row)?, cx))
+        },
+        |this, ix, window, cx| {
+            if let Some(id) = this.profile_rows().get(ix.row).map(|row| row.id) {
+                this.open_profile_row(id, window, cx);
+            }
+        },
+        window,
+        cx,
+    )
+}
+
 pub(super) fn org_logins_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.org_logins,

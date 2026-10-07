@@ -62,7 +62,6 @@ impl HelmPanel {
     /// informational for now.
     pub(super) fn render_profile(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
 
         let Some(user) = self.user.clone() else {
             return v_flex()
@@ -80,19 +79,31 @@ impl HelmPanel {
         };
 
         let total_repos = user.public_repos + user.total_private_repos.unwrap_or(0);
+        let stats = div().px_3().py_2().child(
+            DescriptionList::vertical()
+                .bordered(false)
+                .columns(3)
+                .item("Followers", fmt_num(user.followers), 1)
+                .item("Following", fmt_num(user.following), 1)
+                .item("Repositories", fmt_num(total_repos), 1),
+        );
 
-        let stats_row = h_flex()
-            .items_center()
-            .gap_4()
-            .px_3()
-            .py_2()
-            .text_sm()
-            .text_color(muted_foreground)
-            .child(format!("Followers {}", fmt_num(user.followers)))
-            .child(format!("Following {}", fmt_num(user.following)))
-            .child(format!("Repos {}", fmt_num(total_repos)));
+        v_flex()
+            .size_full()
+            .child(stats)
+            .child(Separator::horizontal())
+            .child(self.profile_menu_list.element())
+            .into_any_element()
+    }
 
-        let rows: Vec<NavRow> = [
+    /// The rows of the Profile screen's menu. Organizations and Invitations
+    /// are there only when there are some.
+    pub(super) fn profile_rows(&self) -> Vec<NavRow> {
+        let Some(user) = self.user.as_ref() else {
+            return Vec::new();
+        };
+        let total_repos = user.public_repos + user.total_private_repos.unwrap_or(0);
+        let mut rows = vec![
             NavRow {
                 id: "edit-profile",
                 label: "Edit Profile",
@@ -103,113 +114,43 @@ impl HelmPanel {
                 label: "Repositories",
                 hint: Some(total_repos.to_string()),
             },
-        ]
-        .into_iter()
-        .chain(if !self.org_logins.items.is_empty() {
-            Some(NavRow {
+        ];
+        if !self.org_logins.items.is_empty() {
+            rows.push(NavRow {
                 id: "orgs",
                 label: "Organizations",
                 hint: Some(self.org_logins.items.len().to_string()),
-            })
-        } else {
-            None
-        })
-        .chain(if self.repo_invitation_count > 0 {
-            Some(NavRow {
+            });
+        }
+        if self.repo_invitation_count > 0 {
+            rows.push(NavRow {
                 id: "invitations",
                 label: "Invitations",
                 hint: Some(self.repo_invitation_count.to_string()),
-            })
-        } else {
-            None
-        })
-        .chain([NavRow {
+            });
+        }
+        rows.push(NavRow {
             id: "account-security",
             label: "Account Security",
             hint: None,
-        }])
-        .collect();
+        });
+        rows
+    }
 
-        let len = rows.len();
-        let cursor = self.profile_menu_cursor;
-        let row_ids: Vec<&'static str> = rows.iter().map(|row| row.id).collect();
-        v_flex()
-            .child(stats_row)
-            .child(Separator::horizontal())
-            .child(
-                v_flex()
-                    .id("helm-profile-menu")
-                    .track_focus(&self.profile_menu_focus)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        window.focus(&this.profile_menu_focus, cx);
-                    }))
-                    .key_context("HelmRowList")
-                    .on_action(cx.listener(move |this, _: &SelectNextRow, _, cx| {
-                        this.profile_menu_cursor = step_selected(this.profile_menu_cursor, len, true);
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(move |this, _: &SelectPrevRow, _, cx| {
-                        this.profile_menu_cursor = step_selected(this.profile_menu_cursor, len, false);
-                        cx.notify();
-                    }))
-                    .on_action(cx.listener(move |this, _: &OpenSelectedRow, window, cx| {
-                        let Some(&id) = this.profile_menu_cursor.and_then(|ix| row_ids.get(ix)) else {
-                            return;
-                        };
-                        match id {
-                            "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
-                            "repos" => this.open_repo_list(cx),
-                            "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
-                            "edit-profile" => this.open_edit_profile_dialog(window, cx),
-                            "account-security" => {
-                                cx.open_url("https://github.com/settings/security")
-                            }
-                            _ => {}
-                        }
-                    }))
-                    .py_1()
-                    .children(rows.into_iter().enumerate().map(|(ix, row)| {
-                        let hint = row.hint;
-                        let id = row.id;
-                        ListItem::new(format!("helm-profile-{}", row.id))
-                            .selected(cursor == Some(ix))
-                            .child(div().text_color(foreground).child(row.label))
-                            .suffix(move |_, _| {
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .children(
-                                        hint.clone()
-                                            .map(|hint| div().text_color(muted_foreground).child(hint)),
-                                    )
-                                    .child(
-                                        Icon::new(IconName::ChevronRight)
-                                            .xsmall()
-                                            .text_color(muted_foreground),
-                                    )
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.profile_menu_cursor = Some(ix);
-                                match id {
-                                    "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
-                                    "repos" => this.open_repo_list(cx),
-                                    "invitations" => this.navigate_to(HelmScreen::Invitations, cx),
-                                    "edit-profile" => this.open_edit_profile_dialog(window, cx),
-                                    // No per-account security API is wired up
-                                    // (Dependabot/secret-scanning alerts,
-                                    // elsewhere in this panel, are
-                                    // repo-scoped, not account-scoped) —
-                                    // opens GitHub's own settings page
-                                    // instead of a dead click.
-                                    "account-security" => {
-                                        cx.open_url("https://github.com/settings/security")
-                                    }
-                                    _ => {}
-                                }
-                            }))
-                    })),
-            )
-            .into_any_element()
+    /// What a click or `enter` on a Profile menu row does.
+    pub(super) fn open_profile_row(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match id {
+            "orgs" => self.navigate_to(HelmScreen::OrgList, cx),
+            "repos" => self.open_repo_list(cx),
+            "invitations" => self.navigate_to(HelmScreen::Invitations, cx),
+            "edit-profile" => self.open_edit_profile_dialog(window, cx),
+            // No per-account security API is wired up (the Dependabot and
+            // secret-scanning alerts elsewhere in this panel belong to a
+            // repository, not an account), so this opens GitHub's own
+            // settings page instead of doing nothing.
+            "account-security" => cx.open_url("https://github.com/settings/security"),
+            _ => {}
+        }
     }
 
     /// The identity strip shown between the panel header and the current
@@ -291,8 +232,13 @@ impl HelmPanel {
     /// destination (Profile/OrgList/RepoList/Create Repository/Logout);
     /// Organizations only shows once real org data confirms the account
     /// actually belongs to any.
-    pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let items: Vec<MenuItem> = [
+    pub(super) fn render_menu(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().size_full().child(self.menu_list.element())
+    }
+
+    /// The main menu's rows.
+    pub(super) fn menu_rows(&self) -> Vec<MenuItem> {
+        [
             MenuItem {
                 id: "profile",
                 label: "View Profile",
@@ -321,38 +267,19 @@ impl HelmPanel {
         ]
         .into_iter()
         .filter(|item| item.id != "orgs" || !self.org_logins.items.is_empty())
-        .collect();
+        .collect()
+    }
 
-        let foreground = cx.theme().foreground;
-        let danger_color = cx.theme().danger;
-        let muted_foreground = cx.theme().muted_foreground;
-
-        v_flex()
-            .child(v_flex().py_1().children(items.into_iter().map(|item| {
-                let id = item.id;
-                let label_color = if item.danger {
-                    danger_color
-                } else {
-                    foreground
-                };
-
-                ListItem::new(id)
-                    .child(div().text_color(label_color).child(item.label))
-                    .suffix(move |_, _| {
-                        Icon::new(IconName::ChevronRight)
-                            .xsmall()
-                            .text_color(muted_foreground)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| match id {
-                        "logout" => this.handle_logout(cx),
-                        "profile" => this.navigate_to(HelmScreen::Profile, cx),
-                        "orgs" => this.navigate_to(HelmScreen::OrgList, cx),
-                        "repos" => this.open_repo_list(cx),
-                        "create" => this.open_create_repo_dialog(window, cx),
-                        _ => {}
-                    }))
-            })))
-            .into_any_element()
+    /// What a click or `enter` on a main menu row does.
+    pub(super) fn open_menu_row(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match id {
+            "logout" => self.handle_logout(cx),
+            "profile" => self.navigate_to(HelmScreen::Profile, cx),
+            "orgs" => self.navigate_to(HelmScreen::OrgList, cx),
+            "repos" => self.open_repo_list(cx),
+            "create" => self.open_create_repo_dialog(window, cx),
+            _ => {}
+        }
     }
 
     /// A public profile view for someone other than the signed-in user,
@@ -426,37 +353,70 @@ impl HelmPanel {
                 col.child(div().p_3().text_sm().text_color(foreground).child(bio))
             })
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_4()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(muted_foreground)
-                    .child(format!("Repos {}", fmt_num(user.public_repos)))
-                    .child(format!("Followers {}", fmt_num(user.followers)))
-                    .child(format!("Following {}", fmt_num(user.following))),
+                div().px_3().py_2().child(
+                    DescriptionList::vertical()
+                        .bordered(false)
+                        .columns(3)
+                        .item("Repositories", fmt_num(user.public_repos), 1)
+                        .item("Followers", fmt_num(user.followers), 1)
+                        .item("Following", fmt_num(user.following), 1),
+                ),
             )
-            .when_some(user.company.clone(), |col, company| {
-                col.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(format!("Company: {company}")),
-                )
-            })
-            .when_some(user.location.clone(), |col, location| {
-                col.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(format!("Location: {location}")),
-                )
+            .when(user.company.is_some() || user.location.is_some(), |column| {
+                let mut about = DescriptionList::horizontal()
+                    .bordered(false)
+                    .columns(1)
+                    .label_width(px(80.));
+                if let Some(company) = user.company.clone() {
+                    about = about.item("Company", company, 1);
+                }
+                if let Some(location) = user.location.clone() {
+                    about = about.item("Location", location, 1);
+                }
+                column
+                    .child(Separator::horizontal())
+                    .child(div().px_3().py_2().child(about))
             })
             .into_any_element()
     }
+}
+
+/// One row of the main menu. Logout is drawn in the danger colour.
+pub(super) fn menu_row(ix: usize, item: &MenuItem, cx: &App) -> ListItem {
+    let muted_foreground = cx.theme().muted_foreground;
+    let label_color = if item.danger {
+        cx.theme().danger
+    } else {
+        cx.theme().foreground
+    };
+    ListItem::new(("helm-menu", ix))
+        .child(div().text_color(label_color).child(item.label))
+        .suffix(move |_, _| {
+            Icon::new(IconName::ChevronRight)
+                .xsmall()
+                .text_color(muted_foreground)
+        })
+}
+
+/// One row of the Profile screen's menu, with its count when it has one.
+pub(super) fn profile_row(ix: usize, row: &NavRow, cx: &App) -> ListItem {
+    let muted_foreground = cx.theme().muted_foreground;
+    let foreground = cx.theme().foreground;
+    let hint = row.hint.clone();
+    ListItem::new(("helm-profile", ix))
+        .child(div().text_color(foreground).child(row.label))
+        .suffix(move |_, _| {
+            h_flex()
+                .items_center()
+                .gap_2()
+                .children(
+                    hint.clone()
+                        .map(|hint| div().text_color(muted_foreground).child(hint)),
+                )
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(muted_foreground),
+                )
+        })
 }
