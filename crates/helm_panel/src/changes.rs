@@ -1,0 +1,386 @@
+//! The changes Helm sends to GitHub. Every one is a `HelmAction` run through
+//! `HelmPanel::run_action`, so they share one failure path: a change rejected
+//! for a missing token scope sends the user to authorize it and is sent again.
+
+use super::*;
+
+/// A change Helm sends to GitHub on the user's behalf. Every mutating
+/// handler builds one of these and hands it to [`HelmPanel::run_action`], so
+/// they all share one failure path — including being sent through the auth
+/// gate and re-sent when the token turns out to lack a scope.
+#[derive(Clone)]
+pub(super) enum HelmAction {
+    CreateRepo {
+        opts: serde_json::Value,
+    },
+    EditRepo {
+        changes: serde_json::Value,
+        topics: Vec<String>,
+    },
+    CreatePull {
+        title: String,
+        body: String,
+        head: String,
+        base: String,
+    },
+    CreateRelease {
+        tag_name: String,
+        title: String,
+        body: String,
+        draft: bool,
+        prerelease: bool,
+    },
+    UpdateProfile {
+        changes: serde_json::Value,
+    },
+    AcceptRepoInvitation(u64),
+    DeclineRepoInvitation(u64),
+    AcceptOrgInvitation(String),
+    DeclineOrgInvitation(String),
+    SetCollaboratorPermission {
+        login: String,
+        permission: String,
+    },
+    RemoveCollaborator(String),
+}
+
+impl HelmAction {
+    /// The OAuth scope GitHub wants for this action — what the auth gate
+    /// asks for when the action is rejected and the token doesn't have it.
+    pub(super) fn required_scope(&self) -> &'static str {
+        match self {
+            HelmAction::UpdateProfile { .. } => "user",
+            HelmAction::AcceptOrgInvitation(_) | HelmAction::DeclineOrgInvitation(_) => {
+                "write:org"
+            }
+            _ => "repo",
+        }
+    }
+
+    /// Completes "Failed to …" in the failure notification.
+    pub(super) fn failure_label(&self) -> &'static str {
+        match self {
+            HelmAction::CreateRepo { .. } => "create repository",
+            HelmAction::EditRepo { .. } => "update repository",
+            HelmAction::CreatePull { .. } => "create pull request",
+            HelmAction::CreateRelease { .. } => "create release",
+            HelmAction::UpdateProfile { .. } => "update profile",
+            HelmAction::AcceptRepoInvitation(_) | HelmAction::AcceptOrgInvitation(_) => {
+                "accept invitation"
+            }
+            HelmAction::DeclineRepoInvitation(_) | HelmAction::DeclineOrgInvitation(_) => {
+                "decline invitation"
+            }
+            HelmAction::SetCollaboratorPermission { .. } => "update collaborator",
+            HelmAction::RemoveCollaborator(_) => "remove collaborator",
+        }
+    }
+
+    /// Whether this acts on `HelmPanel::selected_repo`.
+    pub(super) fn needs_repo(&self) -> bool {
+        matches!(
+            self,
+            HelmAction::EditRepo { .. }
+                | HelmAction::CreatePull { .. }
+                | HelmAction::CreateRelease { .. }
+                | HelmAction::SetCollaboratorPermission { .. }
+                | HelmAction::RemoveCollaborator(_)
+        )
+    }
+
+    /// Makes the API call(s). Returns the resulting repository for the two
+    /// actions that produce one (create and edit), `None` otherwise.
+    pub(super) async fn perform(self, repo: Option<Repo>, gh_state: &GhState) -> Result<Option<Repo>, String> {
+        let selected = || repo.clone().ok_or_else(|| "No repository selected".to_string());
+        match self {
+            HelmAction::CreateRepo { opts } => gh_create_repo(opts, gh_state).await.map(Some),
+            HelmAction::EditRepo { changes, topics } => {
+                let repo = selected()?;
+                let owner = repo.owner.login;
+                let updated = gh_update_repo(owner.clone(), repo.name, changes, gh_state).await?;
+                // The topics endpoint 404s on a pre-rename name, so it has to
+                // use the name from the PATCH response.
+                gh_update_topics(owner, updated.name.clone(), topics, gh_state).await?;
+                Ok(Some(updated))
+            }
+            HelmAction::CreatePull {
+                title,
+                body,
+                head,
+                base,
+            } => {
+                let repo = selected()?;
+                gh_create_pull(
+                    repo.owner.login,
+                    repo.name,
+                    head,
+                    base,
+                    title,
+                    (!body.is_empty()).then_some(body),
+                    gh_state,
+                )
+                .await
+                .map(|_| None)
+            }
+            HelmAction::CreateRelease {
+                tag_name,
+                title,
+                body,
+                draft,
+                prerelease,
+            } => {
+                let repo = selected()?;
+                gh_create_release(
+                    repo.owner.login,
+                    repo.name,
+                    tag_name,
+                    (!title.is_empty()).then_some(title),
+                    (!body.is_empty()).then_some(body),
+                    Some(draft),
+                    Some(prerelease),
+                    gh_state,
+                )
+                .await
+                .map(|_| None)
+            }
+            HelmAction::UpdateProfile { changes } => {
+                gh_update_user(changes, gh_state).await.map(|_| None)
+            }
+            HelmAction::AcceptRepoInvitation(id) => {
+                gh_accept_repo_invitation(id, gh_state).await.map(|_| None)
+            }
+            HelmAction::DeclineRepoInvitation(id) => {
+                gh_decline_repo_invitation(id, gh_state).await.map(|_| None)
+            }
+            HelmAction::AcceptOrgInvitation(org) => {
+                gh_accept_org_invitation(org, gh_state).await.map(|_| None)
+            }
+            HelmAction::DeclineOrgInvitation(org) => {
+                gh_decline_org_invitation(org, gh_state).await.map(|_| None)
+            }
+            HelmAction::SetCollaboratorPermission { login, permission } => {
+                let repo = selected()?;
+                gh_add_collaborator(repo.owner.login, repo.name, login, permission, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+            HelmAction::RemoveCollaborator(login) => {
+                let repo = selected()?;
+                gh_remove_collaborator(repo.owner.login, repo.name, login, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+        }
+    }
+}
+
+/// An action GitHub rejected because the token lacked a scope, kept so it
+/// can be re-sent once the auth gate has granted it.
+pub(super) struct PendingAction {
+    pub(super) action: HelmAction,
+    /// Where the user was when the action failed, restored after re-auth
+    /// (which otherwise always lands on the menu).
+    pub(super) resume_screen: HelmScreen,
+}
+
+/// What `gh auth status` says about the token after a permission-shaped API
+/// failure — decides whether re-authorizing could fix it at all.
+pub(super) enum TokenScopeCheck {
+    /// The token has the scope; the failure is about the account's rights
+    /// (or org policy), which re-auth can't change.
+    HasScope,
+    MissingScope,
+    NotLoggedIn,
+}
+
+/// The `error_msg` that puts the auth screen into its "authorize this scope"
+/// state. One function so the code that sets it and `render_auth`'s check
+/// for it can't drift apart.
+pub(super) fn missing_scope_message(scope: &str) -> String {
+    format!("Missing '{scope}' scope.")
+}
+
+/// Whether a `gh_api_fetch` error is one a missing scope produces. GitHub
+/// answers 403 for an insufficient scope, 404 when the scope is so
+/// insufficient the resource isn't visible to the token at all, and 401 for
+/// a token it no longer accepts.
+pub(super) fn is_permission_error(error: &str) -> bool {
+    ["GitHub API 401", "GitHub API 403", "GitHub API 404"]
+        .iter()
+        .any(|prefix| error.starts_with(prefix))
+}
+
+/// Whether a token carrying `granted` satisfies `needed`, counting the one
+/// parent scope that implies it (`admin:org` includes `write:org`).
+pub(super) fn token_has_scope(granted: &[String], needed: &str) -> bool {
+    granted.iter().any(|scope| {
+        scope == needed || (needed == "write:org" && scope == "admin:org")
+    })
+}
+
+impl HelmPanel {
+    /// Sends `action` to GitHub and applies its result to the panel.
+    ///
+    /// When GitHub rejects it with a permission-shaped error and
+    /// `may_reauthorize` is set, `gh auth status` is consulted to tell a
+    /// token that lacks the action's scope apart from an account that simply
+    /// lacks the rights. Only the former is sent to the auth gate (with the
+    /// action parked in `pending_action` for `do_auth` to re-send) —
+    /// re-authorizing can't fix the latter, so that just reports the
+    /// failure.
+    pub(super) fn run_action(&mut self, action: HelmAction, may_reauthorize: bool, cx: &mut Context<Self>) {
+        let repo = self.selected_repo.clone();
+        if action.needs_repo() && repo.is_none() {
+            return;
+        }
+        let scope = action.required_scope();
+        let performed = action.clone();
+
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let (result, scope_check) = on_tokio(async move {
+                let result = performed.perform(repo, &gh_state).await;
+                let scope_check = match &result {
+                    Err(error) if may_reauthorize && is_permission_error(error) => {
+                        match gh_auth_status().await {
+                            Ok(Some(info)) if token_has_scope(&info.scopes, scope) => {
+                                TokenScopeCheck::HasScope
+                            }
+                            Ok(Some(_)) => TokenScopeCheck::MissingScope,
+                            Ok(None) => TokenScopeCheck::NotLoggedIn,
+                            // Couldn't ask `gh`; fall through to reporting
+                            // the original failure rather than guessing.
+                            Err(_) => TokenScopeCheck::HasScope,
+                        }
+                    }
+                    _ => TokenScopeCheck::HasScope,
+                };
+                (result, scope_check)
+            })
+            .await;
+            this.update(cx, |this, cx| match (result, scope_check) {
+                (Ok(repo), _) => {
+                    this.action_succeeded(&action, repo, cx);
+                    this.action_settled(&action, cx);
+                }
+                (Err(error), TokenScopeCheck::HasScope) => {
+                    this.notify(format!("Failed to {}: {error}", action.failure_label()), cx);
+                    this.action_settled(&action, cx);
+                }
+                (Err(_), TokenScopeCheck::MissingScope) => {
+                    this.notify(
+                        format!(
+                            "GitHub rejected the request: your login is missing the '{scope}' \
+                             scope. Authorize it and Helm will try again."
+                        ),
+                        cx,
+                    );
+                    this.pending_action = Some(PendingAction {
+                        action,
+                        resume_screen: this.screen,
+                    });
+                    // The same state `do_auth` leaves behind for a token
+                    // without `repo`, so `render_auth` shows its "Authorize"
+                    // prompt — for this action's scope.
+                    this.screen = HelmScreen::Auth;
+                    this.login_started = false;
+                    this.load_state = LoadState::Idle;
+                    this.scope_to_authorize = scope;
+                    this.error_msg = missing_scope_message(scope);
+                    cx.notify();
+                }
+                (Err(_), TokenScopeCheck::NotLoggedIn) => {
+                    this.notify(
+                        "GitHub rejected the request: you are no longer signed in. \
+                         Sign in and Helm will try again.",
+                        cx,
+                    );
+                    this.pending_action = Some(PendingAction {
+                        action,
+                        resume_screen: this.screen,
+                    });
+                    this.login_started = false;
+                    // Re-runs the status check, which lands on the login
+                    // prompt.
+                    this.do_auth(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Applies a successful action to panel state. `repo` is the repository
+    /// GitHub returned, for the actions that return one.
+    pub(super) fn action_succeeded(&mut self, action: &HelmAction, repo: Option<Repo>, cx: &mut Context<Self>) {
+        match action {
+            HelmAction::CreateRepo { .. } => {
+                if let Some(repo) = repo {
+                    self.repos.push(repo.clone());
+                    self.select_repo(repo, cx);
+                }
+            }
+            HelmAction::EditRepo { .. } => {
+                if let Some(updated) = repo {
+                    if let Some(existing) = self.repos.iter_mut().find(|r| r.id == updated.id) {
+                        *existing = updated.clone();
+                    }
+                    self.selected_repo = Some(updated);
+                }
+            }
+            HelmAction::UpdateProfile { .. } => {
+                self.notify("Profile updated", cx);
+                let gh_state = self.gh_state.clone();
+                cx.spawn(async move |this, cx| {
+                    let updated = on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
+                    this.update(cx, |this, cx| {
+                        if let Ok(user) = updated {
+                            this.user = Some(user);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            HelmAction::AcceptRepoInvitation(id) => {
+                self.invitations.retain(|inv| inv.id != *id);
+                self.notify("Invitation accepted", cx);
+            }
+            HelmAction::DeclineRepoInvitation(id) => {
+                self.invitations.retain(|inv| inv.id != *id);
+                self.notify("Invitation declined", cx);
+            }
+            HelmAction::AcceptOrgInvitation(org) => {
+                self.org_invitations
+                    .retain(|inv| &inv.organization.login != org);
+                self.notify("Invitation accepted", cx);
+            }
+            HelmAction::DeclineOrgInvitation(org) => {
+                self.org_invitations
+                    .retain(|inv| &inv.organization.login != org);
+                self.notify("Invitation declined", cx);
+            }
+            HelmAction::CreatePull { .. }
+            | HelmAction::CreateRelease { .. }
+            | HelmAction::SetCollaboratorPermission { .. }
+            | HelmAction::RemoveCollaborator(_) => {}
+        }
+        self.repo_invitation_count = self.invitations.len() + self.org_invitations.len();
+        cx.notify();
+    }
+
+    /// Runs once an action has finished either way (but not when it was
+    /// parked for re-auth): reloads the list the action edits, so the UI
+    /// reflects what GitHub actually has rather than what was attempted.
+    pub(super) fn action_settled(&mut self, action: &HelmAction, cx: &mut Context<Self>) {
+        match action {
+            HelmAction::CreatePull { .. } => self.load_pulls(cx),
+            HelmAction::CreateRelease { .. } => self.load_releases(cx),
+            HelmAction::SetCollaboratorPermission { .. } | HelmAction::RemoveCollaborator(_) => {
+                self.load_collaborators(cx)
+            }
+            _ => {}
+        }
+    }
+}
