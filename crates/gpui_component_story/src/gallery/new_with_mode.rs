@@ -1,4 +1,3 @@
-use gpui::{prelude::*, *};
 use gpui_component::input::{InputEvent, InputState};
 
 use crate::*;

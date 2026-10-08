@@ -2,7 +2,6 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    highlighter::Language,
     input::{Editor, EditorState, TabSize},
     resizable::h_resizable,
     status_bar::StatusBar,
@@ -24,7 +23,7 @@ impl Example {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             EditorState::new(window, cx)
-                .language(Language::Html)
+                .language("html")
                 .tab_size(TabSize {
                     tab_size: 4,
                     hard_tabs: false,

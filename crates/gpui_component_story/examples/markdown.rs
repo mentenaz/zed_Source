@@ -14,7 +14,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     clipboard::Clipboard,
     h_flex,
-    highlighter::Language,
     input::{
         DocumentRangeSemanticTokensProvider, Editor, EditorState, InputEvent, Rope, RopeExt,
         TabSize,
@@ -30,7 +29,7 @@ use gpui_component::{
 };
 use gpui_component_assets::Assets;
 use gpui_component_story::Open;
-use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensLegend};
+use lsp_types::{SemanticTokenType, SemanticTokens, SemanticTokensLegend};
 use regex::{Captures, Regex};
 
 /// Markers, each mapped to a different `HighlightTheme` token-type name so
@@ -1124,7 +1123,7 @@ impl DocumentRangeSemanticTokensProvider for MarkerHighlighter {
 
         // Delta-encode into LSP semantic tokens — the exact format a real
         // language server returns from `textDocument/semanticTokens/range`.
-        let mut data = Vec::with_capacity(hits.len());
+        let mut data = Vec::with_capacity(hits.len() * 5);
         let (mut prev_line, mut prev_char) = (0u32, 0u32);
         for (line, character, length, token_type) in hits {
             let delta_line = line - prev_line;
@@ -1133,13 +1132,9 @@ impl DocumentRangeSemanticTokensProvider for MarkerHighlighter {
             } else {
                 character
             };
-            data.push(SemanticToken {
-                delta_line,
-                delta_start,
-                length,
-                token_type,
-                token_modifiers_bitset: 0,
-            });
+            // Five numbers a token: line and start relative to the token
+            // before, length, type, and modifiers (none).
+            data.extend([delta_line, delta_start, length, token_type, 0]);
             prev_line = line;
             prev_char = character;
         }
@@ -1168,7 +1163,7 @@ impl Example {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             EditorState::new(window, cx)
-                .language(Language::Markdown)
+                .language("markdown")
                 .line_number(true)
                 .tab_size(TabSize {
                     tab_size: 2,
