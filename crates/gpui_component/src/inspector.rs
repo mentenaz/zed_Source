@@ -638,7 +638,7 @@ impl CompletionProvider for LspProvider {
 mod tests {
     use gpui::{AbsoluteLength, DefiniteLength, Length, rems};
     use indoc::indoc;
-    use lsp_types::Position;
+    use lsp_types::{DiagnosticMessage, Position};
 
     #[test]
     fn test_rust_to_style() {
@@ -679,10 +679,16 @@ mod tests {
         );
 
         assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].message, "unknown method `unknown_method`");
+        assert_eq!(
+            diagnostics[0].message,
+            DiagnosticMessage::String("unknown method `unknown_method`".into())
+        );
         assert_eq!(diagnostics[0].range.start, Position::new(4, 9));
         assert_eq!(diagnostics[0].range.end, Position::new(4, 23));
-        assert_eq!(diagnostics[1].message, "unknown method `bad_method`");
+        assert_eq!(
+            diagnostics[1].message,
+            DiagnosticMessage::String("unknown method `bad_method`".into())
+        );
         assert_eq!(diagnostics[1].range.start, Position::new(5, 9));
         assert_eq!(diagnostics[1].range.end, Position::new(5, 19));
     }
