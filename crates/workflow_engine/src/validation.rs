@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn issues_inside_foreach_body_carry_prefixed_paths() {
-        let mut inner = Action::new("http");
+        let inner = Action::new("http");
         // Missing required "method" and "url"
         let mut outer = Action::new("Foreach");
         outer.foreach = Some(json!({"var": "items"}));

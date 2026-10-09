@@ -11,7 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-chrono.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 datalogic-rs.workspace = true
 futures.workspace = true
 indexmap.workspace = true
@@ -21,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "net", "sync", "time", "rt", "rt-multi-thread"] }
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 which.workspace = true
 
 # Only the Windows branch of `executors::resolve_bash` needs Zed's Git Bash
