@@ -126,8 +126,12 @@ fn main() {
                 Ok(output) if output.status.success() => {
                     println!("Downloaded conpty nupkg successfully");
 
+                    // `Expand-Archive` lives in a module that Windows PowerShell fails to load
+                    // when the build is started from PowerShell 7, so unzip with .NET directly.
+                    // `ExtractToDirectory` refuses to overwrite, hence the removal first.
+                    let _ = std::fs::remove_dir_all(&extract_dir);
                     let extract_script = format!(
-                        "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                        "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('{}', '{}')",
                         nupkg_path.display(),
                         extract_dir.display()
                     );
