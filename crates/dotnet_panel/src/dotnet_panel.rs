@@ -71,6 +71,21 @@ fn path_file_name(dir: &str) -> String {
         .unwrap_or_else(|| dir.to_string())
 }
 
+/// Files that mark a `.NET` project: a change to either can mean a project
+/// was added or removed, so the Projects list is re-scanned for one.
+fn is_dotnet_project_file(name: &str) -> bool {
+    name.ends_with(".csproj") || name.ends_with(".sln")
+}
+
+/// Files the panel derives package data from for the active project: the
+/// project file itself, or a NuGet manifest next to it. A change to any of
+/// these means the installed/outdated/vulnerable lists are stale.
+fn is_dotnet_package_manifest(name: &str) -> bool {
+    is_dotnet_project_file(name)
+        || name.eq_ignore_ascii_case("packages.config")
+        || name.eq_ignore_ascii_case("Directory.Packages.props")
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /// One dotnet-related process row — a process whose name contains "dotnet"
@@ -160,6 +175,16 @@ pub struct DotNetPanel {
     /// manager's §4.2 wiring).
     run_subscription: Option<Subscription>,
 
+    /// Debounces the filesystem-watcher rescan: replaced on every relevant
+    /// `WorktreeUpdatedEntries` event, so a burst of updates collapses into a
+    /// single `scan_projects` run once it goes quiet. Held only for its `Drop`
+    /// (replacing it cancels the pending run).
+    _rescan_task: Option<gpui::Task<()>>,
+
+    /// Same debounce, but for reloading the active project's package data when
+    /// its project file/manifest changes on disk.
+    _data_reload_task: Option<gpui::Task<()>>,
+
     _procs_poll: gpui::Task<()>,
 }
 
@@ -203,9 +228,47 @@ impl DotNetPanel {
                 .unwrap_or_default()
         });
 
+        // The live worktrees watch the filesystem (the same machinery the
+        // project panel relies on); subscribing here lets `scan_projects`
+        // rerun when a new `.csproj`/`.sln` appears, instead of only once at
+        // startup.
+        let project = _workspace.project().clone();
+
         let workspace = cx.entity().downgrade();
 
         cx.new(|cx| {
+            cx.subscribe(&project, |this: &mut DotNetPanel, _project, event, cx| {
+                if let project::Event::WorktreeUpdatedEntries(_, entries) = event {
+                    let mut project_file_touched = false;
+                    let mut selected_manifest_touched = false;
+                    for (path, _, _) in entries.iter() {
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
+                        if is_dotnet_project_file(name) {
+                            project_file_touched = true;
+                        }
+                        if is_dotnet_package_manifest(name)
+                            && this.manifest_change_is_selected(path.as_unix_str())
+                        {
+                            selected_manifest_touched = true;
+                        }
+                    }
+                    // A new/removed project file can mean a new project, so the
+                    // Projects list is always re-scanned for one.
+                    if project_file_touched {
+                        this.schedule_project_rescan(cx);
+                    }
+                    // Packages only change the *active* project's data, so only
+                    // reload that one (avoids re-running the `dotnet list
+                    // package` probes for unrelated edits elsewhere).
+                    if selected_manifest_touched {
+                        this.schedule_data_reload(cx);
+                    }
+                }
+            })
+            .detach();
+
             let mut open = HashMap::new();
             // Keep all sections open by default
             open.insert("Projects".to_string(), true);
@@ -233,6 +296,8 @@ impl DotNetPanel {
                 dotnet_procs: Vec::new(),
                 open,
                 run_subscription: None,
+                _rescan_task: None,
+                _data_reload_task: None,
                 _procs_poll: Self::spawn_processes_poll(cx),
             };
 
@@ -324,10 +389,20 @@ impl DotNetPanel {
                     let _ = panel.update(app, |panel, cx| {
                         panel.scanning = false;
                         panel.projects = projects;
-                        if panel.selected_project.is_none() {
+                        // Keep the current selection across rescans; only
+                        // (re)select when it's empty or the project it pointed
+                        // at disappeared (e.g. a scaffold removed it).
+                        let selection_still_exists = panel
+                            .selected_project
+                            .as_ref()
+                            .is_some_and(|selected| {
+                                panel.projects.iter().any(|p| &p.path == selected)
+                            });
+                        if !selection_still_exists {
                             if let Some(first) = panel.projects.first().cloned() {
                                 panel.select_project(first.path, cx);
                             } else {
+                                panel.selected_project = None;
                                 panel.csproj = None;
                                 panel.reload_data(cx);
                             }
@@ -425,6 +500,70 @@ impl DotNetPanel {
             });
         })
         .detach();
+    }
+
+    /// Coalesces the burst of `WorktreeUpdatedEntries` events a scaffold
+    /// produces into one rescan: each call replaces (and so cancels) the
+    /// pending task, and the last one to survive the debounce reruns
+    /// `scan_projects`.
+    fn schedule_project_rescan(&mut self, cx: &mut Context<Self>) {
+        self._rescan_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = cx.update(|app| {
+                if let Some(panel) = this.upgrade() {
+                    let _ = panel.update(app, |panel, cx| {
+                        panel.scan_projects(cx);
+                    });
+                }
+            });
+        }));
+    }
+
+    /// Whether a changed worktree-relative path (`/`-separated) is the active
+    /// project's own project file or a NuGet manifest sitting next to it —
+    /// i.e. it belongs to the resolved csproj, not some other project under
+    /// the same workspace.
+    fn manifest_change_is_selected(&self, rel_unix: &str) -> bool {
+        let Some(csproj) = self.csproj.as_deref() else {
+            return false;
+        };
+        let root = self.cwd.replace('\\', "/");
+        let changed = format!("{}/{}", root.trim_end_matches('/'), rel_unix);
+        let Some((changed_dir, changed_name)) = changed.rsplit_once('/') else {
+            return false;
+        };
+        let csproj_unix = csproj.replace('\\', "/");
+        let Some((csproj_dir, _)) = csproj_unix.rsplit_once('/') else {
+            return false;
+        };
+        changed_dir == csproj_dir && is_dotnet_package_manifest(changed_name)
+    }
+
+    /// Reloads the active project's installed/outdated/vulnerable package
+    /// lists after its project file or a package manifest changed on disk —
+    /// an install/remove/update run outside the panel (terminal,
+    /// `nuget_manager_panel`, `dotnet` CLI), or a hand edit. Debounced like
+    /// `schedule_project_rescan`, and skipped while a quick action is
+    /// streaming so it can't race that run's own reload.
+    fn schedule_data_reload(&mut self, cx: &mut Context<Self>) {
+        self._data_reload_task =
+            Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let _ = cx.update(|app| {
+                    if let Some(panel) = this.upgrade() {
+                        let _ = panel.update(app, |panel, cx| {
+                            if panel.running_action.is_some() {
+                                return;
+                            }
+                            panel.reload_data(cx);
+                        });
+                    }
+                });
+            }));
     }
 
     /// The live Script Runner dock panel for this workspace, if it's been
@@ -1512,5 +1651,17 @@ mod tests {
     fn update_all_runs_nothing_if_any_entry_is_unsafe() {
         let list = [outdated("Dapper", "2.1.0", "2.1.35"), outdated("Bad && calc", "1.0.0", "1.0.1")];
         assert!(update_all_command(&list, "minor").is_err());
+    }
+
+    #[test]
+    fn dotnet_manifest_files_are_recognized() {
+        assert!(is_dotnet_project_file("App.csproj"));
+        assert!(is_dotnet_project_file("Everything.sln"));
+        assert!(!is_dotnet_project_file("App.fsproj"));
+        assert!(is_dotnet_package_manifest("App.csproj"));
+        assert!(is_dotnet_package_manifest("packages.config"));
+        assert!(is_dotnet_package_manifest("Directory.Packages.props"));
+        assert!(!is_dotnet_package_manifest("Program.cs"));
+        assert!(!is_dotnet_package_manifest("App.csproj.bak"));
     }
 }

@@ -251,6 +251,16 @@ pub struct NodePanel {
 
     view_pkg: Option<PackageJsonView>,
 
+    /// Debounces the filesystem-watcher rescan: replaced on every relevant
+    /// `WorktreeUpdatedEntries` event, so a burst of updates collapses into a
+    /// single `scan_projects` run once it goes quiet. Held only for its `Drop`
+    /// (replacing it cancels the pending run).
+    _rescan_task: Option<gpui::Task<()>>,
+
+    /// Same debounce, but for reloading the selected project's scripts and
+    /// package data when its `package.json`/lockfile changes on disk.
+    _data_reload_task: Option<gpui::Task<()>>,
+
     _procs_poll: gpui::Task<()>,
 }
 
@@ -296,6 +306,32 @@ fn path_file_name(dir: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| dir.to_string())
+}
+
+/// Files the panel derives package/script data from. A change to any of these
+/// means the selected project's data is stale. `package.json` is included even
+/// though the project scan also watches for it, since scripts live there too.
+fn is_node_manifest_file(name: &str) -> bool {
+    matches!(
+        name,
+        "package.json"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+    )
+}
+
+/// Whether a changed worktree-relative path (`/`-separated, relative to the
+/// scan root `cwd`) sits directly in `selected` — i.e. it is that project's
+/// own `package.json`/lockfile, not some other project's under the same
+/// workspace. Separators in `cwd`/`selected` may be either style.
+fn manifest_change_is_in_project(cwd: &str, selected: &str, rel_unix: &str) -> bool {
+    let root = cwd.replace('\\', "/");
+    let changed = format!("{}/{}", root.trim_end_matches('/'), rel_unix);
+    changed
+        .rsplit_once('/')
+        .is_some_and(|(dir, _)| dir == selected.replace('\\', "/").trim_end_matches('/'))
 }
 
 impl NodePanel {
@@ -395,10 +431,46 @@ impl NodePanel {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         });
+        // The live worktrees watch the filesystem (same machinery the project
+        // panel relies on); subscribing here lets `scan_projects` rerun when a
+        // new `package.json` appears, instead of only once at startup.
+        let project = _workspace.project().clone();
 
         let workspace = cx.entity().downgrade();
 
         cx.new(|cx| {
+            cx.subscribe(&project, |this: &mut NodePanel, _project, event, cx| {
+                if let project::Event::WorktreeUpdatedEntries(_, entries) = event {
+                    let mut package_json_touched = false;
+                    let mut selected_manifest_touched = false;
+                    for (path, _, _) in entries.iter() {
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
+                        if name == "package.json" {
+                            package_json_touched = true;
+                        }
+                        if is_node_manifest_file(name)
+                            && this.manifest_change_is_selected(path.as_unix_str())
+                        {
+                            selected_manifest_touched = true;
+                        }
+                    }
+                    // A new/removed `package.json` can mean a new project, so
+                    // the Projects list is always re-scanned for one.
+                    if package_json_touched {
+                        this.schedule_project_rescan(cx);
+                    }
+                    // Dependencies/scripts only change the *selected* project's
+                    // data, so only reload that one (avoids re-running the
+                    // network-bound audit for unrelated edits elsewhere).
+                    if selected_manifest_touched {
+                        this.schedule_data_reload(cx);
+                    }
+                }
+            })
+            .detach();
+
             let mut open = HashMap::new();
             // Keep all sections open by default
             open.insert("NVM".to_string(), true);
@@ -447,6 +519,8 @@ impl NodePanel {
                 sppkg_files: Vec::new(),
                 open,
                 view_pkg: None,
+                _rescan_task: None,
+                _data_reload_task: None,
                 _procs_poll: Self::spawn_processes_poll(cx),
             };
 
@@ -631,9 +705,27 @@ impl NodePanel {
                     let _ = panel.update(app, |panel, cx| {
                         panel.scanning = false;
                         panel.projects = projects;
-                        if panel.selected_project.is_none() {
-                            if let Some(first) = panel.projects.first().cloned() {
-                                panel.select_project(first.path, cx);
+                        // Keep the current selection across rescans; only
+                        // (re)select when it's empty or the project it pointed
+                        // at disappeared (e.g. a scaffold removed it).
+                        let selection_still_exists = panel
+                            .selected_project
+                            .as_ref()
+                            .is_some_and(|selected| {
+                                panel.projects.iter().any(|p| &p.path == selected)
+                            });
+                        if !selection_still_exists {
+                            match panel.projects.first().cloned() {
+                                Some(first) => panel.select_project(first.path, cx),
+                                None => {
+                                    panel.selected_project = None;
+                                    panel.scripts = None;
+                                    panel.installed_pkgs = Vec::new();
+                                    panel.outdated = PackagesState::Ready(Vec::new());
+                                    panel.vulnerable = PackagesState::Ready(Vec::new());
+                                    panel.spfx = SpfxInfo::default();
+                                    panel.sppkg_files = Vec::new();
+                                }
                             }
                         }
                         cx.notify();
@@ -642,6 +734,61 @@ impl NodePanel {
             });
         })
         .detach();
+    }
+
+    /// Coalesces the burst of `WorktreeUpdatedEntries` events a scaffold
+    /// produces into one rescan: each call replaces (and so cancels) the
+    /// pending task, and the last one to survive the debounce reruns
+    /// `scan_projects`.
+    fn schedule_project_rescan(&mut self, cx: &mut Context<Self>) {
+        self._rescan_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = cx.update(|app| {
+                if let Some(panel) = this.upgrade() {
+                    let _ = panel.update(app, |panel, cx| {
+                        panel.scan_projects(cx);
+                    });
+                }
+            });
+        }));
+    }
+
+    /// Whether a changed worktree-relative path (`/`-separated) sits directly
+    /// in the selected project — i.e. it is that project's own `package.json`
+    /// or lockfile, not some other project's under the same workspace.
+    fn manifest_change_is_selected(&self, rel_unix: &str) -> bool {
+        let Some(selected) = self.selected_project.as_deref() else {
+            return false;
+        };
+        manifest_change_is_in_project(&self.cwd, selected, rel_unix)
+    }
+
+    /// Reloads the selected project's scripts plus its installed/outdated/
+    /// vulnerable package data after its `package.json`/lockfile changed on
+    /// disk — an install, uninstall or update run outside the panel (terminal,
+    /// `npm_manager_panel`, npm's own lifecycle scripts), or a hand edit.
+    /// Debounced like `schedule_project_rescan`, and skipped while a bulk
+    /// update is streaming so it can't race the `run_subscription` reload.
+    fn schedule_data_reload(&mut self, cx: &mut Context<Self>) {
+        self._data_reload_task =
+            Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let _ = cx.update(|app| {
+                    if let Some(panel) = this.upgrade() {
+                        let _ = panel.update(app, |panel, cx| {
+                            if panel.running_action.is_some() {
+                                return;
+                            }
+                            panel.load_scripts(cx);
+                            panel.reload_package_data(cx);
+                        });
+                    }
+                });
+            }));
     }
 
     fn load_scripts(&mut self, cx: &mut Context<Self>) {
@@ -796,6 +943,31 @@ impl NodePanel {
         .detach();
     }
 
+    /// Re-queries the active `node`/`npm` versions so the header runtime line
+    /// reflects an NVM switch or install. Unlike the startup probe in
+    /// `init_discovery`, this never re-scans projects or reloads the NVM list.
+    fn refresh_runtime_versions(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let node_ver = cx
+                .background_spawn(async { query_runtime("node".into()).ok() })
+                .await;
+            let npm_ver = cx
+                .background_spawn(async { query_runtime("npm".into()).ok() })
+                .await;
+            let _ = cx.update(|app| {
+                if let Some(panel) = this.upgrade() {
+                    let _ = panel.update(app, |panel, cx| {
+                        panel.not_found = node_ver.is_none();
+                        panel.node_ver = node_ver;
+                        panel.npm_ver = npm_ver;
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
     fn load_nvm_versions(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = cx.background_spawn(async { nvm_list() }).await;
@@ -829,6 +1001,10 @@ impl NodePanel {
                             Ok(output) => panel.script_output.push(output),
                             Err(e) => panel.script_output.push(format!("Error: {e}")),
                         }
+                        // `nvm use` changes which Node the PATH resolves to, so
+                        // the header line ("Node.js … | npm …") is now stale —
+                        // re-query it alongside the version list.
+                        panel.refresh_runtime_versions(cx);
                         panel.load_nvm_versions(cx);
                         cx.notify();
                     });
@@ -888,6 +1064,9 @@ impl NodePanel {
     fn finish_nvm_install(&mut self, cx: &mut Context<Self>) {
         self.nvm_install_step = None;
         self.show_install = false;
+        // An install/uninstall can change the active Node, so refresh the
+        // header runtime line too, not just the version list.
+        self.refresh_runtime_versions(cx);
         self.load_nvm_versions(cx);
         cx.notify();
     }
@@ -3150,6 +3329,39 @@ mod tests {
         assert_eq!(path_file_name("single"), "single");
         // No final component: fall back to the input.
         assert_eq!(path_file_name("/"), "/");
+    }
+
+    #[test]
+    fn node_manifest_files_are_recognized() {
+        assert!(is_node_manifest_file("package.json"));
+        assert!(is_node_manifest_file("package-lock.json"));
+        assert!(is_node_manifest_file("npm-shrinkwrap.json"));
+        assert!(is_node_manifest_file("yarn.lock"));
+        assert!(is_node_manifest_file("pnpm-lock.yaml"));
+        assert!(!is_node_manifest_file("tsconfig.json"));
+        assert!(!is_node_manifest_file("package.json.bak"));
+    }
+
+    #[test]
+    fn manifest_changes_match_only_the_selected_project() {
+        let cwd = "C:/work";
+        // The scan root's own manifest.
+        assert!(manifest_change_is_in_project(cwd, "C:/work", "package.json"));
+        assert!(manifest_change_is_in_project(cwd, "C:\\work", "yarn.lock"));
+        // A nested project's own lockfile.
+        assert!(manifest_change_is_in_project(
+            cwd,
+            "C:/work/apps/web",
+            "apps/web/package-lock.json"
+        ));
+        // A different project's manifest must not match.
+        assert!(!manifest_change_is_in_project(
+            cwd,
+            "C:/work/apps/web",
+            "apps/api/package.json"
+        ));
+        // A file one level below the project root is not its own manifest.
+        assert!(!manifest_change_is_in_project(cwd, "C:/work", "apps/web/package.json"));
     }
 
     #[test]

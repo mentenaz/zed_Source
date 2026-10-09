@@ -5627,6 +5627,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "nuget_manager_panel",
+ "project",
  "script_runner_panel",
  "settings",
  "sysinfo 0.39.6",

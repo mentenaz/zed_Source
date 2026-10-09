@@ -183,6 +183,17 @@ pub struct PythonPanel {
     python_procs: Vec<PythonProcess>,
 
     open: HashMap<String, bool>,
+
+    /// Debounces the filesystem-watcher rescan: replaced on every relevant
+    /// `WorktreeUpdatedEntries` event, so a burst of updates collapses into a
+    /// single `scan_projects` run once it goes quiet. Held only for its `Drop`
+    /// (replacing it cancels the pending run).
+    _rescan_task: Option<gpui::Task<()>>,
+
+    /// Same debounce, but for reloading the active project's data when its
+    /// manifest changes on disk.
+    _data_reload_task: Option<gpui::Task<()>>,
+
     _procs_poll: gpui::Task<()>,
 }
 
@@ -194,6 +205,36 @@ fn path_file_name(dir: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| dir.to_string())
+}
+
+/// The marker files `scan_python_projects` recognizes a project by. A change
+/// to any of these can mean a project was added or removed, so the Projects
+/// list is re-scanned for one.
+fn is_python_project_marker(name: &str) -> bool {
+    matches!(name, "requirements.txt" | "pyproject.toml" | "Pipfile")
+}
+
+/// Files the panel derives package/environment data from for the active
+/// project — its project markers plus common lock/`setup` files. A change to
+/// any of these means the installed/outdated/missing-deps state is stale.
+fn is_python_manifest_file(name: &str) -> bool {
+    is_python_project_marker(name)
+        || matches!(
+            name,
+            "Pipfile.lock" | "poetry.lock" | "setup.py" | "setup.cfg" | "uv.lock"
+        )
+}
+
+/// Whether a changed worktree-relative path (`/`-separated, relative to the
+/// scan root `cwd`) sits directly in `selected` — i.e. it is that project's
+/// own manifest, not some other project's under the same workspace.
+/// Separators in `cwd`/`selected` may be either style.
+fn manifest_change_is_in_project(cwd: &str, selected: &str, rel_unix: &str) -> bool {
+    let root = cwd.replace('\\', "/");
+    let changed = format!("{}/{}", root.trim_end_matches('/'), rel_unix);
+    changed
+        .rsplit_once('/')
+        .is_some_and(|(dir, _)| dir == selected.replace('\\', "/").trim_end_matches('/'))
 }
 
 impl PythonPanel {
@@ -236,9 +277,47 @@ impl PythonPanel {
         _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
+        // The live worktrees watch the filesystem (the same machinery the
+        // project panel relies on); subscribing here lets `scan_projects`
+        // rerun when a new project marker appears, instead of only once at
+        // startup.
+        let project = _workspace.project().clone();
+
         let workspace = cx.entity().downgrade();
 
         cx.new(|cx| {
+            cx.subscribe(&project, |this: &mut PythonPanel, _project, event, cx| {
+                if let project::Event::WorktreeUpdatedEntries(_, entries) = event {
+                    let mut marker_touched = false;
+                    let mut selected_manifest_touched = false;
+                    for (path, _, _) in entries.iter() {
+                        let Some(name) = path.file_name() else {
+                            continue;
+                        };
+                        if is_python_project_marker(name) {
+                            marker_touched = true;
+                        }
+                        if is_python_manifest_file(name)
+                            && this.manifest_change_is_selected(path.as_unix_str())
+                        {
+                            selected_manifest_touched = true;
+                        }
+                    }
+                    // A new/removed marker can mean a new project, so the
+                    // Projects list is always re-scanned for one.
+                    if marker_touched {
+                        this.schedule_project_rescan(cx);
+                    }
+                    // Packages only change the *active* project's data, so only
+                    // reload that one (avoids re-running pip probes for
+                    // unrelated edits elsewhere).
+                    if selected_manifest_touched {
+                        this.schedule_data_reload(cx);
+                    }
+                }
+            })
+            .detach();
+
             let cwd = std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
@@ -280,6 +359,8 @@ impl PythonPanel {
                 missing_deps: Vec::new(),
                 python_procs: Vec::new(),
                 open,
+                _rescan_task: None,
+                _data_reload_task: None,
                 _procs_poll: Self::spawn_processes_poll(cx),
             };
 
@@ -505,8 +586,18 @@ impl PythonPanel {
                 if let Some(panel) = this.upgrade() {
                     let _ = panel.update(app, |panel, cx| {
                         panel.projects = projects;
-                        if panel.selected_project.is_none() {
-                            panel.selected_project = panel.projects.first().map(|p| p.path.clone());
+                        // Keep the current selection across rescans; only
+                        // (re)select when it's empty or the project it pointed
+                        // at disappeared (e.g. a scaffold removed it).
+                        let selection_still_exists = panel
+                            .selected_project
+                            .as_ref()
+                            .is_some_and(|selected| {
+                                panel.projects.iter().any(|p| &p.path == selected)
+                            });
+                        if !selection_still_exists {
+                            panel.selected_project =
+                                panel.projects.first().map(|p| p.path.clone());
                         }
                         panel.reload_project_data(cx);
                     });
@@ -520,6 +611,55 @@ impl PythonPanel {
     fn select_project(&mut self, path: String, cx: &mut Context<Self>) {
         self.selected_project = Some(path);
         self.reload_project_data(cx);
+    }
+
+    /// Coalesces the burst of `WorktreeUpdatedEntries` events a scaffold
+    /// produces into one rescan: each call replaces (and so cancels) the
+    /// pending task, and the last one to survive the debounce reruns
+    /// `scan_projects`.
+    fn schedule_project_rescan(&mut self, cx: &mut Context<Self>) {
+        self._rescan_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = cx.update(|app| {
+                if let Some(panel) = this.upgrade() {
+                    let _ = panel.update(app, |panel, cx| {
+                        panel.scan_projects(cx);
+                    });
+                }
+            });
+        }));
+    }
+
+    /// Whether a changed worktree-relative path (`/`-separated) sits directly
+    /// in the active project — i.e. it is that project's own manifest, not
+    /// some other project's under the same workspace.
+    fn manifest_change_is_selected(&self, rel_unix: &str) -> bool {
+        let Some(selected) = self.selected_project.as_deref() else {
+            return false;
+        };
+        manifest_change_is_in_project(&self.cwd, selected, rel_unix)
+    }
+
+    /// Reloads the active project's interpreter/environment/packages after its
+    /// manifest changed on disk — an install/remove/update run outside the
+    /// panel (terminal, `python_manager_panel`, pip itself), or a hand edit.
+    /// Debounced like `schedule_project_rescan`.
+    fn schedule_data_reload(&mut self, cx: &mut Context<Self>) {
+        self._data_reload_task =
+            Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let _ = cx.update(|app| {
+                    if let Some(panel) = this.upgrade() {
+                        let _ = panel.update(app, |panel, cx| {
+                            panel.reload_project_data(cx);
+                        });
+                    }
+                });
+            }));
     }
 
     /// Looks up whatever interpreter the user has explicitly picked for
@@ -1696,5 +1836,37 @@ mod tests {
         assert!(update_all_command("python", &list, "minor").is_err());
         let list = [outdated("idna", "3.6", "3.6.1 && calc")];
         assert!(update_all_command("python", &list, "minor").is_err());
+    }
+
+    #[test]
+    fn python_manifest_files_are_recognized() {
+        assert!(is_python_project_marker("requirements.txt"));
+        assert!(is_python_project_marker("pyproject.toml"));
+        assert!(is_python_project_marker("Pipfile"));
+        assert!(!is_python_project_marker("Pipfile.lock"));
+        assert!(is_python_manifest_file("Pipfile.lock"));
+        assert!(is_python_manifest_file("poetry.lock"));
+        assert!(is_python_manifest_file("setup.py"));
+        assert!(is_python_manifest_file("setup.cfg"));
+        assert!(!is_python_manifest_file("main.py"));
+        assert!(!is_python_manifest_file("requirements.txt.bak"));
+    }
+
+    #[test]
+    fn manifest_changes_match_only_the_selected_project() {
+        let cwd = "C:/work";
+        assert!(manifest_change_is_in_project(cwd, "C:/work", "requirements.txt"));
+        assert!(manifest_change_is_in_project(cwd, "C:\\work", "pyproject.toml"));
+        assert!(manifest_change_is_in_project(
+            cwd,
+            "C:/work/services/api",
+            "services/api/Pipfile"
+        ));
+        assert!(!manifest_change_is_in_project(
+            cwd,
+            "C:/work/services/api",
+            "services/worker/Pipfile"
+        ));
+        assert!(!manifest_change_is_in_project(cwd, "C:/work", "services/api/pyproject.toml"));
     }
 }
