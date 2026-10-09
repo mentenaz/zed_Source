@@ -869,6 +869,11 @@
   // Whether to resize all the panels in a dock when resizing the dock.
   // Can be a combination of "left", "right" and "bottom".
   "resize_all_panels_in_dock": ["left", "bottom"],
+  // The order of the panel buttons in the status bar, as a list of panel
+  // names, e.g. ["project_panel", "helm_panel", "git_panel"]. Each dock shows
+  // its own panels in the order they appear here. Panels that are not listed
+  // come after the listed ones, in their built-in order.
+  "panel_order": [],
   "project_panel": {
     // Whether to show the project panel button in the status bar
     "button": true,
@@ -1062,6 +1067,62 @@
     // showing only files and directories.
     // Does not affect single-file views.
     "multi_buffer_hide_symbols": false,
+  },
+  "cockpit_panel": {
+    // Whether to show the cockpit panel button in the status bar.
+    "button": true,
+    // Where to dock the cockpit panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "helm_panel": {
+    // Whether to show the Helm panel button in the status bar.
+    "button": true,
+    // Where to dock the Helm panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "python_panel": {
+    // Whether to show the Python panel button in the status bar.
+    "button": true,
+    // Where to dock the Python panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "node_panel": {
+    // Whether to show the Node panel button in the status bar.
+    "button": true,
+    // Where to dock the Node panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "dotnet_panel": {
+    // Whether to show the .NET panel button in the status bar.
+    "button": true,
+    // Where to dock the .NET panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "flows_panel": {
+    // Whether to show the Flows panel button in the status bar.
+    "button": true,
+    // Where to dock the Flows panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "rust_panel": {
+    // Whether to show the Rust panel button in the status bar.
+    "button": true,
+    // Where to dock the Rust panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
+  "script_runner_panel": {
+    // Whether to show the script runner panel button in the status bar.
+    "button": true,
+    // Where to dock the script runner panel. Can be 'left', 'right' or 'bottom'.
+    "dock": "bottom",
+  },
+  "database_panel": {
+    // Whether to show the database panel button in the status bar.
+    "button": true,
+  },
+  "processes_panel": {
+    // Whether to show the processes panel button in the status bar.
+    "button": true,
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.

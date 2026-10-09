@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 flows_panel.workspace = true
+fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 indexmap.workspace = true
@@ -23,6 +24,7 @@ project.workspace = true
 script_runner_panel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+settings.workspace = true
 sysinfo.workspace = true
 ui.workspace = true
 workspace.workspace = true

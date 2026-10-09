@@ -42,8 +42,9 @@ The **Dashboard** button opens the cross-ecosystem Dashboard tab — see
   workspace.
 - `CockpitPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`) and the result is added to the dock.
-- It implements `workspace::dock::Panel`, fixed to the left dock, with
-  `activation_priority() = 4`.
+- It implements `workspace::dock::Panel`, docked left by default (the
+  `cockpit_panel.dock` setting moves it left or right; `cockpit_panel.button` hides
+  its status bar button), `activation_priority() = 20`.
 
 ### Actions
 

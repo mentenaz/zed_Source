@@ -11,6 +11,8 @@
 //! `system_metrics::render_history`/`render_network` feed straight into an
 //! `AreaChart`.
 
+mod cockpit_panel_settings;
+
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -28,6 +30,8 @@ use gpui_component::{
     v_flex,
 };
 use sysinfo::{Disks, Networks, System};
+pub use cockpit_panel_settings::CockpitPanelSettings;
+use settings::{DockSide, Settings as _};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -377,29 +381,38 @@ impl Panel for CockpitPanel {
         "CockpitPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match CockpitPanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Fixed to the left dock — see `position_is_valid`.
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.cockpit_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         px(260.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Cockpit)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        CockpitPanelSettings::get_global(cx).button.then_some(ui::IconName::Cockpit)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -411,7 +424,13 @@ impl Panel for CockpitPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        4
+        20
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.cockpit_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

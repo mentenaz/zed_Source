@@ -7,6 +7,7 @@ mod fallible_options;
 mod language;
 mod language_model;
 pub mod merge_from;
+mod panels;
 mod project;
 mod serde_helper;
 mod terminal;
@@ -24,6 +25,7 @@ pub use fallible_options::*;
 pub use language::*;
 pub use language_model::*;
 pub use merge_from::MergeFrom as MergeFromTrait;
+pub use panels::*;
 pub use project::*;
 use serde::de::DeserializeOwned;
 pub use serde_helper::{
@@ -200,6 +202,17 @@ pub struct SettingsContent {
 
     /// Settings for the workflow designer and dashboard.
     pub flows: Option<FlowsSettingsContent>,
+
+    pub cockpit_panel: Option<SidePanelSettingsContent>,
+    pub helm_panel: Option<SidePanelSettingsContent>,
+    pub python_panel: Option<SidePanelSettingsContent>,
+    pub node_panel: Option<SidePanelSettingsContent>,
+    pub dotnet_panel: Option<SidePanelSettingsContent>,
+    pub flows_panel: Option<SidePanelSettingsContent>,
+    pub rust_panel: Option<SidePanelSettingsContent>,
+    pub script_runner_panel: Option<DockablePanelSettingsContent>,
+    pub database_panel: Option<BottomPanelSettingsContent>,
+    pub processes_panel: Option<BottomPanelSettingsContent>,
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
@@ -417,6 +430,8 @@ fallible_options::flattened_deserialize!(SettingsContent {
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
+        cockpit_panel, helm_panel, python_panel, node_panel, dotnet_panel, flows_panel,
+        rust_panel, script_runner_panel, database_panel, processes_panel,
     },
     defaults: {},
 });

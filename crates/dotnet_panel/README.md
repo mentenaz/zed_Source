@@ -37,8 +37,9 @@ Useful to know:
 - `dotnet_panel::init(cx)` registers `dotnet_panel::ToggleFocus`.
 - `DotNetPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 12`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `dotnet_panel.dock` setting moves it left or right; `dotnet_panel.button` hides
+  its status bar button), `activation_priority() = 27`.
 
 Unlike the Node and Python panels, this one is not handed a script-runner
 handle at startup. It finds the Script Runner through the workspace when an

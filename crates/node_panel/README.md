@@ -46,8 +46,9 @@ Useful to know:
   same function calls:
   - `set_script_runner(WeakEntity<ScriptRunnerPanel>)` — where runs are sent.
   - `set_flows_panel(WeakEntity<FlowsPanel>)` — for the Task Chain action.
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 11`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `node_panel.dock` setting moves it left or right; `node_panel.button` hides
+  its status bar button), `activation_priority() = 26`.
 
 If you add a panel that this one must talk to, wire it in that same place
 rather than at construction: the panels load concurrently, so none of them

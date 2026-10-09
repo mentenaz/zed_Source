@@ -19,6 +19,8 @@
 
 pub mod command;
 
+mod script_runner_panel_settings;
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -39,6 +41,8 @@ use gpui_component::{
     input::{Input, InputState},
     spinner::Spinner,
 };
+pub use script_runner_panel_settings::ScriptRunnerPanelSettings;
+use settings::Settings as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -578,24 +582,31 @@ impl Panel for ScriptRunnerPanel {
         "ScriptRunnerPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Bottom
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        ScriptRunnerPanelSettings::get_global(cx).dock.into()
     }
 
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Bottom)
+    fn position_is_valid(&self, _position: DockPosition) -> bool {
+        true
     }
 
-    fn set_position(&mut self, _position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
-        // Fixed to the bottom dock — see `position_is_valid`.
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            settings.script_runner_panel.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         px(240.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Runner)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        ScriptRunnerPanelSettings::get_global(cx).button.then_some(ui::IconName::Runner)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -607,7 +618,13 @@ impl Panel for ScriptRunnerPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        8
+        23
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.script_runner_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

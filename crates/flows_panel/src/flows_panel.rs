@@ -29,6 +29,8 @@
 //!   transition) are kept; a live view is what running from the Designer
 //!   is for.
 
+mod flows_panel_settings;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -52,11 +54,12 @@ use gpui_component::{
     v_flex,
 };
 use project::Project;
-use settings::Settings as _;
+use settings::{DockSide, Settings as _};
 use workflow_engine::{
     ActionHistoryRecord, ActionMap, DetectedService, RunHistoryEntry, RunOutcome, RunStatus,
     ServiceSpec, StatusSink, WorkflowDefinition, run_workflow, scan_project, task_chain,
 };
+pub use flows_panel_settings::FlowsPanelSettings;
 use workspace::{
     OpenOptions, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -774,24 +777,38 @@ impl Panel for FlowsPanel {
         "FlowsPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match FlowsPanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
-    fn set_position(&mut self, _position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
-        // Fixed to the left dock — see `position_is_valid`.
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.flows_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         gpui::px(260.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Network)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        FlowsPanelSettings::get_global(cx).button.then_some(ui::IconName::Network)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -803,7 +820,13 @@ impl Panel for FlowsPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        13
+        28
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.flows_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

@@ -121,6 +121,13 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: ["left"]
     pub resize_all_panels_in_dock: Option<Vec<DockPosition>>,
+    /// The order of the panel buttons in the status bar, as a list of panel
+    /// names (e.g. "project_panel", "git_panel"). Each dock shows its own
+    /// panels in the order they appear here. Panels that are not listed
+    /// come after the listed ones, in their built-in order.
+    ///
+    /// Default: []
+    pub panel_order: Option<Vec<String>>,
     /// Whether to automatically close files that have been deleted on disk.
     ///
     /// Default: false

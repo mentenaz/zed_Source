@@ -132,14 +132,15 @@ This was requested as a follow-up once the panel existed as a plain
 port itself:
 
 - `CockpitPanel` implements `workspace::dock::Panel` (`Focusable` +
-  `EventEmitter<PanelEvent>` + `Render` + the trait's own methods): fixed to
-  `DockPosition::Left` (`position`/`position_is_valid` never return/allow
-  anything else — no per-user dock-side setting was added), `panel_key()` /
+  `EventEmitter<PanelEvent>` + `Render` + the trait's own methods): docked
+  left by default, movable to the right through the `cockpit_panel.dock`
+  setting (`position` reads it, `set_position` writes it; a `button`
+  setting next to it hides the status bar button), `panel_key()` /
   `persistent_name()` for the generic dock-persistence machinery (panel
   size/open-state persistence needs no other code — it keys off
-  `panel_key()` alone), `activation_priority() = 4` (checked against the
-  other left-dock panels — project_panel=1, terminal=2, git=3,
-  collab=5, outline=6, debug=7 — to avoid clashing).
+  `panel_key()` alone), `activation_priority() = 20` (the ported panels
+  take 20–29, clear of Zed's own 0–7, because a movable panel can meet any
+  other panel in a dock and two equal priorities there panic debug builds).
 - A `cockpit_panel::ToggleFocus` action (`actions!(cockpit_panel,
   [ToggleFocus])`) is registered on every `Workspace` via `cx.observe_new`
   in `cockpit_panel::init(cx)` — this is what the dock's per-panel icon

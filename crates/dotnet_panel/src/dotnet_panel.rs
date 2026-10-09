@@ -22,6 +22,8 @@
 //! NuGet registry/browse experience lives in `nuget_manager_panel`, which
 //! this panel's quick action opens.
 
+mod dotnet_panel_settings;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -49,6 +51,8 @@ use gpui_component::{
 use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::{check_package_name, check_version};
 use sysinfo::System;
+pub use dotnet_panel_settings::DotnetPanelSettings;
+use settings::{DockSide, Settings as _};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -778,29 +782,38 @@ impl Panel for DotNetPanel {
         "DotnetPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match DotnetPanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Fixed to the left dock — see `position_is_valid`.
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.dotnet_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         px(300.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Dotnet)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        DotnetPanelSettings::get_global(cx).button.then_some(ui::IconName::Dotnet)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -812,7 +825,13 @@ impl Panel for DotNetPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        12
+        27
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.dotnet_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

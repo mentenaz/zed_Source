@@ -99,8 +99,9 @@ under the list. `cargo audit` behaves the same way.
   `rust_panel::ToggleFocus`.
 - `RustPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 14`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `rust_panel.dock` setting moves it left or right; `rust_panel.button` hides
+  its status bar button), `activation_priority() = 29`.
 - It subscribes to the project's `WorktreeUpdatedEntries` events and reloads
   when a changed file is named `Cargo.toml` or `Cargo.lock`.
 - Quick actions find the Script Runner through the workspace when pressed,

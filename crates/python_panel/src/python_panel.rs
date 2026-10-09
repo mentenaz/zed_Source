@@ -44,6 +44,8 @@
 //! The actual detection/scanning/parsing logic lives in `python_backend`,
 //! ported alongside this panel — see that crate's own doc comment.
 
+mod python_panel_settings;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -74,6 +76,8 @@ use python_backend::{
 };
 use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::{check_package_name, check_version, shell_path, shell_program};
+pub use python_panel_settings::PythonPanelSettings;
+use settings::{DockSide, Settings as _};
 use workspace::{Toast, notifications::NotificationId};
 use sysinfo::System;
 use workspace::{
@@ -693,29 +697,38 @@ impl Panel for PythonPanel {
         "PythonPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match PythonPanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Fixed to the left dock — see `position_is_valid`.
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.python_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         px(280.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Python)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        PythonPanelSettings::get_global(cx).button.then_some(ui::IconName::Python)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -727,7 +740,13 @@ impl Panel for PythonPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        10
+        25
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.python_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

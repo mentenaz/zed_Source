@@ -43,8 +43,9 @@ Kill always asks for confirmation first, because it cannot be undone.
   bindings (context `DataTable`).
 - `ProcessesPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
-- Implements `workspace::dock::Panel`, fixed to the bottom dock,
-  `activation_priority() = 9`.
+- Implements `workspace::dock::Panel`, fixed to the bottom dock (the
+  `processes_panel.button` setting hides its status bar button),
+  `activation_priority() = 24`.
 
 ### Actions
 

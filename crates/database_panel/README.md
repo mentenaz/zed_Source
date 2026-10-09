@@ -69,8 +69,9 @@ launch, reconnecting as needed.
   two serializable tab types (`WorkbenchTab`, `SchemaGraphTab`).
 - `DatabasePanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
-- Implements `workspace::dock::Panel`, fixed to the bottom dock,
-  `activation_priority() = 5`.
+- Implements `workspace::dock::Panel`, fixed to the bottom dock (the
+  `database_panel.button` setting hides its status bar button),
+  `activation_priority() = 22`.
 
 The workbench and graph tabs are thin shells holding an
 `Entity<DatabasePanel>` and the key of the database they are for. Their state

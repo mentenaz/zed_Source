@@ -14,7 +14,7 @@ use gpui::{
     px,
 };
 use serde::{Deserialize, Serialize};
-use settings::{Settings, SettingsStore, TerminalDockPosition};
+use settings::{Settings, SettingsStore, TerminalDockPosition, update_settings_file};
 use std::sync::Arc;
 use ui::{
     ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
@@ -291,7 +291,7 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 enum DockRestoreState {
@@ -394,6 +394,74 @@ pub struct PanelButtons {
 
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";
 
+/// The name a panel goes by in the `panel_order` setting: its key in snake
+/// case, e.g. `ProjectPanel` becomes `project_panel`.
+fn panel_order_name(panel_key: &str) -> String {
+    let mut name = String::with_capacity(panel_key.len() + 2);
+    for (ix, ch) in panel_key.chars().enumerate() {
+        if ch.is_uppercase() {
+            if ix > 0 {
+                name.push('_');
+            }
+            name.extend(ch.to_lowercase());
+        } else {
+            name.push(ch);
+        }
+    }
+    name
+}
+
+/// Where a panel sorts within its dock: panels named in `panel_order` come
+/// first, in the order listed, and the rest follow by activation priority.
+fn panel_sort_key(panel: &dyn PanelHandle, panel_order: &[String], cx: &App) -> (usize, u32) {
+    let name = panel_order_name(panel.panel_key());
+    let listed_ix = panel_order
+        .iter()
+        .position(|listed| *listed == name)
+        .unwrap_or(usize::MAX);
+    (listed_ix, panel.activation_priority(cx))
+}
+
+/// Swaps two panels' places in the `panel_order` setting. Writes out every
+/// panel's name, so the result doesn't depend on which ones were listed
+/// before.
+fn swap_panel_order(workspace: &Workspace, first: &str, second: &str, cx: &App) {
+    let mut names = Vec::new();
+    for name in &WorkspaceSettings::get_global(cx).panel_order {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    let mut unlisted = workspace
+        .all_docks()
+        .into_iter()
+        .flat_map(|dock| dock.read(cx).panel_entries.iter())
+        .map(|entry| {
+            (
+                entry.panel.activation_priority(cx),
+                panel_order_name(entry.panel.panel_key()),
+            )
+        })
+        .filter(|(_, name)| !names.contains(name))
+        .collect::<Vec<_>>();
+    unlisted.sort();
+    names.extend(unlisted.into_iter().map(|(_, name)| name));
+
+    let first = panel_order_name(first);
+    let second = panel_order_name(second);
+    let (Some(first_ix), Some(second_ix)) = (
+        names.iter().position(|name| *name == first),
+        names.iter().position(|name| *name == second),
+    ) else {
+        return;
+    };
+    names.swap(first_ix, second_ix);
+
+    update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        settings.workspace.panel_order = Some(names);
+    });
+}
+
 fn panel_uses_flexible_width(
     position: DockPosition,
     panel: &dyn PanelHandle,
@@ -447,6 +515,15 @@ impl Dock {
                     dock.zoom_layer_open = is_zoomed;
                 }
             });
+            let mut panel_order = WorkspaceSettings::get_global(cx).panel_order.clone();
+            let panel_order_subscription =
+                cx.observe_global::<SettingsStore>(move |dock: &mut Dock, cx| {
+                    let new_panel_order = &WorkspaceSettings::get_global(cx).panel_order;
+                    if *new_panel_order != panel_order {
+                        panel_order = new_panel_order.clone();
+                        dock.sort_panel_entries(cx);
+                    }
+                });
             Self {
                 position,
                 workspace: workspace.downgrade(),
@@ -455,7 +532,11 @@ impl Dock {
                 is_open: false,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
-                _subscriptions: [focus_subscription, zoom_subscription],
+                _subscriptions: [
+                    focus_subscription,
+                    zoom_subscription,
+                    panel_order_subscription,
+                ],
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
@@ -781,11 +862,11 @@ impl Dock {
             ),
         ];
 
-        let index = match self
-            .panel_entries
-            .binary_search_by_key(&panel.read(cx).activation_priority(), |entry| {
-                entry.panel.activation_priority(cx)
-            }) {
+        let panel_order = &WorkspaceSettings::get_global(cx).panel_order;
+        let sort_key = panel_sort_key(&panel, panel_order, cx);
+        let index = match self.panel_entries.binary_search_by_key(&sort_key, |entry| {
+            panel_sort_key(entry.panel.as_ref(), panel_order, cx)
+        }) {
             Ok(ix) => {
                 if cfg!(debug_assertions) {
                     panic!(
@@ -823,6 +904,21 @@ impl Dock {
 
         cx.notify();
         index
+    }
+
+    /// Re-sorts the panels after the `panel_order` setting changed, keeping
+    /// the same panel active.
+    fn sort_panel_entries(&mut self, cx: &mut Context<Self>) {
+        let panel_order = WorkspaceSettings::get_global(cx).panel_order.clone();
+        let active_panel_id = self.active_panel().map(|panel| panel.panel_id());
+        self.panel_entries
+            .sort_by_cached_key(|entry| panel_sort_key(entry.panel.as_ref(), &panel_order, cx));
+        self.active_panel_index = active_panel_id.and_then(|panel_id| {
+            self.panel_entries
+                .iter()
+                .position(|entry| entry.panel.panel_id() == panel_id)
+        });
+        cx.notify();
     }
 
     pub(crate) fn restore_serialized_state(
@@ -1401,6 +1497,12 @@ impl Render for PanelButtons {
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
+        let button_panel_keys: Vec<_> = dock
+            .panel_entries
+            .iter()
+            .filter(|entry| entry.panel.icon(window, cx).is_some())
+            .map(|entry| entry.panel.panel_key())
+            .collect();
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
@@ -1416,6 +1518,18 @@ impl Render for PanelButtons {
                     .log_err()?;
                 let name = entry.panel.persistent_name();
                 let panel = entry.panel.clone();
+                let panel_key = entry.panel.panel_key();
+                // The right dock's buttons are shown in reverse.
+                let button_ix = button_panel_keys.iter().position(|key| *key == panel_key);
+                let previous_key = button_ix
+                    .and_then(|ix| ix.checked_sub(1))
+                    .and_then(|ix| button_panel_keys.get(ix).copied());
+                let next_key = button_ix.and_then(|ix| button_panel_keys.get(ix + 1).copied());
+                let (left_key, right_key) = if dock_position == DockPosition::Right {
+                    (next_key, previous_key)
+                } else {
+                    (previous_key, next_key)
+                };
                 let supports_flexible = panel.supports_flexible_size(cx);
                 let currently_flexible = panel.has_flexible_size(window, cx);
                 let dock_for_menu = dock_entity.clone();
@@ -1467,6 +1581,30 @@ impl Render for PanelButtons {
                                         );
                                         has_position_entries = true;
                                     }
+                                }
+                                if left_key.is_some() || right_key.is_some() {
+                                    if has_position_entries {
+                                        menu = menu.separator();
+                                    }
+                                    for (label, neighbor_key) in
+                                        [("Move Left", left_key), ("Move Right", right_key)]
+                                    {
+                                        let Some(neighbor_key) = neighbor_key else {
+                                            continue;
+                                        };
+                                        let workspace = workspace_for_menu.clone();
+                                        menu = menu.entry(label, None, move |_, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                swap_panel_order(
+                                                    workspace.read(cx),
+                                                    panel_key,
+                                                    neighbor_key,
+                                                    cx,
+                                                );
+                                            }
+                                        });
+                                    }
+                                    has_position_entries = true;
                                 }
                                 if supports_flexible {
                                     if has_position_entries {

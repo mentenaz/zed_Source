@@ -88,8 +88,9 @@ Values starting with `-` are refused too, so a "package" named
 - `script_runner_panel::init(cx)` registers `ToggleFocus`.
 - `ScriptRunnerPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`), together with the panels that depend on it.
-- Implements `workspace::dock::Panel`, fixed to the bottom dock,
-  `activation_priority() = 8`.
+- Implements `workspace::dock::Panel`, docked at the bottom by default (the
+  `script_runner_panel.dock` setting moves it to any dock; `script_runner_panel.button` hides
+  its status bar button), `activation_priority() = 23`.
 
 ## Platform notes
 

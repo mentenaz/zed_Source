@@ -31,6 +31,8 @@
 //! The actual detection/scanning/NVM logic lives in `node_backend`, ported
 //! alongside this panel — see that crate's own doc comment.
 
+mod node_panel_settings;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -68,6 +70,8 @@ use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::{check_package_name, check_script_name};
 use serde::Deserialize;
 use sysinfo::System;
+pub use node_panel_settings::NodePanelSettings;
+use settings::{DockSide, Settings as _};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -1519,29 +1523,38 @@ impl Panel for NodePanel {
         "NodePanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match NodePanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Fixed to the left dock — see `position_is_valid`.
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.node_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
         px(260.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Node)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        NodePanelSettings::get_global(cx).button.then_some(ui::IconName::Node)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -1553,7 +1566,13 @@ impl Panel for NodePanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        11
+        26
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.node_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

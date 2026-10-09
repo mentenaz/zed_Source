@@ -19,19 +19,19 @@ Open with `ctrl-k f` (`cmd-k f` on macOS), the status bar icon (tooltip
 
 ### Toolbar
 
-| Button | Does |
-| --- | --- |
-| Refresh | Rescan the workflows directory |
-| New Workflow | Create a blank `.flow.json` and open it |
+| Button         | Does                                                                 |
+| -------------- | -------------------------------------------------------------------- |
+| Refresh        | Rescan the workflows directory                                       |
+| New Workflow   | Create a blank `.flow.json` and open it                              |
 | Add Task Chain | Scan the workspace for services and generate a flow that starts them |
 
 ### Each row
 
-| Button | Does |
-| --- | --- |
-| Run | Run the flow now; the row shows the outcome of the last run |
-| Open | Open the flow through the normal file-open path |
-| Graph | Open the flow on the Designer canvas directly |
+| Button | Does                                                        |
+| ------ | ----------------------------------------------------------- |
+| Run    | Run the flow now; the row shows the outcome of the last run |
+| Open   | Open the flow through the normal file-open path             |
+| Graph  | Open the flow on the Designer canvas directly               |
 
 Both buttons end up on the Designer canvas: the Designer claims every
 `.flow.json` file, so the normal file-open path leads there too. To see the
@@ -70,18 +70,19 @@ The path is relative to the workspace root.
 - `FlowsPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`), which also hands a `WeakEntity<FlowsPanel>` to
   the Node panel.
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 13`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `flows_panel.dock` setting moves it left or right; `flows_panel.button` hides
+  its status bar button), `activation_priority() = 28`.
 - `open_task_chain_wizard_anchored(...)` is the public entry point other
   panels use to open the wizard for a specific project.
 
 ## Layout
 
-| File | Contents |
-| --- | --- |
-| `src/flows_panel.rs` | Panel, flow list, task-chain wizard, run handling |
-| `src/flows_settings.rs` | The `"flows"` settings key (`FlowsSettings`) |
-| `src/persistence.rs` | Per-project run history |
+| File                    | Contents                                          |
+| ----------------------- | ------------------------------------------------- |
+| `src/flows_panel.rs`    | Panel, flow list, task-chain wizard, run handling |
+| `src/flows_settings.rs` | The `"flows"` settings key (`FlowsSettings`)      |
+| `src/persistence.rs`    | Per-project run history                           |
 
 Running a flow calls `workflow_engine::run_workflow` directly and records the
 result. History is kept in Zed's scoped key-value store under the workspace

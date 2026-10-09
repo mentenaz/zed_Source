@@ -42,8 +42,9 @@ Useful to know:
 - `PythonPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`), which then calls
   `set_script_runner(WeakEntity<ScriptRunnerPanel>)` once both panels exist.
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 10`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `python_panel.dock` setting moves it left or right; `python_panel.button` hides
+  its status bar button), `activation_priority() = 25`.
 
 ### Read-only accessors
 

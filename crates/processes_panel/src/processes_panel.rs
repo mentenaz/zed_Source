@@ -16,6 +16,8 @@
 //! sorting, selection and the `PopupMenu` context menu, while the
 //! `TableDelegate` impl decides what each column shows.
 
+mod processes_panel_settings;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,6 +42,8 @@ use gpui_component::{
 };
 use serde::Deserialize;
 use sysinfo::{ProcessesToUpdate, System};
+pub use processes_panel_settings::ProcessesPanelSettings;
+use settings::Settings as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -864,8 +868,8 @@ impl Panel for ProcessesPanel {
         gpui::px(300.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Cpu)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        ProcessesPanelSettings::get_global(cx).button.then_some(ui::IconName::Cpu)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -877,7 +881,13 @@ impl Panel for ProcessesPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        9
+        24
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.processes_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 http_client.workspace = true
@@ -20,6 +21,7 @@ project.workspace = true
 python_backend.workspace = true
 python_manager_panel.workspace = true
 script_runner_panel.workspace = true
+settings.workspace = true
 sysinfo.workspace = true
 ui.workspace = true
 workspace.workspace = true

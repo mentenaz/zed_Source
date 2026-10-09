@@ -37,6 +37,7 @@ pub struct WorkspaceSettings {
     pub on_last_window_closed: settings::OnLastWindowClosed,
     pub text_rendering_mode: settings::TextRenderingMode,
     pub resize_all_panels_in_dock: Vec<DockPosition>,
+    pub panel_order: Vec<String>,
     pub close_on_file_delete: bool,
     pub close_panel_on_toggle: bool,
     pub window_title_format: String,
@@ -142,6 +143,7 @@ impl Settings for WorkspaceSettings {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            panel_order: workspace.panel_order.clone().unwrap_or_default(),
             close_on_file_delete: workspace.close_on_file_delete.unwrap(),
             close_panel_on_toggle: workspace.close_panel_on_toggle.unwrap(),
             window_title_format: workspace.window_title_format.clone().unwrap(),

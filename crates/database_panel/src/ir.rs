@@ -64,6 +64,9 @@ pub struct GraphTable {
 pub enum Cardinality {
     OneToOne,
     OneToMany,
+    /// Not produced yet: a foreign key is never many-to-many on its own.
+    /// This is for the later collapsed presentation of join tables.
+    #[allow(dead_code)]
     ManyToMany,
 }
 

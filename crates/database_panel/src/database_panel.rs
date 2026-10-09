@@ -12,6 +12,8 @@
 //! read/written exclusively through `zed_credentials_provider`, keyed by
 //! `credential_url(db_type, host, port)`.
 
+mod database_panel_settings;
+
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -41,6 +43,8 @@ use gpui_component::{
     v_flex,
 };
 use ui::{Color, Label, LabelCommon as _, LabelSize};
+pub use database_panel_settings::DatabasePanelSettings;
+use settings::Settings as _;
 use workspace::{
     SERIALIZATION_THROTTLE_TIME, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -2422,8 +2426,8 @@ impl Panel for DatabasePanel {
         px(440.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::DatabaseZap)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        DatabasePanelSettings::get_global(cx).button.then_some(ui::IconName::DatabaseZap)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -2435,7 +2439,13 @@ impl Panel for DatabasePanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        5
+        22
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.database_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

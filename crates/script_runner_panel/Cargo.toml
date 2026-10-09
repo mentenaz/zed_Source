@@ -12,9 +12,11 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui_util.workspace = true
+settings.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 ui.workspace = true
 workspace.workspace = true

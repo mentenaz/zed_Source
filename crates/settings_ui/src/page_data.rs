@@ -7072,9 +7072,83 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
+    fn panel_order_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Panel Order"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Panel Order",
+                description: "The order of the panel buttons in the status bar, as a list of panel names. Each dock shows its own panels in this order, and unlisted panels come last. Right-click a panel button and choose \"Move Left\" or \"Move Right\" to change it.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("panel_order"),
+                        pick: |settings_content| settings_content.workspace.panel_order.as_ref(),
+                        write: |settings_content, value, _| {
+                            settings_content.workspace.panel_order = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    // The panels ported from Forge all have the same two settings, except
+    // that the ones built for the bottom dock have no dock setting.
+    macro_rules! ported_panel_button_item {
+        ($field:ident, $header:literal, $name:literal) => {
+            SettingsPageItem::SettingItem(SettingItem {
+                title: concat!($header, " Button"),
+                description: concat!("Show the ", $name, " button in the status bar."),
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some(concat!(stringify!($field), ".button")),
+                    pick: |settings_content| settings_content.$field.as_ref()?.button.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.$field.get_or_insert_default().button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            })
+        };
+    }
+
+    macro_rules! ported_panel_section {
+        ($field:ident, $header:literal, $name:literal, dock) => {
+            [
+                SettingsPageItem::SectionHeader($header),
+                ported_panel_button_item!($field, $header, $name),
+                SettingsPageItem::SettingItem(SettingItem {
+                    title: concat!($header, " Dock"),
+                    description: concat!("Where to dock the ", $name, "."),
+                    field: Box::new(SettingField {
+                        organization_override: None,
+                        json_path: Some(concat!(stringify!($field), ".dock")),
+                        pick: |settings_content| settings_content.$field.as_ref()?.dock.as_ref(),
+                        write: |settings_content, value, _| {
+                            settings_content.$field.get_or_insert_default().dock = value;
+                        },
+                    }),
+                    metadata: None,
+                    files: USER,
+                }),
+            ]
+        };
+        ($field:ident, $header:literal, $name:literal) => {
+            [
+                SettingsPageItem::SectionHeader($header),
+                ported_panel_button_item!($field, $header, $name),
+            ]
+        };
+    }
+
     SettingsPage {
         title: "Panels",
         items: concat_sections![
+            panel_order_section(),
             project_panel_section(),
             terminal_panel_section(),
             outline_panel_section(),
@@ -7082,6 +7156,21 @@ fn panels_page() -> SettingsPage {
             debugger_panel_section(),
             collaboration_panel_section(),
             agent_panel_section(),
+            ported_panel_section!(cockpit_panel, "Cockpit Panel", "cockpit panel", dock),
+            ported_panel_section!(helm_panel, "Helm Panel", "Helm panel", dock),
+            ported_panel_section!(database_panel, "Database Panel", "database panel"),
+            ported_panel_section!(
+                script_runner_panel,
+                "Script Runner Panel",
+                "script runner panel",
+                dock
+            ),
+            ported_panel_section!(processes_panel, "Processes Panel", "processes panel"),
+            ported_panel_section!(python_panel, "Python Panel", "Python panel", dock),
+            ported_panel_section!(node_panel, "Node Panel", "Node panel", dock),
+            ported_panel_section!(dotnet_panel, ".NET Panel", ".NET panel", dock),
+            ported_panel_section!(flows_panel, "Flows Panel", "Flows panel", dock),
+            ported_panel_section!(rust_panel, "Rust Panel", "Rust panel", dock),
         ],
     }
 }
