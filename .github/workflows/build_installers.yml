@@ -366,10 +366,50 @@ jobs:
             exit 1
           fi
 
+          # The release body is written to a file so it can be several
+          # paragraphs without fighting shell quoting; the unquoted heredoc
+          # lets the tag and architecture expand (backticks are escaped so the
+          # shell does not treat them as command substitution).
+          cat > release-notes.md <<EOF
+          **Mentenaz Forge** is an experimental *developer cockpit* built directly
+          into [Zed](https://github.com/zed-industries/zed): a native Rust/GPUI
+          workspace that folds the tooling normally scattered across separate
+          applications into the editor itself.
+
+          This development build (\`${RELEASE_TAG}\`, \`${ARCH}\`) includes:
+
+          - **Developer Cockpit & Dashboard** — project, runtime, dependency, Git
+            and system health in one operational view.
+          - **Visual Workflow Engine** — executable, branching workflows rendered
+            as an interactive GPUI graph.
+          - **Database Workbench** — SQLite, PostgreSQL, MySQL and MSSQL with a
+            schema graph, relationship visualisation and a SQL workbench.
+          - **Runtime panels** — Node, .NET, Python and Rust project tooling, each
+            aware of the active project and its manifests.
+          - **Package managers** — npm, NuGet, pip and Cargo, with registry search,
+            installed/outdated views and security advisories (Cargo uses OSV.dev).
+          - **Helm** — a native GitHub client plus a read-only repository Workspace
+            tab for browsing files, commits, comparisons and code search.
+          - **Git Insights, Process Monitor, Script Runner** and more.
+
+          > **This is an unsigned development build, not a stable release.**
+          >
+          > - **Windows:** SmartScreen warns on first run ("Windows protected your
+          >   PC") — choose **More info** then **Run anyway**.
+          > - **macOS:** Gatekeeper blocks the first open — right-click the app and
+          >   choose **Open**, or run \`xattr -cr /Applications/Zed*.app\` after
+          >   copying it over.
+          > - **Linux:** an unsigned \`.tar.gz\` and \`.deb\`.
+
+          Built automatically by \`build_installers.yml\`. Mentenaz Forge is an
+          unofficial personal fork, not affiliated with, endorsed by, or
+          associated with Zed Industries.
+          EOF
+
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
-              --title "Dev build ${RELEASE_TAG} (${ARCH})" \
-              --notes "Unsigned/ad-hoc-signed dev build, built by build_installers.yml. Not a stable release — see that workflow's job comments for what each platform needs to actually run it (SmartScreen / Gatekeeper)." \
+              --title "Mentenaz Forge dev build ${RELEASE_TAG} (${ARCH})" \
+              --notes-file release-notes.md \
               --prerelease
           fi
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

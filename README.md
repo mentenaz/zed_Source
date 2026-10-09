@@ -25,9 +25,10 @@ Forge explores what a developer environment could look like when the tooling nor
 | **Developer Cockpit**        | Central operational view of the development environment       |
 | **Visual Workflow Engine**   | Executable visual workflows with branching and error handling |
 | **Database Workbench**       | SQLite, PostgreSQL, MySQL and MSSQL in one workspace          |
-| **Runtime Management**       | Node, .NET and Python project tooling                         |
-| **Package Management**       | npm, NuGet and Python package workflows                       |
-| **GitHub / Helm**            | Native GitHub repository management                           |
+| **Runtime Management**       | Node, .NET, Python and Rust project tooling                   |
+| **Package Management**       | npm, NuGet, pip and Cargo package workflows                    |
+| **Rust / Cargo Manager**     | crates.io search, outdated deps and OSV advisories            |
+| **GitHub / Helm**            | Native GitHub client and repository Workspace browsing        |
 | **Git Insights**             | Repository activity, changed files and collaborators          |
 | **Dashboard**                | Project, dependency, Git and system health                    |
 | **Process Monitor**          | CPU, RAM, disk, network and process management                |
@@ -69,7 +70,7 @@ The Dashboard provides a higher-level view of the current development environmen
 
 **It brings together:**
 
-- Runtime versions
+- Runtime versions (Node, .NET, Python and Rust)
 - Security findings
 - Outdated dependencies
 - Git status
@@ -181,6 +182,11 @@ The database visualization also shares the broader graph concepts being explored
 
 Forge provides dedicated development tooling for common project environments.
 
+Each panel targets the active project and watches it on disk: when a manifest
+or lockfile changes — an install from a terminal, a scaffold, or a hand edit —
+the affected panel rescans its projects and reloads that project's data on its
+own.
+
 ---
 
 ## Node
@@ -224,6 +230,28 @@ The goal is to make the active development target explicit instead of requiring 
 
 ---
 
+## Rust
+
+Rust is the language Forge is written in, so its panel is built as a
+daily driver rather than a breadth exercise.
+
+![Forge Rust](docs/screenshots/Rust_Panel.png)
+
+**The Rust tooling provides:**
+
+- `rustc` and `cargo` toolchain information
+- Crate and workspace targeting
+- `check`, `build`, `run` and `test`
+- The crate's dependencies and their locked versions
+- Outdated versions, tagged by how far the version moves
+- Security advisories from the RustSec database, via OSV.dev
+
+The panel deliberately does not depend on `rust-analyzer`. It reads
+`Cargo.toml` and `Cargo.lock` directly, so it works with no Rust file open and
+updates when those files change.
+
+---
+
 # Package Management
 
 Dependency management is treated as part of the development environment rather than a separate application.
@@ -263,6 +291,31 @@ The NuGet tooling provides package discovery and management directly inside Forg
 ![Forge Python Package Manager](docs/screenshots/Python_Package_Manager.png)
 
 Python package management is integrated with the Python environment tooling.
+
+---
+
+## Cargo
+
+The Cargo manager is the Rust counterpart to the npm and NuGet managers.
+
+![Forge Cargo Manager](docs/screenshots/Cargo_Manager.png)
+![Forge Cargo Manager](docs/screenshots/Cargo_Manager_Installed.png)
+![Forge Cargo Manager](docs/screenshots/Cargo_Manager_Updates.png)
+
+**The Cargo tooling includes:**
+
+- crates.io package search
+- Add a dependency
+- Update and update-all
+- Remove a dependency
+- Version information, including each version's minimum supported Rust version
+- Vulnerability scanning from the RustSec database, via OSV.dev
+- Inline README viewing
+
+Every action is confirmed first — an update shows Cargo's own dry-run, a
+remove says when the root manifest will change too, and an add says what Cargo
+will write. Dependencies inherited from `[workspace.dependencies]` are shown
+but not re-versioned, because no Cargo command edits that table safely.
 
 ---
 
@@ -340,9 +393,30 @@ Helm currently provides:
 - Organizations and organization repositories
 - Repository search
 - Repository browsing
+- Repository editing — description, homepage and topics
 - Repository inspection — branches, collaborators, issues, pull requests, releases, packages, traffic, commits, actions, deployments, tags and security
 - Clone operations with a folder picker
 - Working-directory integration
+
+### Repository Workspace
+
+Beyond the detail screens, Helm opens a read-only **Workspace** tab for a
+repository.
+
+![Forge Helm Workspace](docs/screenshots/Helm_Workspace.png)
+
+**The Workspace tab provides:**
+
+- A repository overview
+- A keyboard-navigable file tree with a local name filter
+- README rendering for the repository and for the selected folder
+- Syntax-highlighted file preview, image previews, and GitHub permalinks at the
+  exact commit
+- Paged commit history, per-file history, and commit diffs in a read-only editor
+- Comparison of commits and changed files between two refs
+- Repository- and ref-scoped code search
+- Opening files from a matching local checkout, or cloning the repository when
+  none is open
 
 Credentials are stored using the operating system's secure credential/keychain facilities.
 
@@ -563,14 +637,20 @@ workflow_engine
 node_panel
 dotnet_panel
 python_panel
+rust_panel
 
 npm_manager_panel
 nuget_manager_panel
 python_manager_panel
+cargo_manager_panel
+cargo_backend
 
 processes_panel
 
+helm_backend
 helm_panel
+helm_ui
+helm_workspace
 
 script_runner_panel
 designer_panel
@@ -698,6 +778,12 @@ To build the project, follow Zed's Windows development instructions:
 [Zed Windows Build Guide](docs/src/development/windows.md)
 
 The current development and testing environment is Windows.
+
+Unsigned development builds for Windows, Linux and macOS can also be produced
+by the [`build_installers`](.github/workflows/build_installers.yml) workflow:
+run it manually from the Actions tab, or push a tag matching `dev-v*` to
+publish a prerelease. The builds are unsigned, so each platform warns on first
+run (SmartScreen on Windows, Gatekeeper on macOS).
 
 ---
 
