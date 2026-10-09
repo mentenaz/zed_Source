@@ -64,3 +64,4 @@ crates/docs_preprocessor/actions.json
 .forge/context/
 
 zeddev-debug.log
+extensions/razor/lsp.logs
