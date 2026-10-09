@@ -13,6 +13,7 @@ pub(super) enum HelmScreen {
     OrgList,
     OrgDetail,
     RepoList,
+    GitHubSearch,
     RepoDetail,
     Branches,
     Collaborators,
@@ -40,13 +41,6 @@ pub(super) enum HelmScreen {
     Deployments,
     Tags,
     Security,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum LoadState {
-    Idle,
-    Loading,
-    Error,
 }
 
 /// Result of re-checking `gh auth status`, mirroring the old TS store's

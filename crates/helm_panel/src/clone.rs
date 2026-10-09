@@ -55,10 +55,29 @@ impl HelmPanel {
     /// Opens the Clone-repository overlay, resetting any previous
     /// attempt's progress/error/success state so it always starts fresh.
     pub(super) fn open_clone_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_clone_modal_with_file(None, window, cx);
+    }
+
+    pub(super) fn open_clone_modal_for_file(
+        &mut self,
+        file: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_clone_modal_with_file(file, window, cx);
+    }
+
+    fn open_clone_modal_with_file(
+        &mut self,
+        file: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cloning = false;
         self.clone_lines.clear();
         self.clone_error = None;
         self.clone_succeeded_path = None;
+        self.clone_file_to_open = file;
         self.open_workspace_modal(HelmModalKind::CloneRepo, window, cx);
     }
 
@@ -66,7 +85,12 @@ impl HelmPanel {
     /// Clone overlay's "Yes" button, called instead of doing this
     /// automatically so the user can decline and clone elsewhere without a
     /// second window popping up unasked.
-    pub(super) fn handle_clone_open_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_clone_open_workspace(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.workspace
             .update(cx, |workspace, cx| {
                 workspace
@@ -97,6 +121,7 @@ impl HelmPanel {
         self.cloning = true;
         self.clone_lines.clear();
         self.clone_error = None;
+        let file_to_open = self.clone_file_to_open.clone();
         cx.notify();
 
         // Subscribe before starting the clone so no early lines are missed
@@ -155,18 +180,25 @@ impl HelmPanel {
                         this.clone_lines
                             .push(format!("Cloned repository to {target_path}"));
                         this.notify(format!("Cloned {repo_name} and installed dependencies"), cx);
+                        let mut paths = vec![std::path::PathBuf::from(&target_path)];
+                        if let Some(file) = file_to_open.as_deref()
+                            && let Some(file_path) = safe_clone_file_path(&target_path, file)
+                        {
+                            paths.push(file_path);
+                        }
                         this.workspace
                             .update(cx, |workspace, cx| {
                                 workspace
                                     .open_workspace_for_paths(
                                         workspace::OpenMode::NewWindow,
-                                        vec![std::path::PathBuf::from(&target_path)],
+                                        paths,
                                         window,
                                         cx,
                                     )
                                     .detach_and_log_err(cx);
                             })
                             .ok();
+                        this.clone_file_to_open = None;
                     }
                     Err(e) => this.clone_error = Some(e),
                 }
@@ -201,4 +233,17 @@ impl HelmPanel {
         })
         .detach();
     }
+}
+
+fn safe_clone_file_path(root: &str, file: &str) -> Option<std::path::PathBuf> {
+    let file = std::path::Path::new(file);
+    if file.as_os_str().is_empty()
+        || file.is_absolute()
+        || file
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(std::path::Path::new(root).join(file))
 }

@@ -138,7 +138,12 @@ impl HelmPanel {
     }
 
     /// What a click or `enter` on a Profile menu row does.
-    pub(super) fn open_profile_row(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_profile_row(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match id {
             "orgs" => self.navigate_to(HelmScreen::OrgList, cx),
             "repos" => self.open_repo_list(cx),
@@ -159,7 +164,10 @@ impl HelmPanel {
     /// landed). `None` before `self.user` has loaded, which in practice only
     /// happens on Gate/Auth (excluded by `render`'s `show_nav` condition
     /// anyway).
-    pub(super) fn render_identity_header(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn render_identity_header(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let muted_foreground = cx.theme().muted_foreground;
 
         // `OrgDetail` swaps in the org's own avatar/name instead of the
@@ -215,10 +223,7 @@ impl HelmPanel {
                                     description.filter(|bio| !bio.trim().is_empty()),
                                     |el, bio| {
                                         el.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted_foreground)
-                                                .child(bio),
+                                            div().text_xs().text_color(muted_foreground).child(bio),
                                         )
                                     },
                                 ),
@@ -255,6 +260,11 @@ impl HelmPanel {
                 danger: false,
             },
             MenuItem {
+                id: "github-search",
+                label: "Search GitHub",
+                danger: false,
+            },
+            MenuItem {
                 id: "create",
                 label: "Create Repository",
                 danger: false,
@@ -277,6 +287,7 @@ impl HelmPanel {
             "profile" => self.navigate_to(HelmScreen::Profile, cx),
             "orgs" => self.navigate_to(HelmScreen::OrgList, cx),
             "repos" => self.open_repo_list(cx),
+            "github-search" => self.open_github_search(cx),
             "create" => self.open_create_repo_dialog(window, cx),
             _ => {}
         }
@@ -362,21 +373,24 @@ impl HelmPanel {
                         .item("Following", fmt_num(user.following), 1),
                 ),
             )
-            .when(user.company.is_some() || user.location.is_some(), |column| {
-                let mut about = DescriptionList::horizontal()
-                    .bordered(false)
-                    .columns(1)
-                    .label_width(px(80.));
-                if let Some(company) = user.company.clone() {
-                    about = about.item("Company", company, 1);
-                }
-                if let Some(location) = user.location.clone() {
-                    about = about.item("Location", location, 1);
-                }
-                column
-                    .child(Separator::horizontal())
-                    .child(div().px_3().py_2().child(about))
-            })
+            .when(
+                user.company.is_some() || user.location.is_some(),
+                |column| {
+                    let mut about = DescriptionList::horizontal()
+                        .bordered(false)
+                        .columns(1)
+                        .label_width(px(80.));
+                    if let Some(company) = user.company.clone() {
+                        about = about.item("Company", company, 1);
+                    }
+                    if let Some(location) = user.location.clone() {
+                        about = about.item("Location", location, 1);
+                    }
+                    column
+                        .child(Separator::horizontal())
+                        .child(div().px_3().py_2().child(about))
+                },
+            )
             .into_any_element()
     }
 }

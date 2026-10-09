@@ -24,6 +24,120 @@ impl HelmPanel {
         );
     }
 
+    pub(super) fn open_github_search(&mut self, cx: &mut Context<Self>) {
+        self.github_search_results.clear();
+        self.github_search_query.clear();
+        self.navigate_to(HelmScreen::GitHubSearch, cx);
+    }
+
+    pub(super) fn load_github_search(&mut self, page: u32, cx: &mut Context<Self>) {
+        const SEARCH_PAGE_SIZE: u32 = 20;
+        let query = if page == 1 {
+            self.github_search_input.read(cx).value().trim().to_string()
+        } else {
+            self.github_search_query.clone()
+        };
+        if query.is_empty() {
+            self.github_search_results.clear();
+            self.github_search_query.clear();
+            self.error_msg = "Enter a search query.".into();
+            cx.notify();
+            return;
+        }
+        self.error_msg.clear();
+        self.github_search_query = query.clone();
+        let gh_state = self.gh_state.clone();
+        let load = self.github_search_results.begin_page(page);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(async move {
+                search_repositories_page(&gh_state, &query, page, SEARCH_PAGE_SIZE).await
+            })
+            .await
+            .map_err(|error| error.to_string());
+            this.update(cx, |this, cx| {
+                if this.github_search_results.is_current(load) {
+                    this.github_search_results.finish_page(result);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn render_github_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let input = self.github_search_input.clone();
+        let rate_line = self.gh_state.rate_limit_for("search").and_then(|rate| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            (now < rate.reset_at).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(if rate.is_low() {
+                        cx.theme().warning
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(format!("Search allowance: {}", rate.summary(now)))
+            })
+        });
+        let searched = !self.github_search_query.is_empty();
+        let header = v_flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Input::new(&input).flex_1())
+                    .child(
+                        Button::new("helm-search-github-submit")
+                            .primary()
+                            .label(if self.github_search_results.state == LoadState::Loading {
+                                "Searching…"
+                            } else {
+                                "Search"
+                            })
+                            .disabled(self.github_search_results.state == LoadState::Loading)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_github_search(1, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Search GitHub repositories. Submit only when ready to use the search allowance."),
+            )
+            .children(rate_line)
+            .when(!self.error_msg.is_empty(), |this| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(self.error_msg.clone()))
+            });
+
+        // The same list screen as Repositories: the rows, the spinner, the
+        // error with Retry and the pager all come from `list_screen`.
+        self.list_screen(
+            self.github_search_results
+                .paged_status(|this, page, cx| this.load_github_search(page, cx)),
+            &self.github_search_list,
+            Some(header.into_any_element()),
+            ListLabels {
+                loading: "Searching GitHub…",
+                error: "Repository search failed",
+                empty: if searched {
+                    "No repositories found"
+                } else {
+                    "Type a search and press Enter"
+                },
+            },
+            |this, cx| this.load_github_search(this.github_search_results.page, cx),
+            cx,
+        )
+    }
+
     /// User picked a repo from `RepoList` — mirrors the old TS
     /// `setSelectedRepo` + `setScreen("repo-detail")` pair. No extra fetch
     /// needed, the list response already has everything the detail screen
@@ -31,6 +145,23 @@ impl HelmPanel {
     pub(super) fn select_repo(&mut self, repo: Repo, cx: &mut Context<Self>) {
         self.selected_repo = Some(repo);
         self.navigate_to(HelmScreen::RepoDetail, cx);
+    }
+
+    pub(super) fn open_selected_repository_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let gh_state = self.gh_state.clone();
+        workspace.update(cx, |workspace, cx| {
+            helm_workspace::open_workspace_tab(repo, gh_state, workspace, window, cx);
+        });
     }
 
     /// Creates a repo under the authenticated user's own account, or under the
@@ -195,16 +326,35 @@ impl HelmPanel {
                             .text_color(foreground)
                             .child(repo.name.clone()),
                     )
-                    .child(Pill::secondary().outline().xsmall().child(repo_vis_label(&repo))),
+                    .child(
+                        Pill::secondary()
+                            .outline()
+                            .xsmall()
+                            .child(repo_vis_label(&repo)),
+                    ),
             )
             .child(
-                Button::new("helm-repo-edit")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Settings)
-                    .tooltip("Edit repository")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_edit_repo_dialog(window, cx)),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("helm-open-repository-workspace")
+                            .primary()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .label("Open Workspace")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_selected_repository_workspace(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("helm-repo-edit")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Settings)
+                            .tooltip("Edit repository")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_edit_repo_dialog(window, cx)
+                            })),
                     ),
             );
 
@@ -274,9 +424,9 @@ impl HelmPanel {
                         .primary()
                         .icon(IconName::Github)
                         .label("Clone repository")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_clone_modal(window, cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_clone_modal(window, cx)),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -361,11 +511,19 @@ pub(super) fn repo_sections() -> [(HelmScreen, IconName, &'static str); 12] {
         (HelmScreen::Collaborators, IconName::User, "Collaborators"),
         (HelmScreen::Issues, IconName::Inbox, "Issues"),
         (HelmScreen::Pulls, IconName::Redo, "Pull requests"),
-        (HelmScreen::Releases, IconName::GalleryVerticalEnd, "Releases"),
+        (
+            HelmScreen::Releases,
+            IconName::GalleryVerticalEnd,
+            "Releases",
+        ),
         (HelmScreen::Packages, IconName::HardDrive, "Packages"),
         (HelmScreen::Traffic, IconName::ChartPie, "Traffic"),
         (HelmScreen::Commits, IconName::Git, "Commits"),
-        (HelmScreen::WorkflowRuns, IconName::SquareTerminal, "Actions"),
+        (
+            HelmScreen::WorkflowRuns,
+            IconName::SquareTerminal,
+            "Actions",
+        ),
         (HelmScreen::Deployments, IconName::Globe, "Deployments"),
         (HelmScreen::Tags, IconName::Asterisk, "Tags"),
         (HelmScreen::Security, IconName::TriangleAlert, "Security"),
@@ -373,7 +531,12 @@ pub(super) fn repo_sections() -> [(HelmScreen, IconName, &'static str); 12] {
 }
 
 /// One row of a repository's sections.
-pub(super) fn repo_section_row(ix: usize, icon: IconName, label: &'static str, cx: &App) -> ListItem {
+pub(super) fn repo_section_row(
+    ix: usize,
+    icon: IconName,
+    label: &'static str,
+    cx: &App,
+) -> ListItem {
     let foreground = cx.theme().foreground;
     let muted_foreground = cx.theme().muted_foreground;
     ListItem::new(("helm-repo-section", ix))
@@ -425,6 +588,58 @@ pub(super) fn repo_row(ix: usize, repo: &Repo, cx: &App) -> ListItem {
         })
 }
 
+/// One row of the Search GitHub screen: owner and name, then the
+/// description, with the star count on the right. Every row has the second
+/// line, because the list needs its rows to be the same height.
+pub(super) fn search_repo_row(ix: usize, repo: &Repo, cx: &App) -> ListItem {
+    let foreground = cx.theme().foreground;
+    let muted_foreground = cx.theme().muted_foreground;
+    let description = repo
+        .description
+        .clone()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or_else(|| "No description".to_string());
+    let stars = fmt_num(repo.stargazers_count);
+    ListItem::new(("helm-search-repo", ix))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(foreground)
+                        .child(repo.full_name.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(description),
+                ),
+        )
+        .suffix(move |_, _| {
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("★ {stars}")),
+                )
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(muted_foreground),
+                )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,7 +665,11 @@ mod tests {
 
     #[test]
     fn the_search_box_filters_by_name_and_keeps_order() {
-        let repos = [repo("zed_Source"), repo("Forge.Scaffold.SDK"), repo("forge-templates")];
+        let repos = [
+            repo("zed_Source"),
+            repo("Forge.Scaffold.SDK"),
+            repo("forge-templates"),
+        ];
         assert_eq!(matching_repos(&repos, ""), vec![0, 1, 2]);
         assert_eq!(matching_repos(&repos, "   "), vec![0, 1, 2]);
         assert_eq!(matching_repos(&repos, "FORGE"), vec![1, 2]);

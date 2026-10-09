@@ -24,7 +24,8 @@ impl HelmPanel {
                 if let Ok(org_invitations) = org_result {
                     this.org_invitations = org_invitations;
                 }
-                this.repo_invitation_count = this.invitations.items.len() + this.org_invitations.len();
+                this.repo_invitation_count =
+                    this.invitations.items.len() + this.org_invitations.len();
                 cx.notify();
             })
             .ok();
@@ -33,12 +34,22 @@ impl HelmPanel {
     }
 
     /// Accepts a pending repo invitation and drops it from the list + badge.
-    pub(super) fn handle_accept_invitation(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_accept_invitation(
+        &mut self,
+        id: u64,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.run_action(HelmAction::AcceptRepoInvitation(id), true, cx);
     }
 
     /// Declines a pending repo invitation and drops it from the list + badge.
-    pub(super) fn handle_decline_invitation(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_decline_invitation(
+        &mut self,
+        id: u64,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.run_action(HelmAction::DeclineRepoInvitation(id), true, cx);
     }
 
@@ -205,10 +216,16 @@ pub(super) fn repo_invitation_row(
                         .text_color(foreground)
                         .child(invitation.repository.full_name.clone()),
                 )
-                .child(div().truncate().text_xs().text_color(muted_foreground).child(format!(
-                    "{visibility} · {} · invited by @{}",
-                    invitation.permissions, invitation.inviter.login
-                ))),
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!(
+                            "{visibility} · {} · invited by @{}",
+                            invitation.permissions, invitation.inviter.login
+                        )),
+                ),
         )
         .suffix(move |_, _| {
             invitation_buttons(

@@ -1,31 +1,44 @@
 //! One list screen's worth of data.
 //!
 //! Every list in Helm (issues, releases, tags, and so on) has rows, a load
-//! state, and the reason the last load failed. They used to be loose fields
-//! on `HelmPanel`, with a single loading flag and error message shared by
-//! the whole panel. A `Section` keeps one list's three together, so two
-//! lists loading at once no longer share one spinner and one error.
+//! state, and the reason the last load failed. Keeping each list's state
+//! together means that two lists loading at once do not share a spinner or
+//! error message.
 //!
 //! Which row is selected, and keyboard focus, are not here: the list widget
 //! that draws the rows owns those (see `list_view.rs`).
 
 use std::future::Future;
+use std::sync::Arc;
 
-use super::*;
+use gpui::Context;
+use helm_backend::{
+    github::{GhState, Page, Repo, fetch_page, peek_page, requests},
+    on_tokio,
+};
 
-pub(super) struct Section<T> {
-    pub(super) items: Vec<T>,
-    pub(super) state: LoadState,
+use crate::HelmView;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadState {
+    Idle,
+    Loading,
+    Error,
+}
+
+pub struct Section<T> {
+    pub items: Vec<T>,
+    pub state: LoadState,
     /// Why the last load failed. Empty unless `state` is `Error`.
-    pub(super) error: String,
+    pub error: String,
     /// Which page `items` is, counting from 1. A list that is not paged is
     /// always on page 1 of 1.
-    pub(super) page: u32,
+    pub page: u32,
     /// The last page there is.
-    pub(super) last_page: u32,
+    pub last_page: u32,
     /// The rows are a remembered answer, shown while GitHub is asked
     /// whether they are still right.
-    pub(super) refreshing: bool,
+    pub refreshing: bool,
     /// Counts page loads. An answer that arrives after a newer load began,
     /// or after the screen was left, belongs to an older number and is
     /// dropped (see [`Self::is_current`]).
@@ -46,10 +59,69 @@ impl<T> Default for Section<T> {
     }
 }
 
+/// One asynchronously loaded value, such as a repository tree or commit.
+pub struct Loaded<T> {
+    pub value: Option<T>,
+    pub state: LoadState,
+    /// Why the last load failed. Empty unless `state` is `Error`.
+    pub error: String,
+    load: u64,
+}
+
+impl<T> Default for Loaded<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            state: LoadState::Idle,
+            error: String::new(),
+            load: 0,
+        }
+    }
+}
+
+impl<T> Loaded<T> {
+    /// Drops the value and invalidates any load that is still in flight.
+    pub fn clear(&mut self) {
+        self.value = None;
+        self.state = LoadState::Idle;
+        self.error.clear();
+        self.load += 1;
+    }
+
+    /// Marks a new load as started and returns its identity.
+    pub fn begin(&mut self) -> u64 {
+        self.load += 1;
+        self.state = LoadState::Loading;
+        self.error.clear();
+        self.load
+    }
+
+    /// Stores a finished load. On failure, a previously loaded value remains
+    /// available, but `state` makes clear that it was not refreshed.
+    pub fn finish(&mut self, result: Result<T, String>) {
+        match result {
+            Ok(value) => {
+                self.value = Some(value);
+                self.state = LoadState::Idle;
+                self.error.clear();
+            }
+            Err(error) => {
+                self.state = LoadState::Error;
+                self.error = error;
+            }
+        }
+    }
+
+    /// Whether a result still belongs to the most recently started load.
+    pub fn is_current(&self, load: u64) -> bool {
+        self.load == load
+    }
+}
+
 impl<T> Section<T> {
     /// Drops the rows and any load state, for when the screen they belong
     /// to is left behind.
-    pub(super) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.items.clear();
         self.state = LoadState::Idle;
         self.error.clear();
@@ -59,9 +131,9 @@ impl<T> Section<T> {
         self.load += 1;
     }
 
-    /// Marks a load as started. [`HelmPanel::load_section`] calls this; a
-    /// loader that fills several sections from one request calls it itself.
-    pub(super) fn begin(&mut self) {
+    /// Marks a load as started. A view's section loader calls this; a loader
+    /// that fills several sections from one request calls it itself.
+    pub fn begin(&mut self) {
         self.state = LoadState::Loading;
         self.error.clear();
         self.refreshing = false;
@@ -70,7 +142,7 @@ impl<T> Section<T> {
     /// Stores a finished load. A failure keeps the rows already shown: the
     /// screen says the load failed, and the old rows are not passed off as
     /// the answer because the state is `Error`.
-    pub(super) fn finish(&mut self, result: Result<Vec<T>, String>) {
+    pub fn finish(&mut self, result: Result<Vec<T>, String>) {
         match result {
             Ok(items) => {
                 self.items = items;
@@ -91,7 +163,7 @@ impl<T> Section<T> {
     ///
     /// Returns the load's number, to hand to [`Self::is_current`] when the
     /// answer arrives.
-    pub(super) fn begin_page(&mut self, page: u32) -> u64 {
+    pub fn begin_page(&mut self, page: u32) -> u64 {
         self.begin();
         self.page = page.max(1);
         self.last_page = self.last_page.max(self.page);
@@ -102,7 +174,7 @@ impl<T> Section<T> {
     /// Starts a load of a page whose last answer is remembered: shows that
     /// answer at once, with no spinner, while GitHub is asked again.
     /// Returns the load's number, as [`Self::begin_page`] does.
-    pub(super) fn begin_page_with(&mut self, remembered: Page<T>) -> u64 {
+    pub fn begin_page_with(&mut self, remembered: Page<T>) -> u64 {
         self.items = remembered.items;
         self.page = remembered.page;
         self.last_page = remembered.last_page;
@@ -115,12 +187,12 @@ impl<T> Section<T> {
 
     /// Whether `load` is still the latest page load, so that its answer is
     /// the one to show.
-    pub(super) fn is_current(&self, load: u64) -> bool {
+    pub fn is_current(&self, load: u64) -> bool {
         self.load == load
     }
 
     /// Stores a finished load of one page.
-    pub(super) fn finish_page(&mut self, result: Result<Page<T>, String>) {
+    pub fn finish_page(&mut self, result: Result<Page<T>, String>) {
         self.refreshing = false;
         match result {
             Ok(page) => {
@@ -138,12 +210,12 @@ impl<T> Section<T> {
 }
 
 /// How many rows a paged list shows at a time.
-pub(super) const PAGE_SIZE: u32 = 10;
+pub const PAGE_SIZE: u32 = 10;
 
-/// Which rows of a list of `len` are on page `page`, for a list the panel
+/// Which rows of a list of `len` are on page `page`, for a list a view
 /// holds in full and pages itself. Returns the page actually shown (a page
 /// past the end becomes the last one), the last page, and the rows.
-pub(super) fn page_slice(len: usize, page: u32, per_page: u32) -> (u32, u32, std::ops::Range<usize>) {
+pub fn page_slice(len: usize, page: u32, per_page: u32) -> (u32, u32, std::ops::Range<usize>) {
     let per_page = per_page.max(1) as usize;
     let last_page = len.div_ceil(per_page).max(1) as u32;
     let page = page.clamp(1, last_page);
@@ -151,13 +223,59 @@ pub(super) fn page_slice(len: usize, page: u32, per_page: u32) -> (u32, u32, std
     (page, last_page, start..(start + per_page).min(len))
 }
 
-impl HelmPanel {
+pub trait HelmViewExt: HelmView {
+    /// Loads one value without requiring a selected repository.
+    fn load_value_with<T, E, Fut>(
+        &mut self,
+        cx: &mut Context<Self>,
+        loaded: fn(&mut Self) -> &mut Loaded<T>,
+        fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
+    ) where
+        T: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let load = loaded(self).begin();
+        cx.notify();
+        let gh_state = self.gh_state().clone();
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(fetch(gh_state)).await;
+            this.update(cx, |this, cx| {
+                let loaded = loaded(this);
+                if loaded.is_current(load) {
+                    loaded.finish(result.map_err(|error| error.to_string()));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::load_value_with`] for values belonging to the selected repo.
+    /// Does nothing when no repository is selected.
+    fn load_value<T, E, Fut>(
+        &mut self,
+        cx: &mut Context<Self>,
+        loaded: fn(&mut Self) -> &mut Loaded<T>,
+        fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
+    ) where
+        T: Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let Some(repo) = self.repo().cloned() else {
+            return;
+        };
+        self.load_value_with(cx, loaded, move |gh_state| fetch(repo, gh_state));
+    }
+
     /// Loads one section's rows.
     ///
     /// `section` picks the section out of the panel. It is called once
     /// before the request and once after, so it is a plain function, not
     /// a closure that captures anything.
-    pub(super) fn load_section_with<T, E, Fut>(
+    fn load_section_with<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
@@ -169,7 +287,7 @@ impl HelmPanel {
     {
         section(self).begin();
         cx.notify();
-        let gh_state = self.gh_state.clone();
+        let gh_state = self.gh_state().clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(gh_state)).await;
             this.update(cx, |this, cx| {
@@ -183,7 +301,7 @@ impl HelmPanel {
 
     /// [`Self::load_section_with`] for rows that belong to the repository
     /// the user drilled into. Does nothing when no repository is selected.
-    pub(super) fn load_section<T, E, Fut>(
+    fn load_section<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
@@ -193,14 +311,12 @@ impl HelmPanel {
         E: std::fmt::Display + Send + 'static,
         Fut: Future<Output = Result<Vec<T>, E>> + Send + 'static,
     {
-        let Some(repo) = self.selected_repo.clone() else {
+        let Some(repo) = self.repo().cloned() else {
             return;
         };
         self.load_section_with(cx, section, move |gh_state| fetch(repo, gh_state));
     }
-}
 
-impl HelmPanel {
     /// Loads page `page` of one section's rows for the selected repository.
     /// Does nothing when no repository is selected.
     ///
@@ -208,7 +324,7 @@ impl HelmPanel {
     /// it is there the rows are shown at once and `fetch` only confirms or
     /// replaces them; GitHub answers "not modified" for free when nothing
     /// changed.
-    pub(super) fn load_section_page<T, E, Fut>(
+    fn load_section_page<T, E, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
@@ -220,10 +336,10 @@ impl HelmPanel {
         E: std::fmt::Display + Send + 'static,
         Fut: Future<Output = Result<Page<T>, E>> + Send + 'static,
     {
-        let Some(repo) = self.selected_repo.clone() else {
+        let Some(repo) = self.repo().cloned() else {
             return;
         };
-        let gh_state = self.gh_state.clone();
+        let gh_state = self.gh_state().clone();
         let load = match peek(&repo, &gh_state) {
             Some(remembered) => section(self).begin_page_with(remembered),
             None => section(self).begin_page(page),
@@ -248,7 +364,7 @@ impl HelmPanel {
 
     /// [`Self::load_section_page`] for the common case: one request, whose
     /// answer is the list itself. `request` builds it for the repository.
-    pub(super) fn load_repo_page<T>(
+    fn load_repo_page<T>(
         &mut self,
         cx: &mut Context<Self>,
         section: fn(&mut Self) -> &mut Section<T>,
@@ -257,7 +373,7 @@ impl HelmPanel {
     ) where
         T: serde::de::DeserializeOwned + Send + 'static,
     {
-        let Some(repo) = self.selected_repo.clone() else {
+        let Some(repo) = self.repo().cloned() else {
             return;
         };
         let remembered = request(&repo);
@@ -273,9 +389,48 @@ impl HelmPanel {
     }
 }
 
+impl<V: HelmView> HelmViewExt for V {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_value_tracks_success_failure_and_clear() {
+        let mut loaded = Loaded::<u32>::default();
+        assert!(loaded.value.is_none());
+        assert_eq!(loaded.state, LoadState::Idle);
+
+        let first = loaded.begin();
+        assert_eq!(loaded.state, LoadState::Loading);
+        loaded.finish(Ok(42));
+        assert_eq!(loaded.value, Some(42));
+        assert_eq!(loaded.state, LoadState::Idle);
+        assert!(loaded.is_current(first));
+
+        loaded.begin();
+        loaded.finish(Err("offline".into()));
+        assert_eq!(loaded.value, Some(42));
+        assert_eq!(loaded.state, LoadState::Error);
+        assert_eq!(loaded.error, "offline");
+
+        loaded.clear();
+        assert!(loaded.value.is_none());
+        assert_eq!(loaded.state, LoadState::Idle);
+        assert!(loaded.error.is_empty());
+    }
+
+    #[test]
+    fn only_the_latest_value_load_counts() {
+        let mut loaded = Loaded::<u32>::default();
+        let first = loaded.begin();
+        let second = loaded.begin();
+        assert!(!loaded.is_current(first));
+        assert!(loaded.is_current(second));
+
+        loaded.clear();
+        assert!(!loaded.is_current(second));
+    }
 
     #[test]
     fn a_load_goes_from_loading_to_idle_with_its_rows() {

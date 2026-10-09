@@ -14,9 +14,12 @@ impl HelmPanel {
             return;
         }
         self.branches.items.clear();
-        self.load_repo_page(cx, |this| &mut this.branches, page, |repo| {
-            requests::branches(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.branches,
+            page,
+            |repo| requests::branches(&repo.owner.login, &repo.name),
+        );
     }
 
     /// The branches list — read-only, mirrors `render_repo_list`'s
@@ -36,31 +39,4 @@ impl HelmPanel {
             cx,
         )
     }
-}
-
-/// One row of the Branches screen: the branch's name, and whether it is the
-/// repository's default branch or protected.
-pub(super) fn branch_row(ix: usize, branch: &Branch, default_branch: &str, cx: &App) -> ListItem {
-    let muted_foreground = cx.theme().muted_foreground;
-    let foreground = cx.theme().foreground;
-    let is_default = branch.name == default_branch;
-    let protected = branch.protected;
-    ListItem::new(("helm-branch", ix))
-        .child(div().text_color(foreground).child(branch.name.clone()))
-        .suffix(move |_, _| {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .when(is_default, |row| {
-                    row.child(chip("default"))
-                })
-                .when(protected, |row| {
-                    row.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_foreground)
-                            .child("protected"),
-                    )
-                })
-        })
 }

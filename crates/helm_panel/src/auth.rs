@@ -223,6 +223,20 @@ impl HelmPanel {
         .detach();
     }
 
+    pub(super) fn prepare_workspace_scope_authorization(&mut self, cx: &mut Context<Self>) {
+        self.screen = HelmScreen::Auth;
+        self.auth_initialized = true;
+        self.login_started = false;
+        self.pending_action = None;
+        self.scope_to_authorize = "repo";
+        self.load_state = LoadState::Idle;
+        self.error_msg = missing_scope_message("repo");
+        self.device_code.clear();
+        self.device_url.clear();
+        self.code_copied = false;
+        cx.notify();
+    }
+
     /// Runs `gh auth refresh -s <scope> --hostname github.com` for
     /// `self.scope_to_authorize` and shows its device code the same way a
     /// first login does — `login_started` is what switches `render_auth`
@@ -318,9 +332,10 @@ impl HelmPanel {
         v_flex()
             .gap_3()
             .p_4()
-            .child(
-                Alert::warning("helm-gate-alert", "GitHub CLI (gh) is required"),
-            )
+            .child(Alert::warning(
+                "helm-gate-alert",
+                "GitHub CLI (gh) is required",
+            ))
             .child(
                 div()
                     .text_sm()
@@ -355,33 +370,27 @@ impl HelmPanel {
 
         // Missing scope — `repo` from the startup check, or whichever scope
         // a rejected action needs.
-        if self.error_msg == missing_scope_message(self.scope_to_authorize) && !self.login_started
-        {
+        if self.error_msg == missing_scope_message(self.scope_to_authorize) && !self.login_started {
             let loading = self.load_state == LoadState::Loading;
             let scope = self.scope_to_authorize;
             return v_flex()
                 .gap_3()
                 .p_4()
-                .child(
-                    Alert::warning(
-                        "helm-scope-alert",
-                        format!("Missing '{scope}' scope"),
-                    ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child(if self.pending_action.is_some() {
-                            format!(
-                                "GitHub rejected your last change because this login lacks \
+                .child(Alert::warning(
+                    "helm-scope-alert",
+                    format!("Missing '{scope}' scope"),
+                ))
+                .child(div().text_sm().text_color(muted_foreground).child(
+                    if self.pending_action.is_some() {
+                        format!(
+                            "GitHub rejected your last change because this login lacks \
                                  the {scope} scope. Authorize it and Helm will send the \
                                  change again."
-                            )
-                        } else {
-                            format!("Helm needs the {scope} scope to manage repositories.")
-                        }),
-                )
+                        )
+                    } else {
+                        format!("Helm needs the {scope} scope for this GitHub operation.")
+                    },
+                ))
                 .child(
                     Button::new("auth-authorize-scope")
                         .primary()
@@ -484,9 +493,7 @@ impl HelmPanel {
             return v_flex()
                 .gap_3()
                 .p_4()
-                .child(
-                    Alert::error("helm-login-error", self.error_msg.clone()),
-                )
+                .child(Alert::error("helm-login-error", self.error_msg.clone()))
                 .child(
                     Button::new("auth-retry")
                         .outline()

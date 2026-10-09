@@ -5,7 +5,8 @@ use super::*;
 
 /// GitHub's collaborator permission levels, in ascending order — used both
 /// as the API's `permission` value and as the label shown in the dropdown.
-pub(super) const COLLABORATOR_PERMISSIONS: [&str; 5] = ["pull", "triage", "push", "maintain", "admin"];
+pub(super) const COLLABORATOR_PERMISSIONS: [&str; 5] =
+    ["pull", "triage", "push", "maintain", "admin"];
 
 impl HelmPanel {
     /// Loads the collaborator list for `self.selected_repo` — mirrors
@@ -15,9 +16,12 @@ impl HelmPanel {
     }
 
     pub(super) fn load_collaborators_page(&mut self, page: u32, cx: &mut Context<Self>) {
-        self.load_repo_page(cx, |this| &mut this.collaborators, page, |repo| {
-            requests::collaborators(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.collaborators,
+            page,
+            |repo| requests::collaborators(&repo.owner.login, &repo.name),
+        );
     }
 
     /// Sets `login`'s permission on `self.selected_repo` — GitHub's
@@ -93,7 +97,11 @@ impl HelmPanel {
 
     /// Opens the "Add collaborator" dialog: a username and one of GitHub's
     /// permission levels.
-    pub(super) fn open_add_collaborator_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_add_collaborator_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_workspace_modal(HelmModalKind::AddCollaborator, window, cx);
     }
 

@@ -15,57 +15,83 @@
 
 use std::collections::HashMap;
 
+use super::requests::ApiResponseFormat;
+
 /// How many answers are remembered. When one more arrives, the one used
 /// longest ago is dropped.
 pub const MAX_CACHED_RESPONSES: usize = 200;
+/// Keep the in-memory cache from ballooning on large tree/blob answers.
+pub const MAX_CACHED_BYTES: usize = 32 * 1024 * 1024;
 
 /// A remembered answer to a `GET`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CachedResponse {
     pub etag: String,
-    pub body: String,
+    pub body: Vec<u8>,
     /// The `Link` header that came with it, for paged lists.
     pub link: Option<String>,
+}
+
+fn cache_key(path: &str, accept: ApiResponseFormat) -> String {
+    format!("{path}\0{:?}", accept)
 }
 
 #[derive(Default)]
 pub struct ResponseCache {
     entries: HashMap<String, (CachedResponse, u64)>,
+    /// Tracks the number of bytes held in memory so huge tree/blob payloads do
+    /// not exhaust the app with a handful of cached answers.
+    total_bytes: usize,
     /// Counts uses, so the entry used longest ago can be found.
     clock: u64,
 }
 
 impl ResponseCache {
-    /// The remembered answer for `path`, marking it as just used.
-    pub fn get(&mut self, path: &str) -> Option<CachedResponse> {
+    /// The remembered answer for `path` and `accept`, marking it as just used.
+    pub fn get(&mut self, path: &str, accept: ApiResponseFormat) -> Option<CachedResponse> {
         self.clock += 1;
         let clock = self.clock;
-        let (response, used) = self.entries.get_mut(path)?;
+        let key = cache_key(path, accept);
+        let (response, used) = self.entries.get_mut(&key)?;
         *used = clock;
         Some(response.clone())
     }
 
-    /// The tag to send as `If-None-Match` for `path`.
-    pub fn etag(&self, path: &str) -> Option<String> {
+    /// The tag to send as `If-None-Match` for a response format.
+    pub fn etag(&self, path: &str, accept: ApiResponseFormat) -> Option<String> {
+        let key = cache_key(path, accept);
         self.entries
-            .get(path)
+            .get(&key)
             .map(|(response, _)| response.etag.clone())
     }
 
-    pub fn put(&mut self, path: &str, response: CachedResponse) {
+    pub fn put(&mut self, path: &str, accept: ApiResponseFormat, response: CachedResponse) {
+        let key = cache_key(path, accept);
         self.clock += 1;
-        self.entries
-            .insert(path.to_string(), (response, self.clock));
-        while self.entries.len() > MAX_CACHED_RESPONSES {
+        self.entries.insert(key, (response, self.clock));
+        self.total_bytes = self
+            .entries
+            .values()
+            .map(|(response, _)| response_size(response))
+            .sum();
+
+        while self.entries.len() > MAX_CACHED_RESPONSES || self.total_bytes > MAX_CACHED_BYTES {
             let oldest = self
                 .entries
                 .iter()
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(path, _)| path.clone());
             match oldest {
-                Some(path) => self.entries.remove(&path),
+                Some(oldest_key) => {
+                    self.entries.remove(&oldest_key);
+                    self.total_bytes = self
+                        .entries
+                        .values()
+                        .map(|(response, _)| response_size(response))
+                        .sum();
+                }
                 None => break,
-            };
+            }
         }
     }
 
@@ -74,6 +100,7 @@ impl ResponseCache {
     /// be true, or may belong to someone else.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.total_bytes = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -83,6 +110,10 @@ impl ResponseCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+fn response_size(response: &CachedResponse) -> usize {
+    response.etag.len() + response.body.len() + response.link.as_deref().map_or(0, str::len)
 }
 
 /// How much of GitHub's request allowance is left.
@@ -95,19 +126,54 @@ pub struct RateLimit {
     pub reset_at: u64,
 }
 
+/// Rate-limit snapshots and secondary-limit cooldowns, keyed by the endpoint
+/// family selected by the request builder.
+#[derive(Default)]
+pub struct RateLimitTracker {
+    limits: HashMap<String, RateLimit>,
+    retry_at: HashMap<String, u64>,
+}
+
+impl RateLimitTracker {
+    pub fn record(
+        &mut self,
+        resource: &str,
+        limit: Option<RateLimit>,
+        retry_after: Option<u64>,
+        now: u64,
+    ) {
+        if let Some(limit) = limit {
+            self.limits.insert(resource.to_string(), limit);
+        }
+        if let Some(retry_after) = retry_after {
+            self.retry_at
+                .insert(resource.to_string(), now.saturating_add(retry_after));
+        }
+    }
+
+    pub fn get(&self, resource: &str) -> Option<RateLimit> {
+        self.limits.get(resource).copied()
+    }
+
+    pub fn retry_at(&self, resource: &str) -> Option<u64> {
+        self.retry_at.get(resource).copied()
+    }
+
+    pub fn clear(&mut self) {
+        self.limits.clear();
+        self.retry_at.clear();
+    }
+}
+
 impl RateLimit {
     /// From the headers of an answer. `None` when the answer did not carry
-    /// them, or they describe a different allowance than the main one
-    /// (search, for one, has its own much smaller limit).
+    /// the complete allowance; the caller keeps it under the request's
+    /// resource key.
     pub fn from_headers(
         limit: Option<u64>,
         remaining: Option<u64>,
         reset_at: Option<u64>,
-        resource: Option<&str>,
     ) -> Option<RateLimit> {
-        if resource.is_some_and(|resource| resource != "core") {
-            return None;
-        }
         Some(RateLimit {
             limit: limit?,
             remaining: remaining?,
@@ -164,7 +230,7 @@ mod tests {
     fn response(etag: &str, body: &str) -> CachedResponse {
         CachedResponse {
             etag: etag.to_string(),
-            body: body.to_string(),
+            body: body.as_bytes().to_vec(),
             link: None,
         }
     }
@@ -172,29 +238,105 @@ mod tests {
     #[test]
     fn an_answer_is_remembered_with_its_tag() {
         let mut cache = ResponseCache::default();
-        assert_eq!(cache.etag("/user"), None);
-        assert_eq!(cache.get("/user"), None);
+        assert_eq!(cache.etag("/user", ApiResponseFormat::Json), None);
+        assert_eq!(cache.get("/user", ApiResponseFormat::Json), None);
 
-        cache.put("/user", response("\"abc\"", "{}"));
-        assert_eq!(cache.etag("/user").as_deref(), Some("\"abc\""));
-        assert_eq!(cache.get("/user"), Some(response("\"abc\"", "{}")));
+        cache.put("/user", ApiResponseFormat::Json, response("\"abc\"", "{}"));
+        assert_eq!(
+            cache.etag("/user", ApiResponseFormat::Json).as_deref(),
+            Some("\"abc\"")
+        );
+        assert_eq!(
+            cache.get("/user", ApiResponseFormat::Json),
+            Some(response("\"abc\"", "{}"))
+        );
 
         // A newer answer replaces the old one.
-        cache.put("/user", response("\"def\"", "{\"x\":1}"));
-        assert_eq!(cache.etag("/user").as_deref(), Some("\"def\""));
+        cache.put(
+            "/user",
+            ApiResponseFormat::Json,
+            response("\"def\"", "{\"x\":1}"),
+        );
+        assert_eq!(
+            cache.etag("/user", ApiResponseFormat::Json).as_deref(),
+            Some("\"def\"")
+        );
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn various_accept_formats_are_cached_separately() {
+        let mut cache = ResponseCache::default();
+        cache.put(
+            "/repos/o/r/readme",
+            ApiResponseFormat::Json,
+            response("\"json\"", "{}"),
+        );
+        cache.put(
+            "/repos/o/r/readme",
+            ApiResponseFormat::Raw,
+            response("\"raw\"", "README"),
+        );
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.get("/repos/o/r/readme", ApiResponseFormat::Json),
+            Some(response("\"json\"", "{}"))
+        );
+        assert_eq!(
+            cache.get("/repos/o/r/readme", ApiResponseFormat::Raw),
+            Some(response("\"raw\"", "README"))
+        );
+    }
+
+    #[test]
+    fn raw_cache_entries_preserve_binary_bytes() {
+        let mut cache = ResponseCache::default();
+        let bytes = vec![0x00, 0xFF, 0x80, b'\n'];
+        cache.put(
+            "/repos/o/r/git/blobs/sha",
+            ApiResponseFormat::Raw,
+            CachedResponse {
+                etag: "\"binary\"".into(),
+                body: bytes.clone(),
+                link: None,
+            },
+        );
+        assert_eq!(
+            cache
+                .get("/repos/o/r/git/blobs/sha", ApiResponseFormat::Raw)
+                .unwrap()
+                .body,
+            bytes
+        );
     }
 
     #[test]
     fn pages_and_filters_are_separate_answers() {
         let mut cache = ResponseCache::default();
-        cache.put("/repos/o/r/issues?state=open&per_page=10&page=1", response("\"p1\"", "[1]"));
-        cache.put("/repos/o/r/issues?state=open&per_page=10&page=2", response("\"p2\"", "[2]"));
-        cache.put("/repos/o/r/issues?state=closed&per_page=10&page=1", response("\"c1\"", "[3]"));
+        cache.put(
+            "/repos/o/r/issues?state=open&per_page=10&page=1",
+            ApiResponseFormat::Json,
+            response("\"p1\"", "[1]"),
+        );
+        cache.put(
+            "/repos/o/r/issues?state=open&per_page=10&page=2",
+            ApiResponseFormat::Json,
+            response("\"p2\"", "[2]"),
+        );
+        cache.put(
+            "/repos/o/r/issues?state=closed&per_page=10&page=1",
+            ApiResponseFormat::Json,
+            response("\"c1\"", "[3]"),
+        );
         assert_eq!(cache.len(), 3);
         assert_eq!(
-            cache.get("/repos/o/r/issues?state=open&per_page=10&page=2").map(|r| r.body),
-            Some("[2]".to_string())
+            cache
+                .get(
+                    "/repos/o/r/issues?state=open&per_page=10&page=2",
+                    ApiResponseFormat::Json
+                )
+                .map(|r| r.body),
+            Some(b"[2]".to_vec())
         );
     }
 
@@ -202,31 +344,81 @@ mod tests {
     fn the_answer_used_longest_ago_makes_room() {
         let mut cache = ResponseCache::default();
         for n in 0..MAX_CACHED_RESPONSES {
-            cache.put(&format!("/item/{n}"), response("\"t\"", ""));
+            cache.put(
+                &format!("/item/{n}"),
+                ApiResponseFormat::Json,
+                response("\"t\"", ""),
+            );
         }
         assert_eq!(cache.len(), MAX_CACHED_RESPONSES);
 
         // Using the oldest saves it; the next oldest goes in its place.
-        assert!(cache.get("/item/0").is_some());
-        cache.put("/item/new", response("\"t\"", ""));
+        assert!(cache.get("/item/0", ApiResponseFormat::Json).is_some());
+        cache.put("/item/new", ApiResponseFormat::Json, response("\"t\"", ""));
         assert_eq!(cache.len(), MAX_CACHED_RESPONSES);
-        assert!(cache.etag("/item/0").is_some());
-        assert!(cache.etag("/item/1").is_none());
-        assert!(cache.etag("/item/new").is_some());
+        assert!(cache.etag("/item/0", ApiResponseFormat::Json).is_some());
+        assert!(cache.etag("/item/1", ApiResponseFormat::Json).is_none());
+        assert!(cache.etag("/item/new", ApiResponseFormat::Json).is_some());
     }
 
     #[test]
     fn clearing_forgets_everything() {
         let mut cache = ResponseCache::default();
-        cache.put("/user", response("\"abc\"", "{}"));
+        cache.put("/user", ApiResponseFormat::Json, response("\"abc\"", "{}"));
         cache.clear();
         assert!(cache.is_empty());
-        assert_eq!(cache.etag("/user"), None);
+        assert_eq!(cache.etag("/user", ApiResponseFormat::Json), None);
+    }
+
+    #[test]
+    fn the_cache_enforces_a_byte_limit() {
+        let mut cache = ResponseCache::default();
+        let large = "x".repeat(MAX_CACHED_BYTES + 1024);
+        cache.put(
+            "/blob/huge",
+            ApiResponseFormat::Raw,
+            response("\"a\"", &large),
+        );
+        assert!(cache.len() <= MAX_CACHED_RESPONSES);
+        assert!(cache.total_bytes <= MAX_CACHED_BYTES);
+    }
+
+    #[test]
+    fn rate_limit_resources_keep_independent_allowances_and_cooldowns() {
+        let mut tracker = RateLimitTracker::default();
+        let core = RateLimit {
+            limit: 5000,
+            remaining: 0,
+            reset_at: 200,
+        };
+        let search = RateLimit {
+            limit: 30,
+            remaining: 0,
+            reset_at: 150,
+        };
+        let code_search = RateLimit {
+            limit: 10,
+            remaining: 7,
+            reset_at: 160,
+        };
+        tracker.record("core", Some(core), None, 100);
+        tracker.record("search", Some(search), Some(30), 100);
+        tracker.record("code_search", Some(code_search), None, 100);
+
+        assert_eq!(tracker.get("core"), Some(core));
+        assert_eq!(tracker.get("search"), Some(search));
+        assert_eq!(tracker.get("code_search"), Some(code_search));
+        assert_eq!(tracker.retry_at("search"), Some(130));
+        assert_eq!(tracker.retry_at("code_search"), None);
+
+        tracker.clear();
+        assert_eq!(tracker.get("core"), None);
+        assert_eq!(tracker.retry_at("search"), None);
     }
 
     #[test]
     fn the_rate_limit_is_read_from_an_answers_headers() {
-        let limit = RateLimit::from_headers(Some(5000), Some(4812), Some(1_800_001_380), None);
+        let limit = RateLimit::from_headers(Some(5000), Some(4812), Some(1_800_001_380));
         assert_eq!(
             limit,
             Some(RateLimit {
@@ -236,18 +428,24 @@ mod tests {
             })
         );
         assert_eq!(
-            RateLimit::from_headers(Some(5000), Some(4812), Some(1), Some("core")),
+            RateLimit::from_headers(Some(5000), Some(4812), Some(1)),
             Some(RateLimit {
                 limit: 5000,
                 remaining: 4812,
                 reset_at: 1
             })
         );
-        // Search has its own allowance; it must not be shown as the main one.
-        assert_eq!(RateLimit::from_headers(Some(30), Some(29), Some(1), Some("search")), None);
+        assert_eq!(
+            RateLimit::from_headers(Some(30), Some(29), Some(1)),
+            Some(RateLimit {
+                limit: 30,
+                remaining: 29,
+                reset_at: 1
+            })
+        );
         // An answer without the headers says nothing.
-        assert_eq!(RateLimit::from_headers(None, Some(1), Some(1), None), None);
-        assert_eq!(RateLimit::from_headers(Some(1), None, Some(1), None), None);
+        assert_eq!(RateLimit::from_headers(None, Some(1), Some(1)), None);
+        assert_eq!(RateLimit::from_headers(Some(1), None, Some(1)), None);
     }
 
     #[test]

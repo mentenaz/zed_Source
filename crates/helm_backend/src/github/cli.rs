@@ -163,6 +163,7 @@ async fn gh_refresh_scope(scope: &str, state: &GhState) -> Result<(), String> {
             *state.token.write().await = None;
             // Answers remembered under the old sign-in are not this one's.
             state.forget_answers();
+            state.forget_rate_limits();
             Ok(())
         }
         Ok(status) => Err(format!(
@@ -194,6 +195,7 @@ pub async fn gh_logout(state: &GhState) -> Result<(), String> {
             *state.token.write().await = None;
             // Answers remembered under the old sign-in are not this one's.
             state.forget_answers();
+            state.forget_rate_limits();
             Ok(())
         }
         Ok(out) => Err(format!(

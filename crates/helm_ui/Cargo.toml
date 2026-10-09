@@ -1,0 +1,20 @@
+[package]
+name = "helm_ui"
+description = "Shared GitHub Helm UI components."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+helm_backend.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

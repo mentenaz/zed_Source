@@ -4,22 +4,26 @@
 //! request; `error::interpret` turns the answer into a value or a
 //! [`GhError`]. All endpoint functions are thin wrappers over those two.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpRequestExt as _, RedirectPolicy};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 
 use super::cache::{CachedResponse, RateLimit};
 use super::error::{GhError, RawResponse, interpret, interpret_empty, unix_now};
 use super::gh_cmd;
 use super::paging::{Page, interpret_page, interpret_page_under};
-use super::requests::{self, ApiRequest};
+use super::requests::{self, ApiRequest, ApiResponseFormat};
 use super::types::{
-    Branch, Collaborator, Comment, CommitSummary, Deployment, GhState, GitHubUser,
-    GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull, Release,
-    Repo, RepoInvitation, Tag, TrafficClones, TrafficPath, TrafficReferrer, TrafficViews,
-    WorkflowJob, WorkflowRun,
+    BlobData, BlobKind, Branch, Collaborator, CombinedCommitStatus, Comment, CommitDetail,
+    CommitFile, CommitSummary, CompareFile, CompareResult, Deployment, GhState, GitHubUser,
+    GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull, Readme,
+    RefMovement, Release, Repo, RepoInvitation, RepoTree, ResolvedRef, SearchCodeMatch,
+    SearchRepoResult, Tag, TrafficClones, TrafficPath, TrafficReferrer, TrafficViews, TreeEntry,
+    TreeEntryKind, TreeLoadResult, WorkflowJob, WorkflowRun, classify_file, classify_ref_movement,
 };
 
 /// The access token: the cached one, or a fresh one from `gh auth token`.
@@ -61,8 +65,17 @@ async fn send_once(
     if_none_match: Option<&str>,
 ) -> Result<(RawResponse, Option<String>), GhError> {
     let token = token(state).await?;
+    let _request_slot = state.acquire_request_slot().await.map_err(|error| {
+        GhError::Other(format!("Could not acquire a GitHub request slot: {error}"))
+    })?;
     let base = state.base_url.read().await.clone();
     let url = format!("{base}{}", request.path);
+    let accept = match request.accept {
+        ApiResponseFormat::Json => "application/vnd.github.v3+json",
+        ApiResponseFormat::Raw => "application/vnd.github.raw+json",
+        ApiResponseFormat::Diff => "application/vnd.github.diff",
+        ApiResponseFormat::TextMatch => "application/vnd.github.text-match+json",
+    };
 
     let mut builder = http_client::Request::builder()
         .method(request.method)
@@ -70,7 +83,7 @@ async fn send_once(
         .follow_redirects(RedirectPolicy::FollowLimit(MAX_REDIRECTS))
         .timeout(REQUEST_TIMEOUT)
         .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github.v3+json")
+        .header("Accept", accept)
         .header("User-Agent", "mentenaz-forge");
     if let Some(etag) = if_none_match {
         builder = builder.header("If-None-Match", etag);
@@ -92,7 +105,15 @@ async fn send_once(
         .await
         .map_err(|e| GhError::Network(e.to_string()))?;
     let text = |name: &str| -> Option<String> {
-        Some(response.headers().get(name)?.to_str().ok()?.trim().to_string())
+        Some(
+            response
+                .headers()
+                .get(name)?
+                .to_str()
+                .ok()?
+                .trim()
+                .to_string(),
+        )
     };
     let number = |name: &str| -> Option<u64> { text(name)?.parse().ok() };
     let status = response.status().as_u16();
@@ -101,14 +122,9 @@ async fn send_once(
     let retry_after = number("retry-after");
     let link = text("link");
     let etag = text("etag");
-    if let Some(rate) = RateLimit::from_headers(
-        number("x-ratelimit-limit"),
-        rate_remaining,
-        rate_reset,
-        text("x-ratelimit-resource").as_deref(),
-    ) {
-        state.record_rate_limit(rate);
-    }
+    let github_sso = text("x-github-sso");
+    let rate = RateLimit::from_headers(number("x-ratelimit-limit"), rate_remaining, rate_reset);
+    state.record_rate_limit(request.rate_limit_resource, rate, retry_after, unix_now());
 
     let mut bytes = Vec::new();
     response
@@ -120,10 +136,12 @@ async fn send_once(
         RawResponse {
             status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
+            body_bytes: bytes,
             rate_remaining,
             rate_reset,
             retry_after,
             link,
+            github_sso,
         },
         etag,
     ))
@@ -138,29 +156,31 @@ async fn send_once(
 async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhError> {
     // Once GitHub has said the allowance is used up, asking again before it
     // resets can only fail, and repeated failures can get a token blocked.
-    if let Some(rate) = state.rate_limit()
-        && rate.is_used_up(unix_now())
-    {
+    let now = unix_now();
+    let rate = state.rate_limit_for(request.rate_limit_resource);
+    let retry_at = state.rate_limit_retry_at(request.rate_limit_resource);
+    if rate.is_some_and(|rate| rate.is_used_up(now)) || retry_at.is_some_and(|until| now < until) {
         return Err(GhError::RateLimited {
-            reset_at: Some(rate.reset_at),
-            retry_after: None,
+            reset_at: rate.map(|rate| rate.reset_at),
+            retry_after: retry_at.map(|until| until.saturating_sub(now)),
         });
     }
 
     let cacheable = request.method == "GET";
     let known = if cacheable {
-        state.cache().etag(&request.path)
+        state.cache().etag(&request.path, request.accept)
     } else {
         None
     };
 
     let (mut response, mut etag) = send_once(state, &request, known.as_deref()).await?;
     if response.status == 304 {
-        let cached = state.cache().get(&request.path);
+        let cached = state.cache().get(&request.path, request.accept);
         if let Some(cached) = cached {
             return Ok(RawResponse {
                 status: 200,
-                body: cached.body,
+                body: String::from_utf8_lossy(&cached.body).into_owned(),
+                body_bytes: cached.body,
                 link: cached.link,
                 ..response
             });
@@ -174,9 +194,10 @@ async fn send(state: &GhState, request: ApiRequest) -> Result<RawResponse, GhErr
         if let (200, Some(etag)) = (response.status, etag) {
             state.cache().put(
                 &request.path,
+                request.accept,
                 CachedResponse {
                     etag,
-                    body: response.body.clone(),
+                    body: response.body_bytes.clone(),
                     link: response.link.clone(),
                 },
             );
@@ -285,6 +306,114 @@ fn list_under<T: DeserializeOwned>(answer: &serde_json::Value, key: &str) -> Vec
         .unwrap_or_default()
 }
 
+fn decode_text_content(value: &str, encoding: &str) -> String {
+    match encoding {
+        "base64" => {
+            let bytes = BASE64_STANDARD
+                .decode(value.replace('\n', ""))
+                .unwrap_or_default();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn tree_kind(name: &str, mode: &str) -> TreeEntryKind {
+    if mode == "120000" {
+        return TreeEntryKind::Symlink;
+    }
+    if mode == "160000" {
+        return TreeEntryKind::Submodule;
+    }
+    match name {
+        "blob" => TreeEntryKind::Blob,
+        "tree" => TreeEntryKind::Tree,
+        "commit" => TreeEntryKind::Commit,
+        "symlink" => TreeEntryKind::Symlink,
+        "submodule" => TreeEntryKind::Submodule,
+        _ => TreeEntryKind::Blob,
+    }
+}
+
+/// Small JSON wrappers for the W1 endpoints. These are intentionally close to
+/// GitHub's wire format so the workspace domain types remain stable.
+#[derive(Deserialize)]
+struct GitTreeEntryJson {
+    path: String,
+    mode: String,
+    #[serde(rename = "type")]
+    kind: String,
+    sha: String,
+    size: Option<u64>,
+    target: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitTreeJson {
+    sha: String,
+    truncated: bool,
+    tree: Vec<GitTreeEntryJson>,
+}
+
+#[derive(Deserialize)]
+struct GitReadmeJson {
+    name: String,
+    path: String,
+    html_url: String,
+    content: String,
+    encoding: String,
+}
+
+#[derive(Deserialize)]
+struct GitCompareFileJson {
+    filename: String,
+    status: String,
+    additions: u64,
+    deletions: u64,
+    patch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitCompareJson {
+    status: String,
+    ahead_by: u64,
+    behind_by: u64,
+    commits: Vec<serde_json::Value>,
+    files: Vec<GitCompareFileJson>,
+}
+
+#[derive(Deserialize)]
+struct GitCommitDetailJson {
+    sha: String,
+    commit: GitCommitMessageJson,
+    #[serde(default)]
+    files: Vec<GitCommitFileJson>,
+}
+
+#[derive(Deserialize)]
+struct GitCommitMessageJson {
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct GitCommitFileJson {
+    filename: String,
+    status: String,
+    additions: u64,
+    deletions: u64,
+    changes: u64,
+    patch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitSearchCodeItem {
+    path: String,
+    sha: Option<String>,
+    repository: Option<serde_json::Value>,
+    #[serde(default)]
+    text_matches: Vec<serde_json::Value>,
+}
+
 /// The logins of the organisations the user is an active member of.
 fn active_org_logins(memberships: &[serde_json::Value]) -> Vec<String> {
     memberships
@@ -307,6 +436,444 @@ fn pending_org_invitations(memberships: Vec<serde_json::Value>) -> Vec<OrgInvita
         .filter(|membership| membership.get("state").and_then(|s| s.as_str()) == Some("pending"))
         .filter_map(|membership| serde_json::from_value(membership).ok())
         .collect()
+}
+
+pub async fn fetch_repo_tree(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<TreeLoadResult, GhError> {
+    let tree_sha = match resolve_tree_sha(state, owner, repo, ref_name).await {
+        Ok(tree_sha) => tree_sha,
+        Err(GhError::EmptyRepository) => return Ok(TreeLoadResult::EmptyRepository),
+        Err(error) => return Err(error),
+    };
+    let tree: GitTreeJson = match fetch(state, requests::tree(owner, repo, &tree_sha, true)).await {
+        Ok(tree) => tree,
+        Err(GhError::EmptyRepository) => return Ok(TreeLoadResult::EmptyRepository),
+        Err(error) => return Err(error),
+    };
+    if tree.truncated {
+        return Ok(TreeLoadResult::Tree(
+            fetch_truncated_tree(state, owner, repo, tree.sha).await?,
+        ));
+    }
+    Ok(TreeLoadResult::Tree(map_tree(tree)))
+}
+
+async fn resolve_tree_sha(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<String, GhError> {
+    Ok(resolve_ref(state, owner, repo, ref_name).await?.tree_sha)
+}
+
+pub async fn resolve_ref(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<ResolvedRef, GhError> {
+    let commit: serde_json::Value = fetch(state, requests::commit(owner, repo, ref_name)).await?;
+    resolved_ref(ref_name, &commit)
+}
+
+fn resolved_ref(ref_name: &str, commit: &serde_json::Value) -> Result<ResolvedRef, GhError> {
+    let commit_sha = commit
+        .get("sha")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| GhError::Parse("GitHub commit response did not contain sha".into()))?;
+    let tree_sha = commit
+        .pointer("/commit/tree/sha")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            GhError::Parse("GitHub commit response did not contain commit.tree.sha".into())
+        })?;
+    Ok(ResolvedRef {
+        ref_name: ref_name.to_string(),
+        commit_sha: commit_sha.to_string(),
+        tree_sha: tree_sha.to_string(),
+    })
+}
+
+pub async fn fetch_commit_detail(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> Result<CommitDetail, GhError> {
+    let commit: GitCommitDetailJson =
+        fetch(state, requests::commit_detail(owner, repo, sha)).await?;
+    Ok(map_commit_detail(commit))
+}
+
+fn map_commit_detail(commit: GitCommitDetailJson) -> CommitDetail {
+    CommitDetail {
+        sha: commit.sha,
+        message: commit.commit.message,
+        files: commit
+            .files
+            .into_iter()
+            .map(|file| CommitFile {
+                path: file.filename,
+                status: file.status,
+                additions: file.additions,
+                deletions: file.deletions,
+                changes: file.changes,
+                patch: file.patch,
+            })
+            .collect(),
+    }
+}
+
+pub async fn fetch_tree_dir(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    tree_sha: &str,
+) -> Result<TreeLoadResult, GhError> {
+    let result: Result<GitTreeJson, GhError> =
+        fetch(state, requests::tree_dir(owner, repo, tree_sha)).await;
+    let tree = match result {
+        Ok(tree) => tree,
+        Err(error) => return map_tree_result(Err(error)),
+    };
+    if tree.truncated {
+        return Ok(TreeLoadResult::Tree(
+            fetch_truncated_tree(state, owner, repo, tree.sha).await?,
+        ));
+    }
+    Ok(TreeLoadResult::Tree(map_tree(tree)))
+}
+
+fn map_tree_result(result: Result<GitTreeJson, GhError>) -> Result<TreeLoadResult, GhError> {
+    match result {
+        Ok(tree) => Ok(TreeLoadResult::Tree(map_tree(tree))),
+        Err(GhError::EmptyRepository) => Ok(TreeLoadResult::EmptyRepository),
+        Err(error) => Err(error),
+    }
+}
+
+fn map_tree(tree: GitTreeJson) -> RepoTree {
+    RepoTree {
+        sha: tree.sha,
+        truncated: tree.truncated,
+        entries: tree
+            .tree
+            .into_iter()
+            .map(|entry| TreeEntry {
+                path: entry.path,
+                kind: tree_kind(&entry.kind, &entry.mode),
+                mode: entry.mode,
+                sha: entry.sha,
+                size: entry.size,
+                target: entry.target,
+            })
+            .collect(),
+    }
+}
+
+async fn fetch_truncated_tree(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    root_sha: String,
+) -> Result<RepoTree, GhError> {
+    let mut pending = VecDeque::from([(root_sha.clone(), String::new())]);
+    let mut entries = Vec::new();
+    while let Some((tree_sha, prefix)) = pending.pop_front() {
+        let tree: GitTreeJson = fetch(state, requests::tree_sha(owner, repo, &tree_sha)).await?;
+        append_tree_directory(tree, &prefix, &mut pending, &mut entries)?;
+    }
+    Ok(map_tree(GitTreeJson {
+        sha: root_sha,
+        truncated: false,
+        tree: entries,
+    }))
+}
+
+fn append_tree_directory(
+    tree: GitTreeJson,
+    prefix: &str,
+    pending: &mut VecDeque<(String, String)>,
+    entries: &mut Vec<GitTreeEntryJson>,
+) -> Result<(), GhError> {
+    if tree.truncated {
+        return Err(GhError::Other(format!(
+            "Git tree {} was truncated even when fetched non-recursively",
+            tree.sha
+        )));
+    }
+    for mut entry in tree.tree {
+        entry.path = if prefix.is_empty() {
+            entry.path
+        } else {
+            format!("{prefix}/{}", entry.path)
+        };
+        if entry.kind == "tree" || entry.mode == "040000" {
+            pending.push_back((entry.sha.clone(), entry.path.clone()));
+        }
+        entries.push(entry);
+    }
+    Ok(())
+}
+
+pub async fn fetch_blob(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> Result<BlobData, GhError> {
+    fetch_blob_at_path(state, owner, repo, "", sha, None).await
+}
+
+/// Fetch a blob with its tree path and known size. The known size lets files
+/// beyond the inline limit be classified without downloading their contents.
+pub async fn fetch_blob_at_path(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    sha: &str,
+    expected_size: Option<u64>,
+) -> Result<BlobData, GhError> {
+    if let Some(size) = expected_size {
+        let classification = classify_file(path, size, &[]);
+        if classification.kind == BlobKind::TooLarge {
+            return Ok(BlobData {
+                sha: sha.to_string(),
+                kind: classification.kind,
+                size,
+                content: Vec::new(),
+                encoding: Some("raw".to_string()),
+                lfs_size: classification.lfs_size,
+            });
+        }
+    }
+    let response = send(state, requests::blob(owner, repo, sha)).await?;
+    interpret_empty(&response)?;
+    Ok(blob_from_raw_response(path, sha, response.body_bytes))
+}
+
+fn blob_from_raw_response(path: &str, sha: &str, content: Vec<u8>) -> BlobData {
+    let classification = classify_file(path, content.len() as u64, &content);
+    BlobData {
+        sha: sha.to_string(),
+        kind: classification.kind,
+        size: content.len() as u64,
+        content,
+        encoding: Some("raw".to_string()),
+        lfs_size: classification.lfs_size,
+    }
+}
+
+pub async fn fetch_readme(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<Readme, GhError> {
+    let readme: GitReadmeJson = fetch(state, requests::readme(owner, repo, ref_name)).await?;
+    Ok(map_readme(readme))
+}
+
+pub async fn fetch_readme_at_path(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    ref_name: &str,
+) -> Result<Option<Readme>, GhError> {
+    match fetch(state, requests::readme_at_path(owner, repo, path, ref_name)).await {
+        Ok(readme) => Ok(Some(map_readme(readme))),
+        Err(GhError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn map_readme(readme: GitReadmeJson) -> Readme {
+    Readme {
+        path: readme.path,
+        name: readme.name,
+        html_url: readme.html_url,
+        content: decode_text_content(&readme.content, &readme.encoding),
+        encoding: readme.encoding,
+    }
+}
+
+pub async fn fetch_compare(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+) -> Result<CompareResult, GhError> {
+    let compare: GitCompareJson = fetch(state, requests::compare(owner, repo, base, head)).await?;
+    Ok(CompareResult {
+        status: compare.status,
+        ahead_by: compare.ahead_by,
+        behind_by: compare.behind_by,
+        commits: compare
+            .commits
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<CommitSummary>(value).ok())
+            .collect(),
+        files: compare
+            .files
+            .into_iter()
+            .map(|file| CompareFile {
+                path: file.filename,
+                status: file.status,
+                additions: file.additions,
+                deletions: file.deletions,
+                patch: file.patch,
+            })
+            .collect(),
+    })
+}
+
+/// Compare the branch's previously displayed commit with its current commit.
+/// `base...head` reports an advance when the new tip has no commits behind
+/// the previous tip; otherwise the branch was rewritten or diverged.
+pub async fn compare_ref_movement(
+    state: &GhState,
+    owner: &str,
+    repo: &str,
+    previous: &str,
+    new: &str,
+) -> Result<RefMovement, GhError> {
+    if previous == new {
+        return Ok(RefMovement::Unchanged);
+    }
+    let comparison = fetch_compare(state, owner, repo, previous, new).await?;
+    Ok(classify_ref_movement(
+        previous,
+        new,
+        comparison.ahead_by,
+        comparison.behind_by,
+    ))
+}
+
+pub async fn search_repositories(
+    state: &GhState,
+    query: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<Vec<SearchRepoResult>, GhError> {
+    let answer: serde_json::Value =
+        fetch(state, requests::search_repositories(query, page, per_page)).await?;
+    let items = answer
+        .get("items")
+        .and_then(|items| items.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut repos = Vec::new();
+    for item in items {
+        if let Ok(repo) = serde_json::from_value::<Repo>(item.clone()) {
+            repos.push(SearchRepoResult { repo, score: None });
+        }
+    }
+    Ok(repos)
+}
+
+pub async fn search_repositories_page(
+    state: &GhState,
+    query: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<Page<Repo>, GhError> {
+    #[derive(Deserialize)]
+    struct SearchResponse {
+        total_count: u64,
+        items: Vec<Repo>,
+    }
+
+    let per_page = per_page.max(1);
+    let answer: SearchResponse =
+        fetch(state, requests::search_repositories(query, page, per_page)).await?;
+    let last_page = search_last_page(answer.total_count, per_page);
+    Ok(Page {
+        items: answer.items,
+        page: page.max(1),
+        last_page,
+    })
+}
+
+fn search_last_page(total_count: u64, per_page: u32) -> u32 {
+    u32::try_from(total_count.div_ceil(u64::from(per_page.max(1))))
+        .unwrap_or(u32::MAX)
+        .clamp(1, 50)
+}
+
+pub async fn search_code(
+    state: &GhState,
+    query: &str,
+    repo: Option<&str>,
+    page: u32,
+    per_page: u32,
+) -> Result<Vec<SearchCodeMatch>, GhError> {
+    let answer: serde_json::Value =
+        fetch(state, requests::search_code(query, repo, page, per_page)).await?;
+    Ok(parse_code_search_items(&answer))
+}
+
+pub async fn search_code_page(
+    state: &GhState,
+    query: &str,
+    repo: Option<&str>,
+    page: u32,
+    per_page: u32,
+) -> Result<Page<SearchCodeMatch>, GhError> {
+    let answer: serde_json::Value =
+        fetch(state, requests::search_code(query, repo, page, per_page)).await?;
+    let total_count = answer
+        .get("total_count")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GhError::Parse("Code search response has no total_count.".into()))?;
+    Ok(Page {
+        items: parse_code_search_items(&answer),
+        page: page.max(1),
+        last_page: search_last_page(total_count, per_page),
+    })
+}
+
+fn parse_code_search_items(answer: &serde_json::Value) -> Vec<SearchCodeMatch> {
+    let items = answer
+        .get("items")
+        .and_then(|items| items.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut matches = Vec::new();
+    for item in items {
+        let parsed: GitSearchCodeItem = match serde_json::from_value(item.clone()) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let repo_name = parsed
+            .repository
+            .clone()
+            .and_then(|value| value.get("full_name").cloned())
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        matches.push(SearchCodeMatch {
+            path: parsed.path,
+            repo: repo_name,
+            sha: parsed.sha,
+            line: parsed
+                .text_matches
+                .first()
+                .and_then(|value| value.get("fragment"))
+                .and_then(|value| value.get("text"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            line_number: None,
+            matches: Vec::new(),
+        });
+    }
+    matches
 }
 
 pub async fn gh_get_current_user(state: &GhState) -> Result<GitHubUser, GhError> {
@@ -445,6 +1012,15 @@ pub async fn gh_list_pulls(
     state: &GhState,
 ) -> Result<Vec<Pull>, GhError> {
     fetch(state, requests::pulls(&owner, &repo, &state_filter)).await
+}
+
+pub async fn gh_get_combined_status(
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+    state: &GhState,
+) -> Result<CombinedCommitStatus, GhError> {
+    fetch(state, requests::combined_status(owner, repo, ref_name)).await
 }
 
 /// Comments on an issue or PR (see [`Comment`]'s doc comment for why one
@@ -633,7 +1209,10 @@ pub async fn gh_accept_repo_invitation(invitation_id: u64, state: &GhState) -> R
     perform(state, requests::accept_repo_invitation(invitation_id)).await
 }
 
-pub async fn gh_decline_repo_invitation(invitation_id: u64, state: &GhState) -> Result<(), GhError> {
+pub async fn gh_decline_repo_invitation(
+    invitation_id: u64,
+    state: &GhState,
+) -> Result<(), GhError> {
     perform(state, requests::decline_repo_invitation(invitation_id)).await
 }
 
@@ -665,7 +1244,11 @@ pub async fn gh_remove_collaborator(
     username: String,
     state: &GhState,
 ) -> Result<(), GhError> {
-    perform(state, requests::remove_collaborator(&owner, &repo, &username)).await
+    perform(
+        state,
+        requests::remove_collaborator(&owner, &repo, &username),
+    )
+    .await
 }
 
 pub async fn gh_update_topics(
@@ -681,6 +1264,14 @@ pub async fn gh_update_topics(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn search_paging_uses_total_count_and_github_limit() {
+        assert_eq!(search_last_page(0, 20), 1);
+        assert_eq!(search_last_page(20, 20), 1);
+        assert_eq!(search_last_page(21, 20), 2);
+        assert_eq!(search_last_page(10_001, 20), 50);
+    }
 
     fn memberships() -> Vec<serde_json::Value> {
         vec![
@@ -714,5 +1305,262 @@ mod tests {
         // A missing key, or one holding something else, is an empty list.
         assert!(list_under::<u32>(&answer, "missing").is_empty());
         assert!(list_under::<u32>(&json!({ "items": "nope" }), "items").is_empty());
+    }
+
+    #[test]
+    fn raw_blob_mapping_preserves_non_utf8_bytes() {
+        let bytes = vec![0x00, 0xFF, 0x80, b'\n'];
+        let blob = blob_from_raw_response("asset.bin", "blob-sha", bytes.clone());
+        assert_eq!(blob.sha, "blob-sha");
+        assert_eq!(blob.kind, BlobKind::Binary);
+        assert_eq!(blob.content, bytes);
+        assert_eq!(blob.size, 4);
+        assert_eq!(blob.encoding.as_deref(), Some("raw"));
+
+        let text = blob_from_raw_response("main.rs", "text-sha", b"source\n".to_vec());
+        assert_eq!(text.kind, BlobKind::Text);
+        assert_eq!(text.content, b"source\n");
+
+        let image = blob_from_raw_response(
+            "image.png",
+            "image-sha",
+            b"\x89PNG\r\n\x1a\ncontent".to_vec(),
+        );
+        assert_eq!(image.kind, BlobKind::Image);
+
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 999\n";
+        let lfs = blob_from_raw_response("asset.dat", "lfs-sha", pointer.to_vec());
+        assert_eq!(lfs.kind, BlobKind::LfsPointer);
+        assert_eq!(lfs.lfs_size, Some(999));
+    }
+
+    #[test]
+    fn tree_sha_request_is_non_recursive() {
+        let request = requests::tree_sha("o", "r", "tree123");
+        assert_eq!(request.path, "/repos/o/r/git/trees/tree123?recursive=false");
+    }
+
+    #[test]
+    fn commit_response_resolves_both_commit_and_tree_sha() {
+        assert_eq!(
+            resolved_ref(
+                "main",
+                &json!({
+                    "sha": "commit-sha",
+                    "commit": { "tree": { "sha": "tree-sha" } }
+                })
+            ),
+            Ok(ResolvedRef {
+                ref_name: "main".into(),
+                commit_sha: "commit-sha".into(),
+                tree_sha: "tree-sha".into(),
+            })
+        );
+        assert!(matches!(
+            resolved_ref("main", &json!({ "sha": "commit-sha", "commit": {} })),
+            Err(GhError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn commit_detail_mapping_keeps_file_stats_and_optional_patches() {
+        let raw: GitCommitDetailJson = serde_json::from_value(json!({
+            "sha": "commit-sha",
+            "commit": { "message": "Add file\n\nDetails" },
+            "files": [
+                {
+                    "filename": "src/main.rs",
+                    "status": "modified",
+                    "additions": 2,
+                    "deletions": 1,
+                    "changes": 3,
+                    "patch": "@@ -1 +1,2 @@"
+                },
+                {
+                    "filename": "asset.bin",
+                    "status": "added",
+                    "additions": 0,
+                    "deletions": 0,
+                    "changes": 0
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            map_commit_detail(raw),
+            CommitDetail {
+                sha: "commit-sha".into(),
+                message: "Add file\n\nDetails".into(),
+                files: vec![
+                    CommitFile {
+                        path: "src/main.rs".into(),
+                        status: "modified".into(),
+                        additions: 2,
+                        deletions: 1,
+                        changes: 3,
+                        patch: Some("@@ -1 +1,2 @@".into()),
+                    },
+                    CommitFile {
+                        path: "asset.bin".into(),
+                        status: "added".into(),
+                        additions: 0,
+                        deletions: 0,
+                        changes: 0,
+                        patch: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn compare_payload_classifies_ref_movement() {
+        let forward = json!({ "ahead_by": 3, "behind_by": 0 });
+        assert_eq!(
+            classify_ref_movement(
+                "old",
+                "new",
+                forward["ahead_by"].as_u64().unwrap(),
+                forward["behind_by"].as_u64().unwrap(),
+            ),
+            RefMovement::Advanced { commits: 3 }
+        );
+        assert_eq!(
+            classify_ref_movement("same", "same", 0, 0),
+            RefMovement::Unchanged
+        );
+        assert_eq!(
+            classify_ref_movement("old", "new", 0, 2),
+            RefMovement::Rewritten
+        );
+        assert_eq!(
+            classify_ref_movement("old", "new", 1, 1),
+            RefMovement::Rewritten
+        );
+    }
+
+    #[test]
+    fn tree_mapping_preserves_truncation_and_entry_kinds() {
+        assert_eq!(
+            map_tree_result(Err(GhError::EmptyRepository)),
+            Ok(TreeLoadResult::EmptyRepository)
+        );
+
+        let tree = GitTreeJson {
+            sha: "tree-sha".into(),
+            truncated: true,
+            tree: vec![
+                GitTreeEntryJson {
+                    path: "link".into(),
+                    mode: "120000".into(),
+                    kind: "blob".into(),
+                    sha: "symlink-sha".into(),
+                    size: Some(4),
+                    target: None,
+                },
+                GitTreeEntryJson {
+                    path: "vendor".into(),
+                    mode: "160000".into(),
+                    kind: "commit".into(),
+                    sha: "submodule-sha".into(),
+                    size: None,
+                    target: None,
+                },
+            ],
+        };
+        assert_eq!(
+            map_tree_result(Ok(tree)),
+            Ok(TreeLoadResult::Tree(RepoTree {
+                sha: "tree-sha".into(),
+                truncated: true,
+                entries: vec![
+                    TreeEntry {
+                        path: "link".into(),
+                        mode: "120000".into(),
+                        kind: TreeEntryKind::Symlink,
+                        sha: "symlink-sha".into(),
+                        size: Some(4),
+                        target: None,
+                    },
+                    TreeEntry {
+                        path: "vendor".into(),
+                        mode: "160000".into(),
+                        kind: TreeEntryKind::Submodule,
+                        sha: "submodule-sha".into(),
+                        size: None,
+                        target: None,
+                    },
+                ],
+            }))
+        );
+
+        let forbidden = GhError::Forbidden {
+            message: "Resource not accessible".into(),
+        };
+        assert_eq!(map_tree_result(Err(forbidden.clone())), Err(forbidden));
+    }
+
+    #[test]
+    fn truncated_tree_fallback_walks_child_tree_shas_and_prefixes_paths() {
+        let mut pending = VecDeque::new();
+        let mut entries = Vec::new();
+        append_tree_directory(
+            GitTreeJson {
+                sha: "root".into(),
+                truncated: false,
+                tree: vec![
+                    GitTreeEntryJson {
+                        path: "src".into(),
+                        mode: "040000".into(),
+                        kind: "tree".into(),
+                        sha: "src-tree".into(),
+                        size: None,
+                        target: None,
+                    },
+                    GitTreeEntryJson {
+                        path: "vendor".into(),
+                        mode: "160000".into(),
+                        kind: "commit".into(),
+                        sha: "submodule".into(),
+                        size: None,
+                        target: None,
+                    },
+                ],
+            },
+            "",
+            &mut pending,
+            &mut entries,
+        )
+        .unwrap();
+        assert_eq!(pending, VecDeque::from([("src-tree".into(), "src".into())]));
+
+        let (sha, prefix) = pending.pop_front().unwrap();
+        assert_eq!(sha, "src-tree");
+        append_tree_directory(
+            GitTreeJson {
+                sha,
+                truncated: false,
+                tree: vec![GitTreeEntryJson {
+                    path: "main.rs".into(),
+                    mode: "100644".into(),
+                    kind: "blob".into(),
+                    sha: "file-sha".into(),
+                    size: Some(10),
+                    target: None,
+                }],
+            },
+            &prefix,
+            &mut pending,
+            &mut entries,
+        )
+        .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src", "vendor", "src/main.rs"]
+        );
+        assert!(pending.is_empty());
     }
 }

@@ -1,6 +1,6 @@
 # Helm Workspace — Phased Plan
 
-**Written:** 7 October 2026. **Status:** the plan is being hardened; no code is to be written until that is done. Eleven of the fourteen decisions in section 12 are made; the other three wait on trials (rows 2, 3 and 5), and the API facts in section 3a were checked against GitHub's documentation and two real repositories (7 October 2026). Nothing here has been built; the sizes of the phases are estimates.
+**Written:** 7 October 2026. **Status (9 October 2026):** W0 to W6 are built: the shared `helm_ui` crate, the backend for code, the tab, Code, the editor and local clone, history and diffs, and search. Each phase's status block below says what exists. **W7 is partly built and on hold** (see its status block in section 10). What every built phase still lacks is its interactive acceptance in a signed-in app session, against the checklist in section 11. W0 was investigated against the current `gpui_component`, editor and buffer APIs and its scratch prototype was run on 8 October 2026. The API facts in section 3a were checked against GitHub's documentation and two real repositories (7 October 2026).
 **Companions:** `Helm_Future_Developments.md` (the roadmap; this plan is its phase 2, plus the search gap left in phase 1) and `Helm_Refactor_Plan.md` (the groundwork, phases A to E, done).
 
 ---
@@ -181,7 +181,7 @@ Checked on 7 October 2026 unless marked.
 
 ### What W1 has to add
 
-- `permissions` read into a typed value (`pull`, `triage`, `push`, `maintain`, `admin`) in place of the untyped JSON it is kept as today, with one function that answers "may this user do X". Phase 3 of the roadmap will ask it for every write action; the Workspace asks it for nothing yet.
+- `permissions` read into `RepoPermissions` (`pull`, `triage`, `push`, `maintain`, `admin`) instead of untyped JSON, with `allows` answering whether GitHub reports a requested capability. Phase 3 of the roadmap will ask it for every write action; the Workspace asks it for nothing yet.
 - An error that says "single sign-on needed", told apart from an ordinary `403`.
 - "Empty repository" as an outcome of loading a tree, not as an error.
 
@@ -244,7 +244,7 @@ The comparison with a local clone is made on commits, not on branch names. If th
 
 Sketches of every screen, to agree what goes where before any of it is built. They show content and arrangement, not exact sizes or colours. Each names the `gpui_component` widgets it is made of.
 
-Two things in them depend on trial 1 (section 4): whether the section list down the left is the `Settings` sidebar, and whether Code sits inside it or beside it. The sketches assume the expected outcome: a `Settings` sidebar for the sections, with Code using the full area to its right.
+The section navigation and Code layout depend on trial 1 (section 4). The sketches now assume the result: a persistent `gpui_component::Sidebar` for the sections, with Code rendered as a sibling full-height split.
 
 ### The frame, on every screen
 
@@ -657,13 +657,21 @@ Small, and before any real code. Settles the open questions in section 12, and t
 
 A tree, a viewer and a context pane inside one page is more than the managers put there.
 
-First look, from reading `gpui_component`'s `setting` code (not tried): a page can hold any content through `SettingItem::render`, but a page is a scrolling column of groups. A file tree and a viewer each need the full height and their own scrolling, so a poor fit is expected.
+**Investigation result (8 October 2026): no.** `Settings` renders a resizable sidebar beside an active `SettingPage`; that page has a fixed header and a vertically scrolling `List` of `SettingGroup`s. Each group is rendered in a `GroupBox`. A `SettingItem::render` can hold a custom element, but placing the Code screen there would put its full-height, independently scrolling panes inside that group/list/scroll container. More importantly, the `Settings` sidebar and page are one component: showing Code beside the page would remove the sidebar, while keeping the sidebar would require putting Code inside the page.
 
-Likely outcome: `Settings` pages for the sections that are lists or forms (Overview, Commits, Pull requests, Issues, Actions), and Code as its own full-height `h_resizable` split beside them. The trial builds that shell with placeholder content to see whether the two sit together.
+**Decision:** use a persistent `gpui_component::Sidebar` / `SidebarMenu` for section navigation. Use `gpui_component` list and setting widgets within the screens where they fit, but render Code as a sibling, full-height `h_resizable` layout—not as a `SettingPage` or `SettingItem`. This keeps the navigation visible without nesting the Code panes in the Settings page's scrolling list.
+
+**Prototype result (8 October 2026): confirmed.** A throwaway shell was run and visually checked. It toggles between the Settings-page composition and the persistent-sidebar composition, each with the three resizable Code panes. The persistent sidebar keeps navigation alongside Code without placing those panes inside Settings' scrolling page.
 
 ### Trial 2: can a remote file be shown in the app's read-only editor?
 
 If text fetched from GitHub can be put in a read-only editor buffer, the viewer gets highlighting, search and selection for free. How the app builds such a buffer from text that is not a file on disk has not been confirmed. The fallback is `gpui_component`'s highlighter.
+
+**Investigation result (8 October 2026): yes.** `language::Buffer::local` accepts fetched text without a disk file; `Editor::for_buffer` accepts that buffer with no `Project`; and `Editor::set_read_only(true)` makes the editor read-only. For syntax highlighting, resolve the language from the repository path through the workspace's `LanguageRegistry` and assign it to the buffer with `set_language`. Unknown extensions can remain plain text. Set the buffer's `Capability::ReadOnly` as well as the editor flag so the buffer itself cannot be edited through another surface. This provides the editor's selection, copy and search behavior without depending on a local clone; language-server features are not implied.
+
+**Decision:** use the app's editor for text files within the inline size limit. Keep the `gpui_component` highlighter as a fallback only if an editor integration issue is found during implementation.
+
+**Prototype result (8 October 2026): confirmed for rendering and syntax highlighting.** The throwaway shell displayed an in-memory Rust buffer in the app editor with no project or disk file. The buffer's `Capability::ReadOnly` and the editor's read-only flag were both set. This trial confirms the rendering path; interactive attempts to edit the buffer were not separately recorded.
 
 ### Noted for W5
 
@@ -671,8 +679,8 @@ The app's diff engine (`buffer_diff`) is built from a base text and a buffer, no
 
 ### Done when
 
-- Both trials have an answer, written into this file.
-- Every row of section 12 has a decision.
+- The two W0 questions (section 12, rows 2 and 3) have prototype results and decisions written into this file.
+- Every decision due in W0 is made. Row 5 is explicitly deferred to its own trial at the start of W5.
 
 ## 4a. Phase W0.5 — A shared `helm_ui` crate
 
@@ -687,7 +695,7 @@ helm_panel     helm_workspace
 (dock panel)   (the tab)
 ```
 
-This section is from reading the code as it stands on 7 October 2026 (`helm_panel/src`, 7,465 lines in 24 files). Nothing has been moved or tried.
+This section records the baseline from 7 October 2026 (`helm_panel/src`, 7,465 lines in 24 files) and the W0.5 implementation below.
 
 ### How the shared pieces are tied to the panel today
 
@@ -726,7 +734,7 @@ impl<V: HelmView> HelmViewExt for V {}
 
 `ListView`, `RowsDelegate`, `ListStatus` and `Pager` take the view as a type parameter (`ListView<V>`) in place of the name `HelmPanel`.
 
-What this buys: **the panel's screens do not change.** `self.load_repo_page(cx, |this| &mut this.tags, page, …)` and `self.list_screen(…)` read exactly as they do now, because they are still method calls with the same arguments. The panel adds an eight-line `impl HelmView for HelmPanel`, and one line, `type ListView = helm_ui::ListView<HelmPanel>;`, so its sixteen list fields keep their type name.
+What this buys: the panel's screen layout and data flow stay the same. `self.load_repo_page(cx, |this| &mut this.tags, page, …)` and `self.list_screen(…)` remain method calls with the same arguments. Since a non-paged `Section::status()` cannot infer which view its list screen belongs to, those call sites use `status_for::<HelmPanel>()`; paged screens keep using `paged_status`. The panel adds an `impl HelmView for HelmPanel` and `type ListView = helm_ui::ListView<HelmPanel>`, so its list fields keep their type name.
 
 The bodies of the moved functions change in two places only: `self.gh_state.clone()` becomes `self.gh_state().clone()`, and `self.selected_repo.clone()` becomes `self.repo().cloned()`.
 
@@ -806,10 +814,17 @@ Steps 2 and 3 are pure moves. Steps 4 and 5 are the generalisation, and are the 
 
 ### Done when
 
-- `helm_panel` builds on `helm_ui`. Its 5 remaining tests and the 11 that moved all pass. No panel screen's code changed beyond imports.
+- `helm_panel` builds on `helm_ui`. Its 5 remaining tests and the 11 that moved all pass. Screen layouts and data flow are unchanged; shared imports and the non-paged status type are updated for the generic API.
 - The manual checklist in `Helm_Refactor_Plan.md` passes unchanged.
 - `helm_workspace` exists, depends on `helm_ui` and `helm_backend`, and not on `helm_panel`.
 - `helm_ui` has no mention of `HelmPanel`.
+
+### W0.5 implementation status
+
+- Created `helm_ui` and the empty `helm_workspace` crates, added both to the workspace and fork-crate test script, and documented the new crates.
+- Moved `Section` and its loaders, `LoadState`, the list widget, shared widgets, and the planned issue, pull request, commit, workflow-status, branch, tag, and release row helpers. Added `HelmView` for the shared panel-facing API; the list-screen extension currently lives in `HelmListViewExt`, alongside the section loader extension `HelmViewExt`.
+- `helm_panel` now consumes these pieces from `helm_ui`. There are no `HelmPanel` references in `helm_ui`; `helm_workspace` depends on `helm_ui` and `helm_backend`, not the panel.
+- `cargo test -p helm_ui -p helm_panel -j 8` passes (11 shared-UI tests and 5 panel tests), and `cargo check -p helm_workspace -j 8` passes. The manual checklist above has not yet been run; W0.5 remains open until that behavior check is completed.
 
 ### What could go wrong
 
@@ -824,7 +839,8 @@ No UI. Adds to `helm_backend`:
 - Request builders and types for: the tree of a commit, a blob, resolving a branch or tag to a commit, a single commit with its files, comparing two refs, the README.
 - Typed permissions, the single sign-on error, and "empty repository" as an outcome (section 3b).
 - Working out, from a comparison, whether a branch moved forward or was rewritten (section 3c).
-- Per-kind rate limits, the byte limit on the cache, and keeping hash-addressed answers.
+- ✅ Per‑kind rate‑limit tracking implemented.
+
 - Answers carried as bytes, a request's wanted format, and the shared limit on requests in flight (section 3a).
 - Holding all requests for the time GitHub gives after a secondary limit.
 - Turning a flat tree listing into a nested tree, and handling the truncated case.
@@ -834,7 +850,7 @@ No UI. Adds to `helm_backend`:
 ### Done when
 
 - Tests cover every new request, the tree building (including truncated and empty trees, symlinks and submodules), the file classification, the cache's size limit, and the limit on requests in flight.
-- A terminal example, like `whoami`, prints the top of a real repository's tree and the first lines of its README.
+- The read-only terminal example (`cargo run -p helm_backend --example whoami`) prints the top of a real repository's tree and the first lines of its README.
 
 ## 6. Phase W2 — The tab
 
@@ -855,6 +871,16 @@ The shell, with nothing in it yet.
 - Pushing to the branch in view from elsewhere brings up the Update line the next time the tab comes forward, and not before.
 - Two repositories can be open in two tabs without sharing state.
 
+### W2 implementation status
+
+- W2 implementation is complete. The remaining acceptance work is interactive and requires running the app with a GitHub login; it has not been performed in this session.
+- The first Workspace tab slice is implemented: repository-detail button and `OpenRepositoryWorkspace` action open or reuse a tab for the selected repository; each tab owns its searchable branch/tag selector, resolved ref and pending-update state.
+- The tab has the repository header/status tags, Refresh, Open on GitHub, an Overview, the Code section, placeholder pages for later phases, a disabled-repository overview-only state, and the core API rate-limit line.
+- Foreground ref checking is implemented: when this tab is activated, it compares the selected branch/tag with the current GitHub ref and keeps a moved ref pending until the user chooses Update.
+- The tab refreshes repository metadata from GitHub on opening. Repository errors replace the tab content with a whole-tab state; 404 wording does not guess whether the repo is missing or hidden, and SSO failures offer GitHub authorization when GitHub supplies a URL. The signed-in account is shown; if a permission-shaped repository error coincides with a missing `repo` scope, the tab opens Helm's existing scope-authorization prompt. Retry and Open on GitHub are available where applicable.
+- Overview loads distinct open issue and pull-request counts, plus the selected ref's last commit message and short SHA. The count load is capped at 5,000 pull requests and reports an error rather than presenting a partial total.
+- `OpenRepositoryWorkspace` is registered on each Workspace and is included in the command palette's available-action list. Interactive acceptance remains: checklist 1–3 (open/reuse/isolation), checklist 12 (inaccessible and empty repositories), checklist 13 (foreground ref movement), and checklist 17 (command-palette discovery).
+
 ## 7. Phase W3 — Code
 
 The tree and the viewer. This is the phase that makes the Workspace worth opening.
@@ -865,6 +891,13 @@ The tree and the viewer. This is the phase that makes the Workspace worth openin
 - Images are shown as images. Binary and oversized files show what they are, their size, and Open on GitHub.
 - Copy path, copy permalink (a link to the file at the exact commit).
 - Switching ref keeps the same path open when it exists there.
+
+### W3 implementation status
+
+- The Code section loads the resolved commit's tree and repository README, uses `gpui_component::tree` and a local filename filter, and shows text in an in-memory `Editor` whose buffer capability and editor are both read-only. Selecting a folder lists its contents followed by that folder's README when present. Language is resolved through the Workspace registry; README content uses the Markdown renderer.
+- Text blobs are cached per Git blob SHA and path; image previews are rendered inline where GPUI supports the image format. Binary, LFS, oversized, and unsupported image files show their size/details and an Open on GitHub link.
+- Copy path and exact-commit file/folder permalinks are available. Changing refs retains an existing file or folder, otherwise it selects the nearest available folder and explains which path was unavailable. Empty repositories receive a dedicated Code state.
+- Focused unit tests cover URL encoding, exact-commit links, local tree filtering, and nearest-folder fallback. Interactive acceptance against a signed-in GitHub repository has not yet been performed.
 
 ### Done when
 
@@ -886,6 +919,12 @@ Reading is remote. Editing is local. This phase joins the two.
 - From a file in the Workspace, one action lands in the editor on the same file and line.
 - A mismatch between the local branch and the ref in view is never silent.
 
+### W4 implementation status
+
+- The header detects an open local checkout by matching its GitHub origin or upstream remote, and shows its branch plus whether its HEAD matches the commit in view.
+- Files can be opened from the matching checkout. A different local branch or commit requires explicit confirmation before opening, and open failures are shown in the Code view.
+- Without a matching checkout, **Clone default branch & open** invokes Helm's existing clone modal; after cloning, the new Workspace opens at the selected file. Interactive acceptance remains to be performed in an authenticated app session.
+
 ## 9. Phase W5 — History and diffs
 
 - Commits page: the history of the ref in view, paged, and of a single file or folder when one is selected.
@@ -900,6 +939,13 @@ How diffs are drawn is the main open question of this phase (section 12, row 5).
 - From any file, its history is one step away, and from any commit, its diff is.
 - A commit with hundreds of changed files stays responsive: files are listed at once and each diff is drawn when opened.
 
+### W5 implementation status
+
+- The Commits section loads paged history for the selected branch or tag, and for the selected file or folder. Commits carrying a repository tag show its tag name.
+- Selecting a commit loads its message and changed-file summaries. Selecting a file displays GitHub's unified patch in the read-only app editor; files with no patch (such as binary or oversized files) have an explicit explanation.
+- Compare takes two refs and displays the returned commits, ahead/behind counts, changed files, and selected-file patches. Long commit and file lists are independently scrollable.
+- The diff decision is recorded in section 12. W5 has compile/test validation; authenticated interactive acceptance remains pending.
+
 ## 10. Phase W6 — Search, and W7 — Context
 
 **W6. Search.** Three kinds, in rising cost:
@@ -909,6 +955,11 @@ How diffs are drawn is the main open question of this phase (section 12, row 5).
 3. **Repositories across GitHub:** in the dock panel, not the tab, since it is how you reach a repository that is not yours. It needs a new entry in the panel's main menu, **Search GitHub**, between Repositories and Create Repository, leading to a screen with a search box and a paged list of results. A result opens the panel's existing repository screen, from which the Workspace opens; a repository that is not yours shows there without the actions you have no permission for. This is the gap left in the roadmap's phase 1 and does not depend on W3 to W5; it can be moved earlier if wanted.
 
 Search has a small allowance of its own, so the search box sends on `enter`, not on every keystroke, and shows that allowance when it runs low.
+
+### W6 implementation status
+
+- The Workspace Search section runs paged code search only on Enter or an explicit Search action, scopes requests to the current repository/ref, shows the separate code-search allowance, and opens a result in the read-only editor at the returned matching snippet line (falling back to the first query term when GitHub omits a usable snippet).
+- Helm's main menu now has **Search GitHub** between Repositories and Create Repository. It runs paged repository search on Enter or Search, displays the separate search allowance, and opens results in the existing repository-detail screen. Interactive acceptance remains pending.
 
 **W7. Context pane.** For the ref in view:
 
@@ -922,6 +973,26 @@ Search has a small allowance of its own, so the search box sends on `enter`, not
 
 - Looking at a branch, you can tell without leaving the tab whether it has a pull request and whether its checks pass.
 - No screen exists twice: the panel and the tab draw a pull request row with the same code.
+
+### W7 implementation status
+
+**On hold since 9 October 2026.** Part of it is built; the rest is left for a later commit. Neither "Done when" line above is met yet.
+
+Built:
+
+- The tab loads the pull request whose head is the branch in view, and that pull request's checks.
+- The Pull requests, Issues and Actions pages list their content, drawn with the rows shared in `helm_ui`. They show open items only.
+- The comment thread of an issue or pull request can be read in the tab.
+
+Not built:
+
+- The context pane itself (section 3d): the place that shows the branch's pull request, its checks and the latest Actions run beside whatever page is open.
+- The Open / Closed / All switch on the tab's lists, and "This branch only".
+- The move to `helm_ui` of the three pieces section 4a left for this phase: issue and pull request detail with the comment thread, the Open / Closed / All switch, and the workflow-run tab. Until they move, the panel and the tab each draw their own detail.
+- Splitting `helm_workspace/src/tab.rs`, which has grown to hold every page of the tab.
+- The keyboard shortcuts section 3e gives to this phase.
+
+To pick it up again: move the three pieces first, since the context pane and the switch are both built from them.
 
 ## 11. Manual checklist
 
@@ -938,7 +1009,9 @@ Added to the one in `Helm_Refactor_Plan.md`. Run after every phase from W2 on.
 | 7 | Revisit files and folders already seen | Instant, and the count of requests left does not fall |
 | 8 | Open in editor, with a clone and without | The local file opens; without a clone, Clone is offered |
 | 9 | Open a file's history, then a commit | The commit's files and diffs |
+| 9a | Compare two branches or tags, then select a changed file and a commit | Ahead/behind counts, both lists, and the selected commit's details or file's patch |
 | 10 | Search code, open a result | The file at the matching line |
+| 10a | Open Search GitHub, submit a query, page results, select a repository | A result opens its existing repository detail; the search allowance is visible |
 | 11 | Open this fork, then `torvalds/linux` | This fork's tree loads in one request. Linux's is too large for that and loads a folder at a time; nothing freezes |
 | 11a | In this fork, open a `LICENSE-GPL` symlink; in a repository that has them, a submodule and a Git LFS file | Each says what it is, not a blank or garbled viewer |
 | 12 | Open a repository you cannot see, and one that is empty | A clear message, not a blank tab |
@@ -953,10 +1026,10 @@ Added to the one in `Helm_Refactor_Plan.md`. Run after every phase from W2 on.
 | # | Question | Decision |
 |---|---|---|
 | 1 | Where does the code live: inside `helm_panel`, or a new crate? | **Decided:** a new `helm_workspace` crate. The pieces both need move to a shared `helm_ui` crate first (phase W0.5). |
-| 2 | Sections as `Settings` pages or a tab bar? | Open until trial 1. Expected: `Settings` pages for the list and form sections, Code as its own split. |
-| 3 | File viewer: the app's editor, read-only, or `gpui_component`'s highlighter? | Open until trial 2. The editor if it works. |
+| 2 | Sections as `Settings` pages or a tab bar? | **Decided:** a persistent `gpui_component::Sidebar` / `SidebarMenu` for navigation. Code is a sibling full-height split, not a `Settings` page, because `Settings` couples its sidebar to a scrollable list of groups. Use list and setting widgets within content screens where they fit. |
+| 3 | File viewer: the app's editor, read-only, or `gpui_component`'s highlighter? | **Decided:** the app's editor, backed by a local in-memory buffer, with both editor and buffer set read-only. Resolve syntax from the workspace language registry; unknown file types remain plain text. |
 | 4 | How large a file is shown inline? | **Decided:** text up to 1 MB and images up to 10 MB; above that, the file's size and Open on GitHub. The endpoint allows 100 MB, so this is our limit, chosen to keep the viewer quick, and can be raised later. |
-| 5 | W5: draw diffs with the app's own diff view, or from GitHub's patch text? | Open until a trial at the start of W5. The app's diff view looks possible (see section 4). |
+| 5 | W5: draw diffs with the app's own diff view, or from GitHub's patch text? | **Decided in W5:** show GitHub's unified patch in the read-only app editor. A patch may be truncated or omit binary/large-file contents, so synthesising a full-file `BufferDiff` would claim completeness that the API does not provide. Missing patches are called out explicitly; this keeps the review view honest without fetching every changed blob. |
 | 6 | Is the tab restored when the app restarts? | **Decided:** not at first. Added after W3, once there is something worth restoring. |
 | 7 | W6: is repository search in the panel or the tab? | **Decided:** the panel, with a new **Search GitHub** entry in its main menu. |
 | 8 | W4: when the local clone is not on the commit in view, open anyway? | **Decided:** ask each time; never switch the local branch for the user. No question when the commits are the same. |

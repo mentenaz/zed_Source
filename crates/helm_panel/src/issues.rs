@@ -27,8 +27,7 @@ impl HelmPanel {
             |this| &mut this.issues,
             page,
             move |repo, gh_state| {
-                let request =
-                    requests::issues(&repo.owner.login, &repo.name, &remembered_filter);
+                let request = requests::issues(&repo.owner.login, &repo.name, &remembered_filter);
                 peek_page(gh_state, request, page, PAGE_SIZE).map(without_pulls)
             },
             move |repo, gh_state| async move {
@@ -94,8 +93,7 @@ impl HelmPanel {
         screen: HelmScreen,
         cx: &mut Context<Self>,
     ) -> ButtonGroup {
-        const FILTERS: [(&str, &str); 3] =
-            [("Open", "open"), ("Closed", "closed"), ("All", "all")];
+        const FILTERS: [(&str, &str); 3] = [("Open", "open"), ("Closed", "closed"), ("All", "all")];
         ButtonGroup::new(id)
             .outline()
             .compact()
@@ -114,7 +112,12 @@ impl HelmPanel {
 
     /// Applies a filter to whichever of Issues/Pulls owns it and reloads the
     /// list.
-    pub(super) fn set_tab_filter(&mut self, screen: HelmScreen, filter: &str, cx: &mut Context<Self>) {
+    pub(super) fn set_tab_filter(
+        &mut self,
+        screen: HelmScreen,
+        filter: &str,
+        cx: &mut Context<Self>,
+    ) {
         match screen {
             HelmScreen::Issues => {
                 self.issues_filter = filter.to_string();
@@ -131,13 +134,16 @@ impl HelmPanel {
     /// The Issues tab — filterable list of `self.selected_repo`'s issues
     /// (PRs filtered out), each row opening its page in the browser.
     pub(super) fn render_issues(&self, cx: &mut Context<Self>) -> impl IntoElement {
-
-        let filter_row = h_flex().items_center().px_3().py_2().child(self.state_filter(
-            "helm-issues-filter",
-            &self.issues_filter,
-            HelmScreen::Issues,
-            cx,
-        ));
+        let filter_row = h_flex()
+            .items_center()
+            .px_3()
+            .py_2()
+            .child(self.state_filter(
+                "helm-issues-filter",
+                &self.issues_filter,
+                HelmScreen::Issues,
+                cx,
+            ));
 
         self.list_screen(
             self.issues
@@ -232,12 +238,9 @@ impl HelmPanel {
                     )
                     .when(!issue.labels.is_empty(), |col| {
                         col.child(
-                            h_flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .children(
-                                    issue.labels.iter().map(|label| chip(label.name.clone())),
-                                ),
+                            h_flex().flex_wrap().gap_1().children(
+                                issue.labels.iter().map(|label| chip(label.name.clone())),
+                            ),
                         )
                     }),
             )
@@ -305,68 +308,4 @@ impl HelmPanel {
             }))
             .into_any_element()
     }
-}
-
-/// One row of the Issues screen: title, number and author, comment count,
-/// and the issue's labels.
-pub(super) fn issue_row(ix: usize, issue: &Issue, cx: &App) -> ListItem {
-    let muted_foreground = cx.theme().muted_foreground;
-    let foreground = cx.theme().foreground;
-    let number = issue.number;
-    let closed = issue.state == "closed";
-    let author = issue
-        .user
-        .as_ref()
-        .map(|u| u.login.clone())
-        .unwrap_or_default();
-    let comments = issue.comments;
-    let labels = issue.labels.clone();
-    ListItem::new(("helm-issue", ix))
-        .child(
-            v_flex()
-                .gap_0p5()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(if closed {
-                            muted_foreground
-                        } else {
-                            foreground
-                        })
-                        .child(issue.title.clone()),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(format!("#{number} · {author}")),
-                        )
-                        .when(comments > 0, |row| {
-                            row.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child(format!("{comments} comments")),
-                            )
-                        }),
-                ),
-        )
-        .suffix(move |_, _| {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .children(labels.iter().map(|label| chip(label.name.clone())))
-                .child(
-                    Icon::new(IconName::ChevronRight)
-                        .xsmall()
-                        .text_color(muted_foreground),
-                )
-        })
 }

@@ -12,9 +12,12 @@ impl HelmPanel {
 
     pub(super) fn load_pulls_page(&mut self, page: u32, cx: &mut Context<Self>) {
         let filter = self.pulls_filter.clone();
-        self.load_repo_page(cx, |this| &mut this.pulls, page, move |repo| {
-            requests::pulls(&repo.owner.login, &repo.name, &filter)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.pulls,
+            page,
+            move |repo| requests::pulls(&repo.owner.login, &repo.name, &filter),
+        );
     }
 
     /// Same as [`Self::open_issue_detail`], for a PR row.
@@ -60,30 +63,27 @@ impl HelmPanel {
     /// The Pull requests tab — filterable list showing head→base branches,
     /// each row opening its page in the browser.
     pub(super) fn render_pulls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-
         let filter_row = h_flex()
             .items_center()
             .justify_between()
             .gap_1()
             .px_3()
             .py_2()
-            .child(
-                self.state_filter(
-                    "helm-pulls-filter",
-                    &self.pulls_filter,
-                    HelmScreen::Pulls,
-                    cx,
-                ),
-            )
+            .child(self.state_filter(
+                "helm-pulls-filter",
+                &self.pulls_filter,
+                HelmScreen::Pulls,
+                cx,
+            ))
             .child(
                 Button::new("pulls-create")
                     .ghost()
                     .xsmall()
                     .icon(IconName::Plus)
                     .label("New pull request")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_create_pull_dialog(window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_create_pull_dialog(window, cx)),
+                    ),
             );
 
         self.list_screen(
@@ -202,64 +202,4 @@ impl HelmPanel {
             .child(self.render_comment_thread(cx))
             .into_any_element()
     }
-}
-
-/// One row of the Pull Requests screen: title, number, and the branches it
-/// merges from and into.
-pub(super) fn pull_row(ix: usize, pr: &Pull, cx: &App) -> ListItem {
-    let muted_foreground = cx.theme().muted_foreground;
-    let foreground = cx.theme().foreground;
-    let number = pr.number;
-    let open = !pr.merged && pr.state != "closed";
-    let head_label = if pr.head.label.is_empty() {
-        pr.head.r#ref.clone()
-    } else {
-        pr.head.label.clone()
-    };
-    let base_label = if pr.base.label.is_empty() {
-        pr.base.r#ref.clone()
-    } else {
-        pr.base.label.clone()
-    };
-    ListItem::new(("helm-pr", ix))
-        .child(
-            v_flex()
-                .gap_0p5()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(if open {
-                            foreground
-                        } else {
-                            muted_foreground
-                        })
-                        .child(pr.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(format!("#{number}")),
-                ),
-        )
-        .suffix(move |_, _| {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family("Cascadia Mono")
-                        .text_color(muted_foreground)
-                        .child(format!("{head_label} → {base_label}")),
-                )
-                .child(
-                    Icon::new(IconName::ChevronRight)
-                        .xsmall()
-                        .text_color(muted_foreground),
-                )
-        })
 }

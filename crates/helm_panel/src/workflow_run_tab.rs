@@ -10,7 +10,11 @@ use super::*;
 /// (`cx.theme().popover`, set on this graph) — hence job names not being
 /// visible. Same `popover_foreground` theme color `designer_panel::render_leaf`
 /// uses for its own leaf nodes against the identical `popover` background.
-pub(super) fn render_workflow_job_node(node: &FlowNode, _window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+pub(super) fn render_workflow_job_node(
+    node: &FlowNode,
+    _window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
     div()
         .size_full()
         .flex()
@@ -22,23 +26,6 @@ pub(super) fn render_workflow_job_node(node: &FlowNode, _window: &mut Window, cx
         .text_color(cx.theme().popover_foreground)
         .child(node.label.to_string())
         .into_any_element()
-}
-
-/// Color for a GitHub Actions status/conclusion pair — shared between a
-/// run's own header badge and every job node's `accent_border` on
-/// `WorkflowRunItem` (`status`: queued/in_progress/completed; `conclusion`:
-/// success/failure/cancelled/timed_out/action_required/skipped/neutral,
-/// only set once `status` is "completed").
-pub(super) fn workflow_status_color(cx: &App, status: &str, conclusion: &Option<String>) -> gpui::Hsla {
-    match conclusion.as_deref() {
-        Some("success") => cx.theme().success,
-        Some("failure") | Some("cancelled") | Some("timed_out") | Some("action_required") => {
-            cx.theme().danger
-        }
-        Some("skipped") | Some("neutral") => cx.theme().muted_foreground,
-        _ if status == "in_progress" || status == "queued" => cx.theme().primary,
-        _ => cx.theme().muted_foreground,
-    }
 }
 
 /// Finds an already-open `WorkflowRunItem` tab for `run` in the active pane
@@ -151,8 +138,8 @@ impl WorkflowRunItem {
             loop {
                 let (owner, name, gh_state) = (owner.clone(), name.clone(), gh_state.clone());
                 let (run_result, jobs_result) = on_tokio(async move {
-                    let run = gh_get_workflow_run(owner.clone(), name.clone(), run_id, &gh_state)
-                        .await;
+                    let run =
+                        gh_get_workflow_run(owner.clone(), name.clone(), run_id, &gh_state).await;
                     let jobs = gh_get_workflow_run_jobs(owner, name, run_id, &gh_state).await;
                     (run, jobs)
                 })
@@ -242,7 +229,11 @@ impl Render for WorkflowRunItem {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
 
-        let run_status_label = self.run.conclusion.clone().unwrap_or_else(|| self.run.status.clone());
+        let run_status_label = self
+            .run
+            .conclusion
+            .clone()
+            .unwrap_or_else(|| self.run.status.clone());
         let run_color = workflow_status_color(cx, &self.run.status, &self.run.conclusion);
         let open_url = self.run.html_url.clone();
         let run_name = self.run.name.clone();

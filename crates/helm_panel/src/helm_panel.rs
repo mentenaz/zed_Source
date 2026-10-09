@@ -6,38 +6,36 @@
 //! `gpui_component` elements (`Button`, `list::ListItem`, `Icon`,
 //! `Spinner`) instead of the old `forge_ui` crate.
 
-mod changes;
+mod activity;
 mod auth;
-mod navigation;
-mod profile;
-mod orgs;
-mod repos;
-mod clone;
-mod invitations;
-mod collaborators;
 mod branches;
-mod pulls;
+mod changes;
+mod clone;
+mod collaborators;
+mod helm_panel_settings;
+mod insights;
+mod invitations;
 mod issues;
-mod list_view;
 mod lists;
 mod loading;
+mod navigation;
+mod orgs;
+mod profile;
+mod pulls;
 mod releases_packages;
-mod insights;
-mod activity;
+mod repos;
 mod repository_modal;
-mod section;
-mod workflow_run_tab;
 mod state;
-mod widgets;
+mod workflow_run_tab;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, TaskExt, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px, relative,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    Task, TaskExt, WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Selectable as _, Sizable as _, StyledExt,
@@ -63,11 +61,13 @@ use gpui_component::{
 use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
+use changes::*;
+use collaborators::*;
 use helm_backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
-    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion,
-    Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun,
-    fetch_page, fetch_page_under, peek_page, peek_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
+    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package,
+    PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
+    WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
     gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo, gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
     gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
@@ -76,17 +76,16 @@ use helm_backend::github::{
     gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_issue_comments,
     gh_list_org_invitations, gh_list_package_versions, gh_list_packages,
     gh_list_secret_scanning_alerts, gh_login, gh_logout, gh_remove_collaborator, gh_update_repo,
-    gh_update_topics, gh_update_user, requests,
+    gh_update_topics, gh_update_user, peek_page, peek_page_under, requests,
+    search_repositories_page,
 };
 use helm_backend::{EventRecvError, on_tokio};
-use changes::*;
-use list_view::*;
-use collaborators::*;
+pub use helm_panel_settings::HelmPanelSettings;
+use helm_ui::*;
 use repository_modal::*;
-use section::*;
-use workflow_run_tab::*;
+use settings::{DockSide, Settings as _};
 use state::*;
-use widgets::*;
+use workflow_run_tab::*;
 use workspace::{
     Item, ModalView, Toast, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -96,18 +95,88 @@ use workspace::{
 actions!(
     helm_panel,
     [
-        ToggleFocus
+        ToggleFocus,
+        /// Opens the selected repository in the read-only Workspace tab.
+        OpenRepositoryWorkspace
     ]
 );
+
+type ListView = helm_ui::ListView<HelmPanel>;
+
+impl HelmView for HelmPanel {
+    fn gh_state(&self) -> &Arc<GhState> {
+        &self.gh_state
+    }
+
+    fn repo(&self) -> Option<&Repo> {
+        self.selected_repo.as_ref()
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<HelmPanel>(window, cx);
         });
+        workspace.register_action(|workspace, _: &OpenRepositoryWorkspace, window, cx| {
+            if let Some(panel) = workspace.panel::<HelmPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.open_selected_repository_workspace(window, cx)
+                });
+            }
+        });
+        workspace.register_action(
+            |workspace, _: &helm_workspace::OpenWorkspaceWorkflowRun, window, cx| {
+                let active_tab = workspace
+                    .active_pane()
+                    .read(cx)
+                    .active_item()
+                    .and_then(|item| item.downcast::<helm_workspace::WorkspaceTab>());
+                let Some(active_tab) = active_tab else {
+                    return;
+                };
+                let context = active_tab.read(cx).workflow_run_context();
+                if let Some((run, owner, repo, gh_state)) = context {
+                    open_workflow_run_tab(run, owner, repo, gh_state, workspace, window, cx);
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &helm_workspace::CloneRepositoryForWorkspace, window, cx| {
+                let active_tab = workspace
+                    .active_pane()
+                    .read(cx)
+                    .active_item()
+                    .and_then(|item| item.downcast::<helm_workspace::WorkspaceTab>());
+                let Some(active_tab) = active_tab else {
+                    return;
+                };
+                let (repo, file) = active_tab.read_with(cx, |tab, _| {
+                    (
+                        tab.repository().clone(),
+                        tab.requested_clone_file().map(str::to_string),
+                    )
+                });
+                if let Some(panel) = workspace.panel::<HelmPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.selected_repo = Some(repo);
+                        panel.open_clone_modal_for_file(file, window, cx);
+                    });
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &helm_workspace::AuthorizeRepositoryWorkspace, window, cx| {
+                if let Some(panel) = workspace.panel::<HelmPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.prepare_workspace_scope_authorization(cx)
+                    });
+                    workspace.focus_panel::<HelmPanel>(window, cx);
+                }
+            },
+        );
     })
     .detach();
-
 }
 
 pub struct HelmPanel {
@@ -175,6 +244,10 @@ pub struct HelmPanel {
     /// The sections of the repository that is open.
     repo_sections_list: ListView,
     repo_search: Entity<InputState>,
+    github_search_input: Entity<InputState>,
+    github_search_results: Section<Repo>,
+    github_search_query: String,
+    github_search_list: ListView,
     /// Row `up`/`down`/`enter` act on, within the filtered repo list
     /// `render_repo_list` computes from `repos` + `repo_search` — an index
     /// into that filtered order, not into `repos` itself, since the two can
@@ -195,6 +268,8 @@ pub struct HelmPanel {
     /// workspace?" stage instead of opening it automatically. Reset whenever
     /// [`Self::open_clone_modal`] starts a fresh attempt.
     clone_succeeded_path: Option<String>,
+    /// File to open in the new workspace when a clone was started from Code.
+    clone_file_to_open: Option<String>,
     /// Parent directory the Clone action targets — `None` means "the current
     /// workspace root", the pre-picker default. Chosen via [`Self::pick_clone_dir`]
     /// and consumed by [`Self::handle_clone`].
@@ -290,13 +365,27 @@ impl HelmPanel {
         cx.new(|cx| {
             let repo_search =
                 cx.new(|cx| InputState::new(window, cx).placeholder("Search repositories…"));
-            cx.subscribe(&repo_search, |this: &mut Self, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event {
-                    // A new search starts from its first page.
-                    this.repos_page = 1;
-                    cx.notify();
-                }
-            })
+            cx.subscribe(
+                &repo_search,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        // A new search starts from its first page.
+                        this.repos_page = 1;
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            let github_search_input =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Search GitHub repositories…"));
+            cx.subscribe(
+                &github_search_input,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.load_github_search(1, cx);
+                    }
+                },
+            )
             .detach();
 
             let mut this = Self {
@@ -331,12 +420,17 @@ impl HelmPanel {
                 repos_list: lists::repos_list(window, cx),
                 repo_sections_list: lists::repo_sections_list(window, cx),
                 repo_search,
+                github_search_input,
+                github_search_results: Section::default(),
+                github_search_query: String::new(),
+                github_search_list: lists::github_search_list(window, cx),
                 selected_repo: None,
                 clone_url_copied: false,
                 cloning: false,
                 clone_lines: Vec::new(),
                 clone_error: None,
                 clone_succeeded_path: None,
+                clone_file_to_open: None,
                 clone_target_dir: None,
                 workspace,
                 branches: Section::default(),
@@ -414,12 +508,13 @@ impl HelmPanel {
         let message = message.into();
         self.workspace
             .update(cx, |workspace, cx| {
-                workspace.show_toast(Toast::new(NotificationId::unique::<HelmPanel>(), message), cx);
+                workspace.show_toast(
+                    Toast::new(NotificationId::unique::<HelmPanel>(), message),
+                    cx,
+                );
             })
             .ok();
     }
-
-
 }
 
 impl Focusable for HelmPanel {
@@ -439,28 +534,40 @@ impl Panel for HelmPanel {
         "HelmPanel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        DockPosition::Left
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match HelmPanelSettings::get_global(cx).dock {
+            DockSide::Left => DockPosition::Left,
+            DockSide::Right => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left)
+        matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            let dock = match position {
+                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+                DockPosition::Right => DockSide::Right,
+            };
+            settings.helm_panel.get_or_insert_default().dock = Some(dock);
+        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> gpui::Pixels {
         px(320.)
     }
 
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::Github)
+    fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
+        HelmPanelSettings::get_global(cx)
+            .button
+            .then_some(ui::IconName::Github)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -472,7 +579,13 @@ impl Panel for HelmPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        5
+        21
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.helm_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 
@@ -531,6 +644,9 @@ impl Render for HelmPanel {
                         HelmScreen::OrgList => self.render_org_list(cx).into_any_element(),
                         HelmScreen::OrgDetail => self.render_org_detail(cx).into_any_element(),
                         HelmScreen::RepoList => self.render_repo_list(cx).into_any_element(),
+                        HelmScreen::GitHubSearch => {
+                            self.render_github_search(cx).into_any_element()
+                        }
                         HelmScreen::RepoDetail => self.render_repo_detail(cx).into_any_element(),
                         HelmScreen::Branches => self.render_branches(cx).into_any_element(),
                         HelmScreen::Collaborators => {
@@ -614,22 +730,47 @@ mod tests {
     #[test]
     fn actions_ask_for_the_scope_they_need() {
         let json = serde_json::Value::Null;
-        assert_eq!(HelmAction::CreateRepo { opts: json.clone() }.required_scope(), "repo");
         assert_eq!(
-            HelmAction::EditRepo { changes: json.clone(), topics: Vec::new() }.required_scope(),
+            HelmAction::CreateRepo { opts: json.clone() }.required_scope(),
             "repo"
         );
-        assert_eq!(HelmAction::RemoveCollaborator("x".into()).required_scope(), "repo");
+        assert_eq!(
+            HelmAction::EditRepo {
+                changes: json.clone(),
+                topics: Vec::new()
+            }
+            .required_scope(),
+            "repo"
+        );
+        assert_eq!(
+            HelmAction::RemoveCollaborator("x".into()).required_scope(),
+            "repo"
+        );
         assert_eq!(HelmAction::AcceptRepoInvitation(1).required_scope(), "repo");
-        assert_eq!(HelmAction::UpdateProfile { changes: json }.required_scope(), "user");
-        assert_eq!(HelmAction::AcceptOrgInvitation("o".into()).required_scope(), "write:org");
-        assert_eq!(HelmAction::DeclineOrgInvitation("o".into()).required_scope(), "write:org");
+        assert_eq!(
+            HelmAction::UpdateProfile { changes: json }.required_scope(),
+            "user"
+        );
+        assert_eq!(
+            HelmAction::AcceptOrgInvitation("o".into()).required_scope(),
+            "write:org"
+        );
+        assert_eq!(
+            HelmAction::DeclineOrgInvitation("o".into()).required_scope(),
+            "write:org"
+        );
     }
 
     #[test]
     fn only_repository_actions_need_a_selected_repo() {
         let json = serde_json::Value::Null;
-        assert!(HelmAction::EditRepo { changes: json.clone(), topics: Vec::new() }.needs_repo());
+        assert!(
+            HelmAction::EditRepo {
+                changes: json.clone(),
+                topics: Vec::new()
+            }
+            .needs_repo()
+        );
         assert!(HelmAction::RemoveCollaborator("x".into()).needs_repo());
         assert!(!HelmAction::CreateRepo { opts: json.clone() }.needs_repo());
         assert!(!HelmAction::UpdateProfile { changes: json }.needs_repo());

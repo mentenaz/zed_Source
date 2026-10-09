@@ -25,7 +25,7 @@ impl HelmPanel {
     /// The org list — mirrors the old `OrgListScreen`.
     pub(super) fn render_org_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.list_screen(
-            self.org_logins.status(),
+            self.org_logins.status_for::<HelmPanel>(),
             &self.org_logins_list,
             None,
             // The organisations arrive with sign-in, so this list has no
@@ -55,13 +55,16 @@ impl HelmPanel {
             return failed_screen(
                 "Failed to load organization",
                 &self.error_msg,
-                Some(Button::new("org-retry").outline().label("Retry").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(org) = this.selected_org.clone() {
-                            this.load_org(org, cx);
-                        }
-                    }),
-                )),
+                Some(
+                    Button::new("org-retry")
+                        .outline()
+                        .label("Retry")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(org) = this.selected_org.clone() {
+                                this.load_org(org, cx);
+                            }
+                        })),
+                ),
                 cx,
             );
         };

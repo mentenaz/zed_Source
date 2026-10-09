@@ -10,7 +10,13 @@ pub(super) fn menu_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> Lis
     ListView::sectioned(
         Vec::new(),
         |panel, _| panel.menu_rows().len(),
-        |panel, ix, cx| Some(profile::menu_row(ix.row, panel.menu_rows().get(ix.row)?, cx)),
+        |panel, ix, cx| {
+            Some(profile::menu_row(
+                ix.row,
+                panel.menu_rows().get(ix.row)?,
+                cx,
+            ))
+        },
         |this, ix, window, cx| {
             if let Some(id) = this.menu_rows().get(ix.row).map(|row| row.id) {
                 this.open_menu_row(id, window, cx);
@@ -26,7 +32,11 @@ pub(super) fn profile_menu_list(window: &mut Window, cx: &mut Context<HelmPanel>
         Vec::new(),
         |panel, _| panel.profile_rows().len(),
         |panel, ix, cx| {
-            Some(profile::profile_row(ix.row, panel.profile_rows().get(ix.row)?, cx))
+            Some(profile::profile_row(
+                ix.row,
+                panel.profile_rows().get(ix.row)?,
+                cx,
+            ))
         },
         |this, ix, window, cx| {
             if let Some(id) = this.profile_rows().get(ix.row).map(|row| row.id) {
@@ -75,6 +85,20 @@ pub(super) fn repos_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> Li
     )
 }
 
+pub(super) fn github_search_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
+    ListView::new(
+        |panel| &panel.github_search_results,
+        repos::search_repo_row,
+        |this, ix, _, cx| {
+            if let Some(repo) = this.github_search_results.items.get(ix).cloned() {
+                this.select_repo(repo, cx);
+            }
+        },
+        window,
+        cx,
+    )
+}
+
 pub(super) fn repo_sections_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::sectioned(
         Vec::new(),
@@ -108,7 +132,7 @@ pub(super) fn branches_list(window: &mut Window, cx: &mut Context<HelmPanel>) ->
                         Some(repo.default_branch.clone())
                     })
                     .unwrap_or_default();
-                branches::branch_row(ix, branch, &default_branch, cx)
+                branch_row(ix, branch, &default_branch, cx)
             }
         },
         |_, _, _, _| {},
@@ -140,7 +164,7 @@ pub(super) fn collaborators_list(window: &mut Window, cx: &mut Context<HelmPanel
 pub(super) fn issues_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.issues,
-        issues::issue_row,
+        issue_row,
         |this, ix, _, cx| {
             if let Some(issue) = this.issues.items.get(ix).cloned() {
                 this.open_issue_detail(issue, cx);
@@ -154,7 +178,7 @@ pub(super) fn issues_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> L
 pub(super) fn pulls_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.pulls,
-        pulls::pull_row,
+        pull_row,
         |this, ix, _, cx| {
             if let Some(pr) = this.pulls.items.get(ix).cloned() {
                 this.open_pr_detail(pr, cx);
@@ -168,7 +192,7 @@ pub(super) fn pulls_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> Li
 pub(super) fn releases_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.releases,
-        releases_packages::release_row,
+        release_row,
         |this, ix, _, cx| {
             if let Some(release) = this.releases.items.get(ix) {
                 cx.open_url(&release.html_url);
@@ -192,7 +216,10 @@ pub(super) fn packages_list(window: &mut Window, cx: &mut Context<HelmPanel>) ->
         // them if they are the ones showing.
         |this, ix, _, cx| {
             let package = this.packages.items.get(ix.row).cloned();
-            let owner = this.selected_repo.as_ref().map(|repo| repo.owner.login.clone());
+            let owner = this
+                .selected_repo
+                .as_ref()
+                .map(|repo| repo.owner.login.clone());
             if let (Some(package), Some(owner)) = (package, owner) {
                 this.toggle_package_versions(owner, package, cx);
             }
@@ -205,7 +232,7 @@ pub(super) fn packages_list(window: &mut Window, cx: &mut Context<HelmPanel>) ->
 pub(super) fn commits_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.commits,
-        activity::commit_row,
+        commit_row,
         |_, _, _, _| {},
         window,
         cx,
@@ -215,7 +242,7 @@ pub(super) fn commits_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> 
 pub(super) fn workflow_runs_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::new(
         |panel| &panel.workflow_runs,
-        activity::workflow_run_row,
+        workflow_run_row,
         |this, ix, window, cx| {
             if let Some(run) = this.workflow_runs.items.get(ix).cloned() {
                 this.select_workflow_run(run, window, cx);
@@ -238,13 +265,7 @@ pub(super) fn deployments_list(window: &mut Window, cx: &mut Context<HelmPanel>)
 
 /// Tags are read-only: nothing happens on `enter` or a click.
 pub(super) fn tags_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
-    ListView::new(
-        |panel| &panel.tags,
-        releases_packages::tag_row,
-        |_, _, _, _| {},
-        window,
-        cx,
-    )
+    ListView::new(|panel| &panel.tags, tag_row, |_, _, _, _| {}, window, cx)
 }
 
 /// Read-only: an alert has no detail screen to open.

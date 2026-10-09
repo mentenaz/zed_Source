@@ -12,12 +12,23 @@
 
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApiResponseFormat {
+    Json,
+    Raw,
+    Diff,
+    TextMatch,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApiRequest {
     pub method: &'static str,
     /// Path and query, starting with `/`. The base URL is added on sending.
     pub path: String,
     pub body: Option<Value>,
+    pub accept: ApiResponseFormat,
+    /// GitHub maintains independent budgets for core, search and code search.
+    pub rate_limit_resource: &'static str,
 }
 
 impl ApiRequest {
@@ -39,6 +50,11 @@ impl ApiRequest {
         self.path = format!("{path}?{}", params.join("&"));
         self
     }
+
+    pub fn with_accept(mut self, accept: ApiResponseFormat) -> ApiRequest {
+        self.accept = accept;
+        self
+    }
 }
 
 fn get(path: String) -> ApiRequest {
@@ -46,6 +62,8 @@ fn get(path: String) -> ApiRequest {
         method: "GET",
         path,
         body: None,
+        accept: ApiResponseFormat::Json,
+        rate_limit_resource: "core",
     }
 }
 
@@ -54,6 +72,8 @@ fn delete(path: String) -> ApiRequest {
         method: "DELETE",
         path,
         body: None,
+        accept: ApiResponseFormat::Json,
+        rate_limit_resource: "core",
     }
 }
 
@@ -62,6 +82,8 @@ fn with_body(method: &'static str, path: String, body: Value) -> ApiRequest {
         method,
         path,
         body: Some(body),
+        accept: ApiResponseFormat::Json,
+        rate_limit_resource: "core",
     }
 }
 
@@ -105,7 +127,10 @@ pub fn repos(owner: &str) -> ApiRequest {
     if owner == "self" {
         get("/user/repos?per_page=100&sort=updated&affiliation=owner".to_string())
     } else {
-        get(format!("/orgs/{}/repos?per_page=100&sort=updated", seg(owner)))
+        get(format!(
+            "/orgs/{}/repos?per_page=100&sort=updated",
+            seg(owner)
+        ))
     }
 }
 
@@ -153,6 +178,140 @@ pub fn recent_commits(owner: &str, name: &str) -> ApiRequest {
     get(repo_path(owner, name, "/commits?per_page=100"))
 }
 
+pub fn recent_commits_for_ref(owner: &str, name: &str, ref_name: &str) -> ApiRequest {
+    get(format!(
+        "{}?sha={}",
+        repo_path(owner, name, "/commits"),
+        seg(ref_name)
+    ))
+}
+
+/// Commits touching a file or folder at a ref.
+pub fn commits_for_path(owner: &str, name: &str, path: &str, ref_name: &str) -> ApiRequest {
+    get(format!(
+        "{}?path={}&sha={}",
+        repo_path(owner, name, "/commits"),
+        seg(path),
+        seg(ref_name)
+    ))
+}
+
+/// Resolve a branch, tag, or commit name to its commit object.
+pub fn commit(owner: &str, name: &str, ref_name: &str) -> ApiRequest {
+    get(repo_path(
+        owner,
+        name,
+        &format!("/commits/{}", seg(ref_name)),
+    ))
+}
+
+/// A commit including its file summaries and patches.
+pub fn commit_detail(owner: &str, name: &str, sha: &str) -> ApiRequest {
+    commit(owner, name, sha)
+}
+
+/// A whole tree by its immutable tree SHA. When GitHub says `truncated`,
+/// callers must load each child tree separately rather than trust the result.
+pub fn tree(owner: &str, name: &str, tree_sha: &str, recursive: bool) -> ApiRequest {
+    get(format!(
+        "/repos/{}/{}/git/trees/{}?recursive={}",
+        seg(owner),
+        seg(name),
+        seg(tree_sha),
+        recursive
+    ))
+}
+
+/// One non-recursive directory tree addressed by the tree SHA from its parent.
+pub fn tree_dir(owner: &str, name: &str, tree_sha: &str) -> ApiRequest {
+    tree(owner, name, tree_sha, false)
+}
+
+/// A Git tree by its immutable object SHA, used to expand a truncated tree.
+pub fn tree_sha(owner: &str, name: &str, sha: &str) -> ApiRequest {
+    tree(owner, name, sha, false)
+}
+
+/// A raw blob by its SHA, as a bytes payload. The caller decides whether it is
+/// text, binary or LFS pointer.
+pub fn blob(owner: &str, name: &str, sha: &str) -> ApiRequest {
+    get(format!(
+        "/repos/{}/{}/git/blobs/{}",
+        seg(owner),
+        seg(name),
+        seg(sha)
+    ))
+    .with_accept(ApiResponseFormat::Raw)
+}
+
+/// The README of a repository or a folder at a ref.
+pub fn readme(owner: &str, name: &str, ref_name: &str) -> ApiRequest {
+    get(format!(
+        "/repos/{}/{}/readme?ref={}",
+        seg(owner),
+        seg(name),
+        seg(ref_name)
+    ))
+}
+
+/// The README in a folder at a ref.
+pub fn readme_at_path(owner: &str, name: &str, path: &str, ref_name: &str) -> ApiRequest {
+    get(format!(
+        "/repos/{}/{}/readme/{}?ref={}",
+        seg(owner),
+        seg(name),
+        seg(path),
+        seg(ref_name)
+    ))
+}
+
+/// A two-ref comparison, showing which commits and files differ.
+pub fn compare(owner: &str, name: &str, base: &str, head: &str) -> ApiRequest {
+    get(format!(
+        "/repos/{}/{}/compare/{}...{}",
+        seg(owner),
+        seg(name),
+        seg(base),
+        seg(head)
+    ))
+}
+
+/// Search the whole GitHub repository index for a phrase.
+pub fn search_repositories(query: &str, page: u32, per_page: u32) -> ApiRequest {
+    let mut r = get(format!(
+        "/search/repositories?q={}&per_page={}&page={}",
+        seg(query),
+        per_page,
+        page.max(1)
+    ));
+    r.path = format!(
+        "/search/repositories?q={}&per_page={}&page={}",
+        seg(query),
+        per_page,
+        page.max(1)
+    );
+    r.rate_limit_resource = "search";
+    r
+}
+
+/// Search the contents of GitHub code, returning match positions. The caller
+/// decides which repo or default branch is in scope.
+pub fn search_code(query: &str, repo: Option<&str>, page: u32, per_page: u32) -> ApiRequest {
+    let q = match repo {
+        Some(repo) => format!("repo:{} {}", repo, query),
+        None => query.to_string(),
+    };
+    let mut req = get(format!(
+        "/search/code?q={}&per_page={}&page={}",
+        urlencoding::encode(&q),
+        per_page,
+        page.max(1)
+    ));
+    req.accept = ApiResponseFormat::TextMatch;
+    req.rate_limit_resource = "code_search";
+    req
+}
+
 // ── Collaboration ──────────────────────────────────────────────────────
 
 pub fn issues(owner: &str, name: &str, state: &str) -> ApiRequest {
@@ -174,6 +333,22 @@ pub fn pulls(owner: &str, name: &str, state: &str) -> ApiRequest {
             "/pulls?state={}&per_page=100&sort=updated&direction=desc",
             seg(state)
         ),
+    ))
+}
+
+pub fn pull_for_head(owner: &str, name: &str, head: &str) -> ApiRequest {
+    get(format!(
+        "{}?state=all&head={}&per_page=100&sort=updated&direction=desc",
+        repo_path(owner, name, "/pulls"),
+        seg(head)
+    ))
+}
+
+pub fn combined_status(owner: &str, name: &str, ref_name: &str) -> ApiRequest {
+    get(repo_path(
+        owner,
+        name,
+        &format!("/commits/{}/status", seg(ref_name)),
     ))
 }
 
@@ -233,6 +408,8 @@ pub fn accept_repo_invitation(invitation_id: u64) -> ApiRequest {
         method: "PATCH",
         path: format!("/user/repository_invitations/{invitation_id}"),
         body: None,
+        accept: ApiResponseFormat::Json,
+        rate_limit_resource: "core",
     }
 }
 
@@ -322,6 +499,14 @@ pub fn workflow_runs(owner: &str, name: &str) -> ApiRequest {
     get(repo_path(owner, name, "/actions/runs?per_page=50&page=1"))
 }
 
+pub fn workflow_runs_for_branch(owner: &str, name: &str, branch: &str) -> ApiRequest {
+    get(format!(
+        "{}?branch={}&per_page=50&page=1",
+        repo_path(owner, name, "/actions/runs"),
+        seg(branch)
+    ))
+}
+
 pub fn workflow_run(owner: &str, name: &str, run_id: u64) -> ApiRequest {
     get(repo_path(owner, name, &format!("/actions/runs/{run_id}")))
 }
@@ -388,9 +573,15 @@ mod tests {
             "GET /repos/o/r/actions/runs?per_page=10&page=2"
         );
         // A request with no query string gets one.
-        assert_eq!(line(&repo("o", "r").page(1, 10)), "GET /repos/o/r?per_page=10&page=1");
+        assert_eq!(
+            line(&repo("o", "r").page(1, 10)),
+            "GET /repos/o/r?per_page=10&page=1"
+        );
         // Pages count from 1.
-        assert_eq!(line(&tags("o", "r").page(0, 10)), "GET /repos/o/r/tags?per_page=10&page=1");
+        assert_eq!(
+            line(&tags("o", "r").page(0, 10)),
+            "GET /repos/o/r/tags?per_page=10&page=1"
+        );
         // The body and method are untouched.
         let paged = update_user(json!({ "bio": "x" })).page(2, 5);
         assert_eq!(paged.method, "PATCH");
@@ -401,7 +592,10 @@ mod tests {
     fn account_requests() {
         assert_eq!(line(&current_user()), "GET /user");
         assert_eq!(line(&user("octocat")), "GET /users/octocat");
-        assert_eq!(line(&org_memberships()), "GET /user/memberships/orgs?per_page=100");
+        assert_eq!(
+            line(&org_memberships()),
+            "GET /user/memberships/orgs?per_page=100"
+        );
         assert_eq!(line(&org_detail("mentenaz")), "GET /orgs/mentenaz");
 
         let update = update_user(json!({ "bio": "hello" }));
@@ -424,9 +618,19 @@ mod tests {
     #[test]
     fn repository_requests() {
         assert_eq!(line(&repo("o", "r")), "GET /repos/o/r");
-        assert_eq!(line(&branches("o", "r")), "GET /repos/o/r/branches?per_page=100");
+        assert_eq!(
+            line(&branches("o", "r")),
+            "GET /repos/o/r/branches?per_page=100"
+        );
         assert_eq!(line(&tags("o", "r")), "GET /repos/o/r/tags?per_page=100");
-        assert_eq!(line(&recent_commits("o", "r")), "GET /repos/o/r/commits?per_page=100");
+        assert_eq!(
+            line(&recent_commits("o", "r")),
+            "GET /repos/o/r/commits?per_page=100"
+        );
+        assert_eq!(
+            recent_commits_for_ref("o", "r", "feature/a").path,
+            "/repos/o/r/commits?sha=feature%2Fa"
+        );
 
         let update = update_repo("o", "r", json!({ "description": "d" }));
         assert_eq!(line(&update), "PATCH /repos/o/r");
@@ -510,7 +714,10 @@ mod tests {
 
     #[test]
     fn release_requests() {
-        assert_eq!(line(&releases("o", "r")), "GET /repos/o/r/releases?per_page=50");
+        assert_eq!(
+            line(&releases("o", "r")),
+            "GET /repos/o/r/releases?per_page=50"
+        );
 
         let release = create_release("o", "r", "v1.0.0", Some("One"), None, false, true);
         assert_eq!(line(&release), "POST /repos/o/r/releases");
@@ -554,19 +761,34 @@ mod tests {
             line(&workflow_runs("o", "r")),
             "GET /repos/o/r/actions/runs?per_page=50&page=1"
         );
-        assert_eq!(line(&workflow_run("o", "r", 9)), "GET /repos/o/r/actions/runs/9");
+        assert_eq!(
+            line(&workflow_run("o", "r", 9)),
+            "GET /repos/o/r/actions/runs/9"
+        );
         assert_eq!(
             line(&workflow_run_jobs("o", "r", 9)),
             "GET /repos/o/r/actions/runs/9/jobs?per_page=100"
         );
-        assert_eq!(line(&deployments("o", "r")), "GET /repos/o/r/deployments?per_page=50");
-        assert_eq!(line(&traffic_views("o", "r")), "GET /repos/o/r/traffic/views");
-        assert_eq!(line(&traffic_clones("o", "r")), "GET /repos/o/r/traffic/clones");
+        assert_eq!(
+            line(&deployments("o", "r")),
+            "GET /repos/o/r/deployments?per_page=50"
+        );
+        assert_eq!(
+            line(&traffic_views("o", "r")),
+            "GET /repos/o/r/traffic/views"
+        );
+        assert_eq!(
+            line(&traffic_clones("o", "r")),
+            "GET /repos/o/r/traffic/clones"
+        );
         assert_eq!(
             line(&traffic_referrers("o", "r")),
             "GET /repos/o/r/traffic/popular/referrers"
         );
-        assert_eq!(line(&traffic_paths("o", "r")), "GET /repos/o/r/traffic/popular/paths");
+        assert_eq!(
+            line(&traffic_paths("o", "r")),
+            "GET /repos/o/r/traffic/popular/paths"
+        );
         assert_eq!(
             line(&dependabot_alerts("o", "r")),
             "GET /repos/o/r/dependabot/alerts?per_page=100"
@@ -578,10 +800,76 @@ mod tests {
     }
 
     #[test]
+    fn w1_code_reader_requests_have_the_right_accepts() {
+        let commit = commit("o", "r", "main");
+        assert_eq!(commit.path, "/repos/o/r/commits/main");
+        let detail = commit_detail("o", "r", "abc123");
+        assert_eq!(detail.path, "/repos/o/r/commits/abc123");
+
+        let tree = tree("o", "r", "tree-sha", true);
+        assert_eq!(tree.path, "/repos/o/r/git/trees/tree-sha?recursive=true");
+        let directory = tree_dir("o", "r", "directory-tree-sha");
+        assert_eq!(
+            directory.path,
+            "/repos/o/r/git/trees/directory-tree-sha?recursive=false"
+        );
+        assert_eq!(tree.accept, ApiResponseFormat::Json);
+
+        let blob = blob("o", "r", "abc123");
+        assert_eq!(blob.path, "/repos/o/r/git/blobs/abc123");
+        assert_eq!(blob.accept, ApiResponseFormat::Raw);
+
+        let readme = readme("o", "r", "main");
+        assert_eq!(readme.path, "/repos/o/r/readme?ref=main");
+        assert_eq!(readme.accept, ApiResponseFormat::Json);
+        let folder_readme = readme_at_path("o", "r", "docs/guide", "main");
+        assert_eq!(
+            folder_readme.path,
+            "/repos/o/r/readme/docs%2Fguide?ref=main"
+        );
+        assert_eq!(folder_readme.accept, ApiResponseFormat::Json);
+        assert_eq!(
+            commits_for_path("o", "r", "docs/a file.md", "main").path,
+            "/repos/o/r/commits?path=docs%2Fa%20file.md&sha=main"
+        );
+
+        let compare = compare("o", "r", "main", "feature");
+        assert_eq!(compare.path, "/repos/o/r/compare/main...feature");
+        assert_eq!(compare.accept, ApiResponseFormat::Json);
+        assert_eq!(
+            pull_for_head("o", "r", "o:feature/a").path,
+            "/repos/o/r/pulls?state=all&head=o%3Afeature%2Fa&per_page=100&sort=updated&direction=desc"
+        );
+        assert_eq!(
+            combined_status("o", "r", "abc123").path,
+            "/repos/o/r/commits/abc123/status"
+        );
+        assert_eq!(
+            workflow_runs_for_branch("o", "r", "feature/a").path,
+            "/repos/o/r/actions/runs?branch=feature%2Fa&per_page=50&page=1"
+        );
+
+        let code = search_code("load_section_page", Some("mentenaz/zed_Source"), 1, 10);
+        assert_eq!(
+            code.path,
+            "/search/code?q=repo%3Amentenaz%2Fzed_Source%20load_section_page&per_page=10&page=1"
+        );
+        assert_eq!(code.accept, ApiResponseFormat::TextMatch);
+        assert_eq!(code.rate_limit_resource, "code_search");
+
+        let repositories = search_repositories("gpui", 1, 10);
+        assert_eq!(repositories.rate_limit_resource, "search");
+        assert_eq!(tree.rate_limit_resource, "core");
+    }
+
+    #[test]
     fn a_name_cannot_change_which_endpoint_is_called() {
         // A value with path or query syntax in it stays one segment.
         assert_eq!(line(&user("a/b?c=d#e")), "GET /users/a%2Fb%3Fc%3Dd%23e");
-        assert_eq!(line(&repo("o", "../../user")), "GET /repos/o/..%2F..%2Fuser");
+        assert_eq!(
+            line(&repo("o", "../../user")),
+            "GET /repos/o/..%2F..%2Fuser"
+        );
         assert_eq!(
             line(&issues("o", "r", "open&per_page=1")),
             "GET /repos/o/r/issues?state=open%26per_page%3D1&per_page=100&sort=updated&direction=desc"
@@ -591,8 +879,14 @@ mod tests {
             "DELETE /repos/o/r/collaborators/x%2F..%2F..%2Fy"
         );
         // Ordinary names are untouched.
-        assert_eq!(line(&repo("mentenaz", "zed_Source")), "GET /repos/mentenaz/zed_Source");
-        assert_eq!(line(&repo("o", "Forge.Scaffold.SDK")), "GET /repos/o/Forge.Scaffold.SDK");
+        assert_eq!(
+            line(&repo("mentenaz", "zed_Source")),
+            "GET /repos/mentenaz/zed_Source"
+        );
+        assert_eq!(
+            line(&repo("o", "Forge.Scaffold.SDK")),
+            "GET /repos/o/Forge.Scaffold.SDK"
+        );
     }
 
     #[test]

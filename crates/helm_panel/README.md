@@ -31,8 +31,10 @@ Open with `ctrl-k h` (`cmd-k h` on macOS), the status bar icon (tooltip
 
 ### What you can do
 
-From the menu: **Repositories**, **Organizations**, **Invitations**,
-**Edit Profile**, **Account Security**, **Create Repository** and **Logout**.
+From the menu: **Repositories**, **Search GitHub**, **Organizations**,
+**Invitations**, **Edit Profile**, **Account Security**, **Create Repository**
+and **Logout**. Search GitHub searches repositories across GitHub and opens a
+result in the existing repository detail view.
 
 Inside a repository:
 
@@ -136,13 +138,14 @@ accepted by accident.
   get theirs from `gpui_component`'s `List` (context `List`).
 - `HelmPanel::load(workspace, cx)` is awaited in `initialize_panels`
   (`crates/zed/src/zed.rs`).
-- Implements `workspace::dock::Panel`, fixed to the left dock,
-  `activation_priority() = 5`.
+- Implements `workspace::dock::Panel`, docked left by default (the
+  `helm_panel.dock` setting moves it left or right; `helm_panel.button` hides
+  its status bar button), `activation_priority() = 21`.
 
 ### Actions
 
 In the `helm_panel` namespace: `ToggleFocus`, `SelectNextRow`,
-`SelectPrevRow`, `OpenSelectedRow`.
+`SelectPrevRow`, `OpenSelectedRow`, `OpenRepositoryWorkspace`.
 
 ## Layout
 

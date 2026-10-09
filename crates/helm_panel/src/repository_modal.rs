@@ -533,7 +533,14 @@ impl Render for HelmRepositoryModal {
                         return;
                     }
                     parent.update(cx, |this, cx| {
-                        this.handle_create_pull(name, description, head_branch, base_branch, window, cx);
+                        this.handle_create_pull(
+                            name,
+                            description,
+                            head_branch,
+                            base_branch,
+                            window,
+                            cx,
+                        );
                     });
                 }
                 HelmModalKind::CreateRelease => {
@@ -542,14 +549,26 @@ impl Render for HelmRepositoryModal {
                     }
                     parent.update(cx, |this, cx| {
                         this.handle_create_release(
-                            tag_name, name, description, draft, prerelease, window, cx,
+                            tag_name,
+                            name,
+                            description,
+                            draft,
+                            prerelease,
+                            window,
+                            cx,
                         );
                     });
                 }
                 HelmModalKind::EditProfile(_) => {
                     parent.update(cx, |this, cx| {
                         this.handle_update_profile(
-                            name, description, company, location, homepage, window, cx,
+                            name,
+                            description,
+                            company,
+                            location,
+                            homepage,
+                            window,
+                            cx,
                         );
                     });
                 }

@@ -3403,8 +3403,10 @@ name = "cockpit_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
  "gpui",
  "gpui-component",
+ "settings",
  "sysinfo 0.39.6",
  "ui",
  "workspace",
@@ -5067,6 +5069,7 @@ dependencies = [
  "project",
  "serde",
  "serde_json",
+ "settings",
  "ui",
  "workspace",
  "zed_credentials_provider",
@@ -5620,10 +5623,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dotnet_backend",
+ "fs",
  "gpui",
  "gpui-component",
  "nuget_manager_panel",
  "script_runner_panel",
+ "settings",
  "sysinfo 0.39.6",
  "ui",
  "workspace",
@@ -7003,6 +7008,7 @@ dependencies = [
  "chrono",
  "db",
  "designer_panel",
+ "fs",
  "gpui",
  "gpui-component",
  "log",
@@ -9084,6 +9090,7 @@ dependencies = [
 name = "helm_backend"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures 0.3.34",
  "http_client",
  "reqwest_client",
@@ -9098,14 +9105,44 @@ name = "helm_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
  "gpui",
  "gpui-component",
  "gpui_flow",
  "helm_backend",
+ "helm_ui",
+ "helm_workspace",
  "log",
  "serde",
  "serde_json",
+ "settings",
  "ui",
+ "workspace",
+]
+
+[[package]]
+name = "helm_ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "helm_backend",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "helm_workspace"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "git",
+ "gpui",
+ "gpui-component",
+ "helm_backend",
+ "helm_ui",
+ "language",
+ "markdown 0.1.0",
  "workspace",
 ]
 
@@ -12574,6 +12611,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flows_panel",
+ "fs",
  "gpui",
  "gpui-component",
  "indexmap 2.14.0",
@@ -12584,6 +12622,7 @@ dependencies = [
  "script_runner_panel",
  "serde",
  "serde_json",
+ "settings",
  "sysinfo 0.39.6",
  "tempfile",
  "ui",
@@ -15384,6 +15423,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "serde",
+ "settings",
  "sysinfo 0.39.6",
  "ui",
  "workspace",
@@ -15948,6 +15988,7 @@ name = "python_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
  "gpui",
  "gpui-component",
  "http_client",
@@ -15956,6 +15997,7 @@ dependencies = [
  "python_backend",
  "python_manager_panel",
  "script_runner_panel",
+ "settings",
  "sysinfo 0.39.6",
  "ui",
  "workspace",
@@ -17278,10 +17320,12 @@ dependencies = [
  "anyhow",
  "cargo_backend",
  "cargo_manager_panel",
+ "fs",
  "gpui",
  "gpui-component",
  "project",
  "script_runner_panel",
+ "settings",
  "ui",
  "workspace",
 ]
@@ -17694,9 +17738,11 @@ name = "script_runner_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
  "gpui",
  "gpui-component",
  "gpui_util",
+ "settings",
  "tokio",
  "ui",
  "workspace",

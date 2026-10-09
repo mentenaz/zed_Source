@@ -10,9 +10,12 @@ impl HelmPanel {
     }
 
     pub(super) fn load_releases_page(&mut self, page: u32, cx: &mut Context<Self>) {
-        self.load_repo_page(cx, |this| &mut this.releases, page, |repo| {
-            requests::releases(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.releases,
+            page,
+            |repo| requests::releases(&repo.owner.login, &repo.name),
+        );
     }
 
     /// Loads `self.selected_repo`'s packages (owner-scoped: either the repo's
@@ -33,7 +36,12 @@ impl HelmPanel {
 
     /// Expands `pkg` to show its versions (loading them on first tap) — a
     /// second tap on the same package collapses it again.
-    pub(super) fn toggle_package_versions(&mut self, owner: String, pkg: Package, cx: &mut Context<Self>) {
+    pub(super) fn toggle_package_versions(
+        &mut self,
+        owner: String,
+        pkg: Package,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(expanded) = self.expanded_package.as_deref() {
             if expanded == pkg.name {
                 self.expanded_package = None;
@@ -71,13 +79,20 @@ impl HelmPanel {
     }
 
     pub(super) fn load_tags_page(&mut self, page: u32, cx: &mut Context<Self>) {
-        self.load_repo_page(cx, |this| &mut this.tags, page, |repo| {
-            requests::tags(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.tags,
+            page,
+            |repo| requests::tags(&repo.owner.login, &repo.name),
+        );
     }
 
     /// Opens the "Create release" modal.
-    pub(super) fn open_create_release_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_create_release_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_workspace_modal(HelmModalKind::CreateRelease, window, cx);
     }
 
@@ -156,7 +171,7 @@ impl HelmPanel {
             .clone()
             .map(|package| self.render_package_versions(package, cx).into_any_element());
         self.list_screen(
-            self.packages.status(),
+            self.packages.status_for::<HelmPanel>(),
             &self.packages_list,
             versions,
             ListLabels {
@@ -270,106 +285,6 @@ impl HelmPanel {
     }
 }
 
-/// One row of the Tags screen: the tag's name and the short commit it
-/// points at.
-pub(super) fn tag_row(ix: usize, tag: &Tag, cx: &App) -> ListItem {
-    let foreground = cx.theme().foreground;
-    let muted_foreground = cx.theme().muted_foreground;
-    let short_sha: String = tag.commit.sha.chars().take(7).collect();
-    ListItem::new(("helm-tag", ix))
-        .child(
-            div()
-                .text_sm()
-                .font_family("Cascadia Mono")
-                .text_color(foreground)
-                .child(tag.name.clone()),
-        )
-        .suffix(move |_, _| {
-            div()
-                .text_xs()
-                .text_color(muted_foreground)
-                .child(short_sha.clone())
-        })
-}
-
-/// The second line of a release's row: how many assets it has, then the
-/// start of its notes.
-///
-/// Every row gets this line, with a placeholder when there is nothing to
-/// say, because the list draws all of its rows at one height.
-pub(super) fn release_summary(release: &Release) -> String {
-    let assets = match release.assets.len() {
-        0 => None,
-        1 => Some("1 asset".to_string()),
-        count => Some(format!("{count} assets")),
-    };
-    let notes = release
-        .body
-        .as_deref()
-        .map(|body| body.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|body| !body.is_empty())
-        .map(|body| {
-            let mut preview: String = body.chars().take(120).collect();
-            if body.chars().count() > 120 {
-                preview.push('…');
-            }
-            preview
-        });
-    match (assets, notes) {
-        (Some(assets), Some(notes)) => format!("{assets} · {notes}"),
-        (Some(assets), None) => assets,
-        (None, Some(notes)) => notes,
-        (None, None) => "No release notes".to_string(),
-    }
-}
-
-/// One row of the Releases screen: its title with draft and pre-release
-/// badges, and a one-line summary.
-pub(super) fn release_row(ix: usize, release: &Release, cx: &App) -> ListItem {
-    let muted_foreground = cx.theme().muted_foreground;
-    let foreground = cx.theme().foreground;
-    let title = release
-        .name
-        .clone()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| release.tag_name.clone());
-    ListItem::new(("helm-release", ix))
-        .child(
-            v_flex()
-                .gap_0p5()
-                .min_w_0()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(foreground)
-                                .child(title),
-                        )
-                        .when(release.draft, |row| row.child(chip("draft")))
-                        .when(release.prerelease, |row| {
-                            row.child(Pill::warning().xsmall().rounded_full().child("pre-release"))
-                        }),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(release_summary(release)),
-                ),
-        )
-        .suffix(move |_, _| {
-            Icon::new(IconName::ExternalLink)
-                .xsmall()
-                .text_color(muted_foreground)
-        })
-}
-
 /// One row of the Packages screen: name and type, then the description.
 /// Every row has the second line (see `release_summary` for why). `open`
 /// marks the package whose versions are showing above the list.
@@ -435,53 +350,3 @@ pub(super) fn package_row(ix: usize, package: &Package, open: bool, cx: &App) ->
                 )
         })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn release(body: Option<&str>, assets: usize) -> Release {
-        let assets: Vec<serde_json::Value> = (0..assets)
-            .map(|n| serde_json::json!({ "name": format!("asset-{n}.zip") }))
-            .collect();
-        serde_json::from_value(serde_json::json!({
-            "id": 1,
-            "tag_name": "v1.0.0",
-            "name": "One",
-            "body": body,
-            "draft": false,
-            "prerelease": false,
-            "html_url": "https://github.com/o/r/releases/tag/v1.0.0",
-            "assets": assets,
-        }))
-        .expect("a release the backend's type accepts")
-    }
-
-    #[test]
-    fn a_release_row_always_has_a_second_line() {
-        // The list draws every row at one height, so no row may drop the line.
-        assert_eq!(release_summary(&release(None, 0)), "No release notes");
-        assert_eq!(release_summary(&release(Some("   
-  "), 0)), "No release notes");
-        assert_eq!(release_summary(&release(None, 1)), "1 asset");
-        assert_eq!(release_summary(&release(None, 3)), "3 assets");
-        assert_eq!(release_summary(&release(Some("Fixes"), 0)), "Fixes");
-        assert_eq!(release_summary(&release(Some("Fixes"), 2)), "2 assets · Fixes");
-    }
-
-    #[test]
-    fn release_notes_are_flattened_to_one_line_and_cut_at_120() {
-        assert_eq!(
-            release_summary(&release(Some("## Changes
-
-- one
-- two"), 0)),
-            "## Changes - one - two"
-        );
-        let long = "x".repeat(200);
-        let summary = release_summary(&release(Some(&long), 0));
-        assert_eq!(summary.chars().count(), 121);
-        assert!(summary.ends_with('…'));
-    }
-}
-

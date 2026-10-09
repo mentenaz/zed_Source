@@ -10,9 +10,12 @@ impl HelmPanel {
     }
 
     pub(super) fn load_commits_page(&mut self, page: u32, cx: &mut Context<Self>) {
-        self.load_repo_page(cx, |this| &mut this.commits, page, |repo| {
-            requests::recent_commits(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.commits,
+            page,
+            |repo| requests::recent_commits(&repo.owner.login, &repo.name),
+        );
     }
 
     /// Loads `self.selected_repo`'s recent Actions/CI workflow runs.
@@ -32,8 +35,14 @@ impl HelmPanel {
             move |repo, gh_state| async move {
                 // GitHub wraps this list in an object, under `workflow_runs`.
                 let request = requests::workflow_runs(&repo.owner.login, &repo.name);
-                fetch_page_under::<WorkflowRun>(&gh_state, request, "workflow_runs", page, PAGE_SIZE)
-                    .await
+                fetch_page_under::<WorkflowRun>(
+                    &gh_state,
+                    request,
+                    "workflow_runs",
+                    page,
+                    PAGE_SIZE,
+                )
+                .await
             },
         );
     }
@@ -43,7 +52,12 @@ impl HelmPanel {
     /// already-open tab for the same run instead of duplicating it — unlike
     /// the old master-detail layout, this navigates away from the panel
     /// the same way opening a repo/issue/etc. elsewhere in Helm does.
-    pub(super) fn select_workflow_run(&mut self, run: WorkflowRun, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_workflow_run(
+        &mut self,
+        run: WorkflowRun,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(repo) = self.selected_repo.clone() else {
             return;
         };
@@ -64,11 +78,13 @@ impl HelmPanel {
     }
 
     pub(super) fn load_deployments_page(&mut self, page: u32, cx: &mut Context<Self>) {
-        self.load_repo_page(cx, |this| &mut this.deployments, page, |repo| {
-            requests::deployments(&repo.owner.login, &repo.name)
-        });
+        self.load_repo_page(
+            cx,
+            |this| &mut this.deployments,
+            page,
+            |repo| requests::deployments(&repo.owner.login, &repo.name),
+        );
     }
-
 
     /// The Commits screen — recent commits with GitHub author avatars.
     pub(super) fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -125,76 +141,6 @@ impl HelmPanel {
     }
 }
 
-/// One row of the Commits screen: the author's avatar, the short commit id
-/// and the author's login.
-pub(super) fn commit_row(ix: usize, commit: &CommitSummary, cx: &App) -> ListItem {
-    let foreground = cx.theme().foreground;
-    let muted_foreground = cx.theme().muted_foreground;
-    let short_sha: String = commit.sha.chars().take(7).collect();
-    let author = commit
-        .author
-        .as_ref()
-        .map(|a| a.login.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let avatar_url = commit
-        .author
-        .as_ref()
-        .map(|a| a.avatar_url.clone())
-        .unwrap_or_default();
-    ListItem::new(("helm-commit", ix)).child(
-        h_flex()
-            .items_center()
-            .gap_2()
-            .child(
-                Avatar::new()
-                    .src(avatar_url)
-                    .name(author.clone())
-                    .with_size(px(20.)),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font_family("Cascadia Mono")
-                    .text_color(foreground)
-                    .child(short_sha),
-            )
-            .child(div().text_xs().text_color(muted_foreground).child(author)),
-    )
-}
-
-/// One row of the Actions screen: the workflow's name, its run number and
-/// branch, and how the run ended (or its status while it is still going).
-pub(super) fn workflow_run_row(ix: usize, run: &WorkflowRun, cx: &App) -> ListItem {
-    let foreground = cx.theme().foreground;
-    let muted_foreground = cx.theme().muted_foreground;
-    let status_label = run.conclusion.clone().unwrap_or_else(|| run.status.clone());
-    let color = match status_label.as_str() {
-        "success" => cx.theme().success,
-        "failure" | "cancelled" | "timed_out" => cx.theme().danger,
-        _ => muted_foreground,
-    };
-    ListItem::new(("helm-run", ix))
-        .child(
-            v_flex()
-                .gap_0p5()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(foreground)
-                        .child(run.name.clone()),
-                )
-                .child(div().text_xs().text_color(muted_foreground).child(format!(
-                    "#{} · {}",
-                    run.run_number,
-                    run.head_branch.clone().unwrap_or_default()
-                ))),
-        )
-        .suffix(move |_, _| div().text_xs().text_color(color).child(status_label.clone()))
-}
-
 /// One row of the Deployments screen: the environment, the ref and short
 /// commit deployed, and the deployment's status.
 pub(super) fn deployment_row(ix: usize, deployment: &Deployment, cx: &App) -> ListItem {
@@ -215,10 +161,12 @@ pub(super) fn deployment_row(ix: usize, deployment: &Deployment, cx: &App) -> Li
                         .text_color(foreground)
                         .child(deployment.environment.clone()),
                 )
-                .child(div().text_xs().text_color(muted_foreground).child(format!(
-                    "{} · {short_sha}",
-                    deployment.r#ref
-                ))),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("{} · {short_sha}", deployment.r#ref)),
+                ),
         )
         .suffix(move |_, _| {
             div()

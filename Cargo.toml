@@ -101,6 +101,8 @@ members = [
     "crates/git_ui",
     "crates/git_ui_core",
     "crates/helm_backend",
+    "crates/helm_ui",
+    "crates/helm_workspace",
     "crates/helm_panel",
     "crates/go_to_line",
     "crates/google_ai",
@@ -367,6 +369,8 @@ dap_adapters = { path = "crates/dap_adapters" }
 database_backend = { path = "crates/database_backend" }
 database_panel = { path = "crates/database_panel" }
 helm_backend = { path = "crates/helm_backend" }
+helm_ui = { path = "crates/helm_ui" }
+helm_workspace = { path = "crates/helm_workspace" }
 helm_panel = { path = "crates/helm_panel" }
 datalogic-rs = { version = "5", features = ["serde_json"] }
 db = { path = "crates/db" }

@@ -2,7 +2,7 @@
 //!
 //! Every list screen is the same shape: an optional header, then a spinner,
 //! an error with Retry, an "empty" line, or the rows. That shape is here
-//! once ([`HelmPanel::list_screen`]). A screen supplies its header, its
+//! once (`HelmListViewExt::list_screen`). A screen supplies its header, its
 //! labels, and how to draw one row.
 //!
 //! The rows are drawn by `gpui_component::list::List`, which gives every
@@ -10,39 +10,48 @@
 //! rows in view, and scrolls by itself. It asks one thing in return: every
 //! row of a list must be the same height.
 //!
-//! The rows themselves stay where they were, on the panel. [`RowsDelegate`]
-//! reads them from there when the list is drawn, so there is one copy of the
-//! data and nothing to keep in step.
+//! [`RowsDelegate`] reads rows from the view that owns them, so there is one
+//! copy of the data and nothing to keep in step.
 
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Styled as _, Subscription, WeakEntity, Window, div,
+};
 use gpui_component::{
-    IndexPath,
-    list::{List, ListDelegate, ListEvent, ListState},
+    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, StyledExt as _,
+    button::Button,
+    h_flex,
+    list::{List, ListDelegate, ListEvent, ListItem, ListState},
     pagination::Pagination,
+    separator::Separator,
+    spinner::Spinner,
+    v_flex,
 };
 
-use super::*;
+use crate::{HelmView, LoadState, Section};
 
 /// How many rows a section of the list has.
-type CountFn = Rc<dyn Fn(&HelmPanel, usize) -> usize>;
+type CountFn<V> = Rc<dyn Fn(&V, usize) -> usize>;
 
 /// Draws one row. Selection highlighting and clicks are the list's
 /// business, so a row sets neither. `None` skips the row, for one that
 /// went away between counting and drawing.
-type RowFn = Rc<dyn Fn(&HelmPanel, IndexPath, &App) -> Option<ListItem>>;
+type RowFn<V> = Rc<dyn Fn(&V, IndexPath, &App) -> Option<ListItem>>;
 
-pub(super) struct RowsDelegate {
-    panel: WeakEntity<HelmPanel>,
+pub struct RowsDelegate<V: HelmView> {
+    panel: WeakEntity<V>,
     /// One title per section. Empty for a list that is a single run of rows
     /// with no heading.
     titles: Vec<&'static str>,
-    count: CountFn,
-    row: RowFn,
+    count: CountFn<V>,
+    row: RowFn<V>,
     selected: Option<IndexPath>,
 }
 
-impl ListDelegate for RowsDelegate {
+impl<V: HelmView> ListDelegate for RowsDelegate<V> {
     type Item = ListItem;
 
     fn sections_count(&self, _cx: &App) -> usize {
@@ -99,20 +108,20 @@ impl ListDelegate for RowsDelegate {
 
 /// One screen's list widget. Created once with the panel and kept for its
 /// lifetime; it shows whatever the panel holds at the time.
-pub(super) struct ListView {
-    state: Entity<ListState<RowsDelegate>>,
+pub struct ListView<V: HelmView> {
+    state: Entity<ListState<RowsDelegate<V>>>,
     _confirm: Subscription,
 }
 
-impl ListView {
+impl<V: HelmView> ListView<V> {
     /// A list over one [`Section`]. `on_confirm` runs when a row is clicked
     /// or `enter` is pressed on it.
-    pub(super) fn new<T: 'static>(
-        section: fn(&HelmPanel) -> &Section<T>,
+    pub fn new<T: 'static>(
+        section: fn(&V) -> &Section<T>,
         row: impl Fn(usize, &T, &App) -> ListItem + 'static,
-        on_confirm: fn(&mut HelmPanel, usize, &mut Window, &mut Context<HelmPanel>),
+        on_confirm: fn(&mut V, usize, &mut Window, &mut Context<V>),
         window: &mut Window,
-        cx: &mut Context<HelmPanel>,
+        cx: &mut Context<V>,
     ) -> Self {
         Self::sectioned(
             Vec::new(),
@@ -127,13 +136,13 @@ impl ListView {
     /// A list of several headed sections, or one whose rows are not simply
     /// a [`Section`]'s items (a filtered view, say). `count` and `row` read
     /// what they need from the panel.
-    pub(super) fn sectioned(
+    pub fn sectioned(
         titles: Vec<&'static str>,
-        count: impl Fn(&HelmPanel, usize) -> usize + 'static,
-        row: impl Fn(&HelmPanel, IndexPath, &App) -> Option<ListItem> + 'static,
-        on_confirm: impl Fn(&mut HelmPanel, IndexPath, &mut Window, &mut Context<HelmPanel>) + 'static,
+        count: impl Fn(&V, usize) -> usize + 'static,
+        row: impl Fn(&V, IndexPath, &App) -> Option<ListItem> + 'static,
+        on_confirm: impl Fn(&mut V, IndexPath, &mut Window, &mut Context<V>) + 'static,
         window: &mut Window,
-        cx: &mut Context<HelmPanel>,
+        cx: &mut Context<V>,
     ) -> Self {
         let delegate = RowsDelegate {
             panel: cx.weak_entity(),
@@ -159,10 +168,10 @@ impl ListView {
     }
 }
 
-impl ListView {
+impl<V: HelmView> ListView<V> {
     /// The list, for a screen to place. It takes whatever height its parent
     /// has left, and a click anywhere in it gives it the keyboard.
-    pub(super) fn element(&self) -> impl IntoElement + use<> {
+    pub fn element(&self) -> impl IntoElement + use<V> {
         let state = self.state.clone();
         div()
             // The list draws only the rows in view, so it needs a height
@@ -179,27 +188,37 @@ impl ListView {
 
 /// What a list screen needs to know about its data to choose between the
 /// spinner, the error, the empty line and the rows.
-pub(super) struct ListStatus {
-    pub(super) state: LoadState,
-    pub(super) error: String,
-    pub(super) is_empty: bool,
+pub struct ListStatus<V = ()> {
+    pub state: LoadState,
+    pub error: String,
+    pub is_empty: bool,
     /// The rows are a remembered answer that is being checked.
-    pub(super) refreshing: bool,
+    pub refreshing: bool,
     /// Set for a list shown a page at a time.
-    pub(super) pager: Option<Pager>,
+    pub pager: Option<Pager<V>>,
 }
 
 /// Where a paged list is, and how to go to another page.
-pub(super) struct Pager {
-    pub(super) page: u32,
-    pub(super) last_page: u32,
+pub struct Pager<V = ()> {
+    pub page: u32,
+    pub last_page: u32,
     /// Shows page `page`: a request for a list paged by GitHub, or a change
     /// of slice for one the panel holds in full.
-    pub(super) go: fn(&mut HelmPanel, u32, &mut Context<HelmPanel>),
+    pub go: fn(&mut V, u32, &mut Context<V>),
 }
 
 impl<T> Section<T> {
-    pub(super) fn status(&self) -> ListStatus {
+    pub fn status(&self) -> ListStatus {
+        ListStatus {
+            state: self.state,
+            error: self.error.clone(),
+            is_empty: self.items.is_empty(),
+            refreshing: self.refreshing,
+            pager: None,
+        }
+    }
+
+    pub fn status_for<V: HelmView>(&self) -> ListStatus<V> {
         ListStatus {
             state: self.state,
             error: self.error.clone(),
@@ -211,35 +230,32 @@ impl<T> Section<T> {
 
     /// [`Self::status`] for a list shown a page at a time. `go` loads
     /// another page.
-    pub(super) fn paged_status(
-        &self,
-        go: fn(&mut HelmPanel, u32, &mut Context<HelmPanel>),
-    ) -> ListStatus {
+    pub fn paged_status<V: HelmView>(&self, go: fn(&mut V, u32, &mut Context<V>)) -> ListStatus<V> {
         ListStatus {
             pager: Some(Pager {
                 page: self.page,
                 last_page: self.last_page,
                 go,
             }),
-            ..self.status()
+            ..self.status_for::<V>()
         }
     }
 }
 
 /// The three lines a list screen shows in place of its rows.
-pub(super) struct ListLabels {
-    pub(super) loading: &'static str,
-    pub(super) error: &'static str,
-    pub(super) empty: &'static str,
+pub struct ListLabels {
+    pub loading: &'static str,
+    pub error: &'static str,
+    pub empty: &'static str,
 }
 
-impl HelmPanel {
+pub trait HelmListViewExt: HelmView {
     /// A whole list screen: `header` (always shown, whatever the list is
     /// doing), then the spinner, error, empty line or rows.
-    pub(super) fn list_screen(
+    fn list_screen(
         &self,
-        status: ListStatus,
-        list: &ListView,
+        status: ListStatus<Self>,
+        list: &ListView<Self>,
         header: Option<gpui::AnyElement>,
         labels: ListLabels,
         retry: impl Fn(&mut Self, &mut Context<Self>) + 'static,
@@ -319,9 +335,7 @@ impl HelmPanel {
                             .text_color(muted_foreground)
                             .child(format!("Page {} of {}", pager.page, pager.last_page))
                             // The rows are remembered ones, being checked.
-                            .when(status.refreshing, |row| {
-                                row.child(Spinner::new().xsmall())
-                            }),
+                            .when(status.refreshing, |row| row.child(Spinner::new().xsmall())),
                     )
                     .child(
                         Pagination::new("helm-list-pager")
@@ -340,12 +354,12 @@ impl HelmPanel {
         v_flex()
             .size_full()
             .when_some(header, |screen, header| {
-                screen
-                    .child(header)
-                    .child(Separator::horizontal())
+                screen.child(header).child(Separator::horizontal())
             })
             .child(body)
             .children(pager)
             .into_any_element()
     }
 }
+
+impl<V: HelmView> HelmListViewExt for V {}

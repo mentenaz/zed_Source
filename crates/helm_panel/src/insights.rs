@@ -79,7 +79,6 @@ impl HelmPanel {
     /// then the top referrers and paths. An empty repo shows the "no traffic
     /// data yet" state (views/clones are `None` for 202/404 repos).
     pub(super) fn render_traffic(&self, cx: &mut Context<Self>) -> impl IntoElement {
-
         if self.load_state == LoadState::Loading {
             return loading_screen("Loading traffic…", cx);
         }
@@ -110,9 +109,8 @@ impl HelmPanel {
             );
         }
 
-        let counts = |count: u64, uniques: u64| {
-            format!("{} · {} unique", fmt_num(count), fmt_num(uniques))
-        };
+        let counts =
+            |count: u64, uniques: u64| format!("{} · {} unique", fmt_num(count), fmt_num(uniques));
         let table = |id: &'static str, title: &'static str, rows: Vec<(String, String)>| {
             GroupBox::new().id(id).title(title).child(
                 DescriptionList::horizontal()

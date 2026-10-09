@@ -221,11 +221,16 @@ mod tests {
 
         // A missing key is an empty page, not an error.
         let empty: Page<u32> =
-            interpret_page_under(&answer(r#"{"total_count": 0}"#, None), "workflow_runs", 1).unwrap();
+            interpret_page_under(&answer(r#"{"total_count": 0}"#, None), "workflow_runs", 1)
+                .unwrap();
         assert!(empty.items.is_empty());
         // The key holding something else is an error.
         assert!(matches!(
-            interpret_page_under::<u32>(&answer(r#"{"workflow_runs": "x"}"#, None), "workflow_runs", 1),
+            interpret_page_under::<u32>(
+                &answer(r#"{"workflow_runs": "x"}"#, None),
+                "workflow_runs",
+                1
+            ),
             Err(GhError::Parse(_))
         ));
     }

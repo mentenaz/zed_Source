@@ -50,9 +50,7 @@ impl HelmAction {
     pub(super) fn required_scope(&self) -> &'static str {
         match self {
             HelmAction::UpdateProfile { .. } => "user",
-            HelmAction::AcceptOrgInvitation(_) | HelmAction::DeclineOrgInvitation(_) => {
-                "write:org"
-            }
+            HelmAction::AcceptOrgInvitation(_) | HelmAction::DeclineOrgInvitation(_) => "write:org",
             _ => "repo",
         }
     }
@@ -90,7 +88,11 @@ impl HelmAction {
 
     /// Makes the API call(s). Returns the resulting repository for the two
     /// actions that produce one (create and edit), `None` otherwise.
-    pub(super) async fn perform(self, repo: Option<Repo>, gh_state: &GhState) -> Result<Option<Repo>, GhError> {
+    pub(super) async fn perform(
+        self,
+        repo: Option<Repo>,
+        gh_state: &GhState,
+    ) -> Result<Option<Repo>, GhError> {
         let selected = || {
             repo.clone()
                 .ok_or_else(|| GhError::Other("No repository selected".to_string()))
@@ -206,9 +208,9 @@ pub(super) fn missing_scope_message(scope: &str) -> String {
 /// Whether a token carrying `granted` satisfies `needed`, counting the one
 /// parent scope that implies it (`admin:org` includes `write:org`).
 pub(super) fn token_has_scope(granted: &[String], needed: &str) -> bool {
-    granted.iter().any(|scope| {
-        scope == needed || (needed == "write:org" && scope == "admin:org")
-    })
+    granted
+        .iter()
+        .any(|scope| scope == needed || (needed == "write:org" && scope == "admin:org"))
 }
 
 impl HelmPanel {
@@ -221,7 +223,12 @@ impl HelmPanel {
     /// action parked in `pending_action` for `do_auth` to re-send) —
     /// re-authorizing can't fix the latter, so that just reports the
     /// failure.
-    pub(super) fn run_action(&mut self, action: HelmAction, may_reauthorize: bool, cx: &mut Context<Self>) {
+    pub(super) fn run_action(
+        &mut self,
+        action: HelmAction,
+        may_reauthorize: bool,
+        cx: &mut Context<Self>,
+    ) {
         let repo = self.selected_repo.clone();
         if action.needs_repo() && repo.is_none() {
             return;
@@ -305,7 +312,12 @@ impl HelmPanel {
 
     /// Applies a successful action to panel state. `repo` is the repository
     /// GitHub returned, for the actions that return one.
-    pub(super) fn action_succeeded(&mut self, action: &HelmAction, repo: Option<Repo>, cx: &mut Context<Self>) {
+    pub(super) fn action_succeeded(
+        &mut self,
+        action: &HelmAction,
+        repo: Option<Repo>,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             HelmAction::CreateRepo { .. } => {
                 if let Some(repo) = repo {
@@ -315,7 +327,8 @@ impl HelmPanel {
             }
             HelmAction::EditRepo { .. } => {
                 if let Some(updated) = repo {
-                    if let Some(existing) = self.repos.items.iter_mut().find(|r| r.id == updated.id) {
+                    if let Some(existing) = self.repos.items.iter_mut().find(|r| r.id == updated.id)
+                    {
                         *existing = updated.clone();
                     }
                     self.selected_repo = Some(updated);
@@ -325,7 +338,8 @@ impl HelmPanel {
                 self.notify("Profile updated", cx);
                 let gh_state = self.gh_state.clone();
                 cx.spawn(async move |this, cx| {
-                    let updated = on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
+                    let updated =
+                        on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
                     this.update(cx, |this, cx| {
                         if let Ok(user) = updated {
                             this.user = Some(user);

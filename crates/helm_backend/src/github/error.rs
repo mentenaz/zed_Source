@@ -25,9 +25,16 @@ pub enum GhError {
     /// 403 that is not a rate limit. The token lacks a scope, or the account
     /// lacks the right, or a policy forbids it.
     Forbidden { message: String },
+    /// The organisation requires this token to be authorized for SSO.
+    SsoRequired {
+        message: String,
+        authorization_url: Option<String>,
+    },
     /// 404. The thing does not exist, or the token is not allowed to see
     /// that it does: GitHub answers both the same way.
     NotFound { message: String },
+    /// The repository has not had its first commit, so it has no Git tree yet.
+    EmptyRepository,
     /// 403 or 429 with the rate limit used up.
     RateLimited {
         /// When the limit resets, in seconds since the Unix epoch.
@@ -58,7 +65,10 @@ impl GhError {
     pub fn is_permission(&self) -> bool {
         matches!(
             self,
-            GhError::Unauthorized { .. } | GhError::Forbidden { .. } | GhError::NotFound { .. }
+            GhError::Unauthorized { .. }
+                | GhError::Forbidden { .. }
+                | GhError::SsoRequired { .. }
+                | GhError::NotFound { .. }
         )
     }
 
@@ -67,7 +77,9 @@ impl GhError {
         match self {
             GhError::Unauthorized { .. } => Some(401),
             GhError::Forbidden { .. } => Some(403),
+            GhError::SsoRequired { .. } => Some(403),
             GhError::NotFound { .. } => Some(404),
+            GhError::EmptyRepository => Some(409),
             GhError::Validation { .. } => Some(422),
             GhError::Status { status, .. } => Some(*status),
             GhError::RateLimited { .. }
@@ -110,7 +122,11 @@ impl fmt::Display for GhError {
             GhError::Network(message) => write!(f, "Network error: {message}"),
             GhError::Unauthorized { message } => write!(f, "GitHub API 401: {message}"),
             GhError::Forbidden { message } => write!(f, "GitHub API 403: {message}"),
+            GhError::SsoRequired { message, .. } => {
+                write!(f, "GitHub API 403 (single sign-on required): {message}")
+            }
             GhError::NotFound { message } => write!(f, "GitHub API 404: {message}"),
+            GhError::EmptyRepository => write!(f, "This repository is empty."),
             GhError::Validation { message } => write!(f, "GitHub API 422: {message}"),
             GhError::Status { status, message } => write!(f, "GitHub API {status}: {message}"),
             GhError::RateLimited {
@@ -139,7 +155,10 @@ impl From<GhError> for String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RawResponse {
     pub status: u16,
+    /// Text view used for JSON responses and GitHub error messages.
     pub body: String,
+    /// Exact response bytes, including non-UTF-8 file contents.
+    pub body_bytes: Vec<u8>,
     /// `x-ratelimit-remaining`: requests left in the current window.
     pub rate_remaining: Option<u64>,
     /// `x-ratelimit-reset`: when the window ends, in Unix seconds.
@@ -148,6 +167,8 @@ pub struct RawResponse {
     pub retry_after: Option<u64>,
     /// `link`: where the next, previous and last pages of a list are.
     pub link: Option<String>,
+    /// `X-GitHub-SSO`, which identifies SSO authorization failures.
+    pub github_sso: Option<String>,
 }
 
 /// What GitHub said was wrong: the `message` of its JSON error body, with
@@ -207,10 +228,34 @@ fn failure(response: &RawResponse) -> GhError {
             retry_after: response.retry_after,
         };
     }
+    if response.status == 403
+        && let Some(header) = response.github_sso.as_deref()
+        && header
+            .split(';')
+            .next()
+            .is_some_and(|status| status.trim().eq_ignore_ascii_case("required"))
+    {
+        let authorization_url = header.split(';').skip(1).find_map(|parameter| {
+            let (name, value) = parameter.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("url")
+                .then(|| value.trim().trim_matches('"').to_string())
+        });
+        return GhError::SsoRequired {
+            message,
+            authorization_url,
+        };
+    }
     match response.status {
         401 => GhError::Unauthorized { message },
         403 => GhError::Forbidden { message },
         404 => GhError::NotFound { message },
+        409 if message
+            .to_ascii_lowercase()
+            .contains("git repository is empty") =>
+        {
+            GhError::EmptyRepository
+        }
         422 => GhError::Validation { message },
         status => GhError::Status { status, message },
     }
@@ -266,10 +311,30 @@ mod tests {
     fn statuses_become_the_matching_error() {
         let message = r#"{"message": "Nope"}"#;
         let error = |status| interpret::<serde_json::Value>(&answer(status, message)).unwrap_err();
-        assert_eq!(error(401), GhError::Unauthorized { message: "Nope".into() });
-        assert_eq!(error(403), GhError::Forbidden { message: "Nope".into() });
-        assert_eq!(error(404), GhError::NotFound { message: "Nope".into() });
-        assert_eq!(error(422), GhError::Validation { message: "Nope".into() });
+        assert_eq!(
+            error(401),
+            GhError::Unauthorized {
+                message: "Nope".into()
+            }
+        );
+        assert_eq!(
+            error(403),
+            GhError::Forbidden {
+                message: "Nope".into()
+            }
+        );
+        assert_eq!(
+            error(404),
+            GhError::NotFound {
+                message: "Nope".into()
+            }
+        );
+        assert_eq!(
+            error(422),
+            GhError::Validation {
+                message: "Nope".into()
+            }
+        );
         assert_eq!(
             error(500),
             GhError::Status {
@@ -280,6 +345,52 @@ mod tests {
         for status in [401, 403, 404, 422, 500] {
             assert_eq!(error(status).status(), Some(status));
         }
+    }
+
+    #[test]
+    fn required_sso_header_is_distinguished_from_other_forbidden_responses() {
+        let mut response = answer(403, r#"{"message":"Resource not accessible"}"#);
+        response.github_sso =
+            Some(r#"required; url="https://github.com/orgs/example/sso?request=abc""#.into());
+        let error = interpret::<serde_json::Value>(&response).unwrap_err();
+        assert_eq!(
+            error,
+            GhError::SsoRequired {
+                message: "Resource not accessible".into(),
+                authorization_url: Some("https://github.com/orgs/example/sso?request=abc".into()),
+            }
+        );
+        assert!(error.is_permission());
+        assert_eq!(error.status(), Some(403));
+
+        let mut partial = answer(403, r#"{"message":"Resource not accessible"}"#);
+        partial.github_sso = Some("partial-results; organizations=example".into());
+        assert_eq!(
+            interpret::<serde_json::Value>(&partial).unwrap_err(),
+            GhError::Forbidden {
+                message: "Resource not accessible".into()
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_empty_git_repository_conflict_is_classified_as_empty() {
+        let empty = answer(409, r#"{"message":"Git Repository is empty."}"#);
+        assert_eq!(
+            interpret::<serde_json::Value>(&empty).unwrap_err(),
+            GhError::EmptyRepository
+        );
+        assert_eq!(GhError::EmptyRepository.status(), Some(409));
+        assert!(!GhError::EmptyRepository.is_permission());
+
+        let other_conflict = answer(409, r#"{"message":"Conflict"}"#);
+        assert_eq!(
+            interpret::<serde_json::Value>(&other_conflict).unwrap_err(),
+            GhError::Status {
+                status: 409,
+                message: "Conflict".into(),
+            }
+        );
     }
 
     #[test]
@@ -301,10 +412,12 @@ mod tests {
         let limited = RawResponse {
             status: 403,
             body: r#"{"message": "API rate limit exceeded"}"#.into(),
+            body_bytes: br#"{"message": "API rate limit exceeded"}"#.to_vec(),
             rate_remaining: Some(0),
             rate_reset: Some(1_800_000_600),
             retry_after: None,
             link: None,
+            github_sso: None,
         };
         let error = interpret::<serde_json::Value>(&limited).unwrap_err();
         assert_eq!(
@@ -321,16 +434,22 @@ mod tests {
             rate_remaining: Some(4_000),
             ..limited.clone()
         };
-        assert!(interpret::<serde_json::Value>(&forbidden).unwrap_err().is_permission());
+        assert!(
+            interpret::<serde_json::Value>(&forbidden)
+                .unwrap_err()
+                .is_permission()
+        );
 
         // A secondary limit says how long to wait instead.
         let secondary = RawResponse {
             status: 403,
             body: "{}".into(),
+            body_bytes: b"{}".to_vec(),
             rate_remaining: Some(4_000),
             rate_reset: None,
             retry_after: Some(30),
             link: None,
+            github_sso: None,
         };
         assert_eq!(
             interpret::<serde_json::Value>(&secondary).unwrap_err(),
@@ -404,7 +523,10 @@ mod tests {
     #[test]
     fn an_empty_answer_is_fine_where_nothing_is_expected() {
         assert_eq!(interpret_empty(&answer(204, "")), Ok(()));
-        assert_eq!(interpret_empty(&answer(200, r#"{"ignored": true}"#)), Ok(()));
+        assert_eq!(
+            interpret_empty(&answer(200, r#"{"ignored": true}"#)),
+            Ok(())
+        );
         // The same empty body is an error where a value was expected...
         assert!(matches!(
             interpret::<serde_json::Value>(&answer(204, "")),
@@ -413,7 +535,9 @@ mod tests {
         // ...and a failure is still a failure.
         assert_eq!(
             interpret_empty(&answer(404, r#"{"message": "Not Found"}"#)),
-            Err(GhError::NotFound { message: "Not Found".into() })
+            Err(GhError::NotFound {
+                message: "Not Found".into()
+            })
         );
     }
 
@@ -421,14 +545,20 @@ mod tests {
     fn errors_read_the_way_they_used_to() {
         // Code that still matches on the text keeps working.
         assert_eq!(
-            GhError::Forbidden { message: "Forbidden".into() }.to_string(),
+            GhError::Forbidden {
+                message: "Forbidden".into()
+            }
+            .to_string(),
             "GitHub API 403: Forbidden"
         );
         assert_eq!(
             GhError::Network("timed out".into()).to_string(),
             "Network error: timed out"
         );
-        let text: String = GhError::NotFound { message: "Not Found".into() }.into();
+        let text: String = GhError::NotFound {
+            message: "Not Found".into(),
+        }
+        .into();
         assert_eq!(text, "GitHub API 404: Not Found");
     }
 }
