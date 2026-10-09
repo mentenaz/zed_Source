@@ -691,6 +691,7 @@ impl DapStore {
                             padding_left: false,
                             padding_right: false,
                             tooltip: Some(InlayHintTooltip::String(variable.value.clone())),
+                            text_edits: None,
                             resolve_state: ResolveState::Resolved,
                         });
                     }
@@ -714,6 +715,7 @@ impl DapStore {
                                 padding_left: false,
                                 padding_right: false,
                                 tooltip: Some(InlayHintTooltip::String(response.result)),
+                                text_edits: None,
                                 resolve_state: ResolveState::Resolved,
                             });
                         };
