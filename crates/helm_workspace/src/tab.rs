@@ -30,8 +30,8 @@ use helm_backend::{
         Pull, Readme, RefMovement, Repo, RepoTree, ResolvedRef, SearchCodeMatch, TreeEntry,
         TreeEntryKind, TreeLoadResult, build_tree, compare_ref_movement, fetch_blob_at_path,
         fetch_commit_detail, fetch_compare, fetch_page, fetch_page_under, fetch_readme,
-        fetch_readme_at_path, fetch_repo_tree, gh_auth_status, gh_get_branches, gh_get_repo,
-        gh_list_tags, requests, resolve_ref, search_code_page,
+        fetch_readme_at_path, fetch_repo_tree, gh_auth_status, gh_get_branches,
+        gh_get_current_user, gh_get_repo, gh_list_tags, requests, resolve_ref, search_code_page,
     },
     on_tokio,
 };
@@ -963,10 +963,14 @@ impl WorkspaceTab {
         self.repository_scope_missing = false;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (result, auth_status) = on_tokio(async move {
+            let (result, auth_status, user_info) = on_tokio(async move {
                 let result = gh_get_repo(owner, name, &gh_state).await;
                 let auth_status = gh_auth_status().await;
-                (result, auth_status)
+                // `/user` gives the display name (and login); prefer the
+                // display name for the "Signed in as" line. Falls back to the
+                // `gh auth status` account if the API call fails.
+                let user_info = gh_get_current_user(&gh_state).await.ok();
+                (result, auth_status, user_info)
             })
             .await;
             let scope_missing = result.as_ref().is_err_and(GhError::is_permission)
@@ -977,10 +981,15 @@ impl WorkspaceTab {
             this.update_in(cx, |this, window, cx| {
                 this.repository_loading = false;
                 if this.account.is_current(account_load) {
-                    match auth_status {
-                        Ok(Some(info)) => this.account.finish(Ok(info.account)),
-                        Ok(None) => this.account.finish(Ok("Not signed in".into())),
-                        Err(error) => this.account.finish(Err(error)),
+                    match user_info {
+                        Some(user) => this.account.finish(Ok(
+                            user.name.unwrap_or_else(|| user.login.clone()),
+                        )),
+                        None => match auth_status {
+                            Ok(Some(info)) => this.account.finish(Ok(info.account)),
+                            Ok(None) => this.account.finish(Ok("Not signed in".into())),
+                            Err(error) => this.account.finish(Err(error)),
+                        },
                     }
                 }
                 match result {
@@ -2264,85 +2273,109 @@ impl Render for WorkspaceTab {
             WorkspaceSection::ALL.to_vec()
         };
         let current_section = self.section;
-        let mut header = gpui_component::h_flex()
-            .items_center()
+        // Three rows: repo identity with the ref dropdown above the action
+        // buttons, the state tags on their own line, and the account/clone
+        // status alongside the buttons. Cramming everything into one row left
+        // every item squashed at normal widths.
+        let header = v_flex()
             .gap_2()
             .px_4()
             .py_3()
             .child(
-                v_flex()
-                    .min_w_0()
-                    .gap_1()
-                    .child(div().font_semibold().child(repo_name))
+                gpui_component::h_flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    // The name takes the room that is left and is cut short
+                    // before it wraps; the dropdown keeps its width at the
+                    // right edge. `Select` fills whatever holds it, so its
+                    // width is set on a wrapper that cannot grow or shrink.
                     .child(
-                        gpui_component::h_flex()
-                            .gap_1()
-                            .when(self.repo.private, |this| {
-                                this.child(Tag::secondary().outline().xsmall().child("Private"))
-                            })
-                            .when(self.repo.archived, |this| {
-                                this.child(Tag::secondary().outline().xsmall().child("Archived"))
-                            })
-                            .when(self.repo.fork, |this| {
-                                this.child(Tag::secondary().outline().xsmall().child("Fork"))
-                            }),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_semibold()
+                            .child(repo_name),
+                    )
+                    .child(
+                        div().flex_none().w(px(240.)).child(
+                            Select::new(&ref_selector)
+                                .search_placeholder("Search branches and tags…")
+                                .disabled(self.repo.disabled || default_branch.is_empty())
+                                .when(self.repo.disabled, |select| {
+                                    select.placeholder("Repository disabled")
+                                })
+                                .when(
+                                    !self.repo.disabled && default_branch.is_empty(),
+                                    |select| select.placeholder("No default branch"),
+                                ),
+                        ),
                     ),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(match (self.account.state, self.account.value.as_deref()) {
-                        (_, Some(account)) => format!("Signed in as {account}"),
-                        (LoadState::Error, None) => "GitHub account unavailable".to_string(),
-                        (LoadState::Loading | LoadState::Idle, None) => {
-                            "Checking GitHub account…".to_string()
-                        }
+                gpui_component::h_flex()
+                    .gap_1()
+                    .mb_2()
+                    .when(self.repo.private, |this| {
+                        this.child(Tag::secondary().outline().xsmall().child("Private"))
+                    })
+                    .when(self.repo.archived, |this| {
+                        this.child(Tag::secondary().outline().xsmall().child("Archived"))
+                    })
+                    .when(self.repo.fork, |this| {
+                        this.child(Tag::secondary().outline().xsmall().child("Fork"))
+                    })
+                    .when(ref_is_tag, |this| {
+                        this.child(Tag::secondary().outline().xsmall().child("Tag"))
                     }),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(local_clone_status),
-            )
-            .child(div().flex_1())
-            .child(
-                Select::new(&ref_selector)
-                    .w(px(240.))
-                    .search_placeholder("Search branches and tags…")
-                    .disabled(self.repo.disabled || default_branch.is_empty())
-                    .when(self.repo.disabled, |select| {
-                        select.placeholder("Repository disabled")
-                    })
-                    .when(!self.repo.disabled && default_branch.is_empty(), |select| {
-                        select.placeholder("No default branch")
-                    }),
-            )
-            .child(
-                Button::new("helm-workspace-refresh")
-                    .ghost()
-                    .label("Refresh")
-                    .tooltip(if refreshing {
-                        "Checking for updates…"
-                    } else {
-                        "Check for updates"
-                    })
-                    .disabled(refreshing || ref_name.is_empty() || self.repo.disabled)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_ref(cx))),
-            )
-            .child(
-                Button::new("helm-workspace-open-github")
-                    .ghost()
-                    .icon(IconName::ExternalLink)
-                    .tooltip("Open on GitHub")
-                    .disabled(repo_url.is_empty())
-                    .on_click(move |_, _, cx| cx.open_url(&repo_url)),
+                gpui_component::h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(match (self.account.state, self.account.value.as_deref()) {
+                                (_, Some(account)) => format!("Signed in as {account}"),
+                                (LoadState::Error, None) => {
+                                    "GitHub account unavailable".to_string()
+                                }
+                                (LoadState::Loading | LoadState::Idle, None) => {
+                                    "Checking GitHub account…".to_string()
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(local_clone_status),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("helm-workspace-refresh")
+                            .ghost()
+                            .label("Refresh")
+                            .tooltip(if refreshing {
+                                "Checking for updates…"
+                            } else {
+                                "Check for updates"
+                            })
+                            .disabled(refreshing || ref_name.is_empty() || self.repo.disabled)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_ref(cx))),
+                    )
+                    .child(
+                        Button::new("helm-workspace-open-github")
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open on GitHub")
+                            .disabled(repo_url.is_empty())
+                            .on_click(move |_, _, cx| cx.open_url(&repo_url)),
+                    ),
             );
-
-        if ref_is_tag {
-            header = header.child(Tag::secondary().outline().xsmall().child("Tag"));
-        }
 
         let navigation =
             gpui_component::h_flex()

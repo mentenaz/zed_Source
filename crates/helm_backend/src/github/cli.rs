@@ -28,10 +28,24 @@ pub async fn gh_auth_status() -> Result<Option<AuthInfo>, String> {
     match gh_cmd().arg("auth").arg("status").output().await {
         Ok(out) if out.status.success() => {
             let raw = String::from_utf8_lossy(&out.stdout).to_string();
+            // The line is like:
+            //   ✓ Logged in to github.com account mentenaz (keyring)
+            // Take the word right after "account": the trailing "(keyring)"
+            // / path on the line is the credential store, not the account.
             let account = raw
                 .lines()
                 .find(|l| l.contains("Logged in to") && l.contains("account"))
-                .and_then(|l| l.split_whitespace().last().map(|s| s.to_string()));
+                .and_then(|l| {
+                    let mut words = l.split_whitespace();
+                    let mut after_account = None;
+                    while let Some(word) = words.next() {
+                        if word == "account" {
+                            after_account = words.next();
+                            break;
+                        }
+                    }
+                    after_account.map(|s| s.to_string())
+                });
             let scopes = raw
                 .lines()
                 .find(|l| l.contains("Token scopes:"))
