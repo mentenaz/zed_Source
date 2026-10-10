@@ -387,8 +387,7 @@ impl super::DatabasePanel {
             let layout = SchemaLayout::compute(&graph, crate::layout::LayoutConfig::default());
             let panel = cx.entity().downgrade();
             let connection_id = key.0;
-            let view =
-                cx.new(|cx| SchemaGraphView::new(&graph, &layout, panel, connection_id, cx));
+            let view = cx.new(|cx| SchemaGraphView::new(&graph, &layout, panel, connection_id, cx));
             self.schema_graphs.insert(key.clone(), view);
         }
         self.schema_graphs[key].clone()
@@ -550,7 +549,10 @@ fn render_table_card(
                 )
         }));
 
-    let Some(items) = menu_items.get(node.id.as_ref()).filter(|items| !items.is_empty()) else {
+    let Some(items) = menu_items
+        .get(node.id.as_ref())
+        .filter(|items| !items.is_empty())
+    else {
         return card.into_any_element();
     };
     let items = items.clone();

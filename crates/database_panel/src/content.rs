@@ -8,7 +8,8 @@
 use database_backend::{ConnectionConfig, TableInfo, ViewInfo};
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName as GIconName, Sizable as _, Size,

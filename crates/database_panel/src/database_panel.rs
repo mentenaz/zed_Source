@@ -22,6 +22,7 @@ use database_backend::{
     ConnectionConfig, ConnectionId, ConnectionRegistry, ConnectionStatus, DatabaseId, DbType,
     NetworkConnectParams, SavedDatabase, TableInfo, ViewInfo, credential_url,
 };
+pub use database_panel_settings::DatabasePanelSettings;
 use db::kvp::KeyValueStore;
 use gpui::{
     App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
@@ -32,19 +33,20 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName as GIconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
+    form::{field, v_form},
     h_flex,
     input::{Input, InputEvent, InputState},
     panel_header::PanelHeader,
     resizable::{h_resizable, resizable_panel},
-    setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
+    setting::{SettingGroup, SettingItem, SettingPage, Settings},
     spinner::Spinner,
+    switch::Switch,
     tab::{Tab, TabBar, TabVariant},
     tree::{TreeItem, TreeState},
     v_flex,
 };
-use ui::{Color, Label, LabelCommon as _, LabelSize};
-pub use database_panel_settings::DatabasePanelSettings;
 use settings::Settings as _;
+use ui::{Color, Label, LabelCommon as _, LabelSize};
 use workspace::{
     SERIALIZATION_THROTTLE_TIME, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -385,11 +387,14 @@ pub struct DatabasePanel {
     /// The active center-pane tab. Shared across connections (per-connection
     /// tab state is a natural follow-up, not done here).
     content_tab: ContentTab,
-    new_connection_title: String,
+    new_connection_title: Entity<InputState>,
     new_connection_path: String,
-    new_connection_host: String,
-    new_connection_port: String,
-    new_connection_username: String,
+    new_connection_host: Entity<InputState>,
+    new_connection_port: Entity<InputState>,
+    /// Set when the form opens with an empty port: `render` then fills in
+    /// the type's default, since setting an input's value needs the window.
+    new_connection_port_pending: bool,
+    new_connection_username: Entity<InputState>,
     new_connection_ssl: bool,
     new_connection_password: Entity<InputState>,
     /// Set by `add_connection` when it bails out on a missing required
@@ -471,6 +476,10 @@ impl DatabasePanel {
                 );
             }
 
+            let new_connection_title = cx.new(|cx| InputState::new(window, cx));
+            let new_connection_host = cx.new(|cx| InputState::new(window, cx));
+            let new_connection_port = cx.new(|cx| InputState::new(window, cx));
+            let new_connection_username = cx.new(|cx| InputState::new(window, cx));
             let new_connection_password = cx.new(|cx| InputState::new(window, cx).masked(true));
             let new_database_name = cx.new(|cx| InputState::new(window, cx));
             let schema_filter =
@@ -513,11 +522,12 @@ impl DatabasePanel {
                 workbench_tree_states: HashMap::default(),
                 schema_filter,
                 content_tab: ContentTab::default(),
-                new_connection_title: String::new(),
+                new_connection_title,
                 new_connection_path: String::new(),
-                new_connection_host: String::new(),
-                new_connection_port: String::new(),
-                new_connection_username: String::new(),
+                new_connection_host,
+                new_connection_port,
+                new_connection_port_pending: false,
+                new_connection_username,
                 new_connection_ssl: false,
                 new_connection_password,
                 add_connection_error: None,
@@ -967,7 +977,12 @@ impl DatabasePanel {
         }
         self.add_connection_error = None;
 
-        let title = self.new_connection_title.trim().to_string();
+        let value =
+            |state: &Entity<InputState>, cx: &App| state.read(cx).value().trim().to_string();
+        let title = value(&self.new_connection_title, cx);
+        let host = value(&self.new_connection_host, cx);
+        let username = value(&self.new_connection_username, cx);
+        let port = value(&self.new_connection_port, cx);
         let db_type = self.active_type;
         let id = ConnectionId(self.next_connection_id);
 
@@ -979,10 +994,10 @@ impl DatabasePanel {
             missing.push("Database File");
         }
         if db_type != DbType::Sqlite {
-            if self.new_connection_host.trim().is_empty() {
+            if host.is_empty() {
                 missing.push("Host");
             }
-            if self.new_connection_username.trim().is_empty() {
+            if username.is_empty() {
                 missing.push("Username");
             }
         }
@@ -1009,13 +1024,7 @@ impl DatabasePanel {
                 }
             }
             DbType::Postgres | DbType::MySql | DbType::MsSql => {
-                let host = self.new_connection_host.trim().to_string();
-                let username = self.new_connection_username.trim().to_string();
-                let port = self
-                    .new_connection_port
-                    .trim()
-                    .parse()
-                    .unwrap_or_else(|_| default_port(db_type));
+                let port = port.parse().unwrap_or_else(|_| default_port(db_type));
                 ConnectionConfig {
                     id,
                     title,
@@ -1041,15 +1050,17 @@ impl DatabasePanel {
         self.persist_connections(cx);
 
         let password = self.new_connection_password.read(cx).value().to_string();
-        self.new_connection_title.clear();
         self.new_connection_path.clear();
-        self.new_connection_host.clear();
-        self.new_connection_port.clear();
-        self.new_connection_username.clear();
         self.new_connection_ssl = false;
-        self.new_connection_password.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-        });
+        for state in [
+            &self.new_connection_title,
+            &self.new_connection_host,
+            &self.new_connection_port,
+            &self.new_connection_username,
+            &self.new_connection_password,
+        ] {
+            state.update(cx, |state, cx| state.set_value("", window, cx));
+        }
         cx.notify();
 
         match db_type {
@@ -1211,9 +1222,7 @@ impl DatabasePanel {
                     return Err("Timed out waiting to reconnect".to_string());
                 }
 
-                executor
-                    .timer(std::time::Duration::from_millis(150))
-                    .await;
+                executor.timer(std::time::Duration::from_millis(150)).await;
             }
         })
     }
@@ -1858,9 +1867,8 @@ impl DatabasePanel {
     fn start_add_connection(&mut self, cx: &mut Context<Self>) {
         self.active_connection = None;
         self.add_connection_error = None;
-        if self.active_type != DbType::Sqlite && self.new_connection_port.trim().is_empty() {
-            self.new_connection_port = default_port(self.active_type).to_string();
-        }
+        self.new_connection_port_pending = self.active_type != DbType::Sqlite
+            && self.new_connection_port.read(cx).value().trim().is_empty();
         cx.notify();
     }
 
@@ -1893,240 +1901,172 @@ impl DatabasePanel {
         // — users can't tell where to click. Force a higher-contrast border
         // explicitly rather than relying on that token.
         let input_border = cx.theme().border;
+        // Two fields to a row, each label above its input. The form is
+        // capped so that a field is about 512px wide however wide the panel
+        // is, and it still narrows with the panel.
+        let form_width = px(1048.);
 
-        let title_entity = entity.clone();
-        let title_field = SettingField::input(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_title.clone().into()
-            },
-            move |value: SharedString, cx: &mut App| {
-                title_entity.update(cx, |this, cx| {
-                    this.new_connection_title = value.to_string();
-                    cx.notify();
-                });
-            },
-        )
-        .border_1()
-        .border_color(input_border);
-
-        let host_entity = entity.clone();
-        let host_field = SettingField::input(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_host.clone().into()
-            },
-            move |value: SharedString, cx: &mut App| {
-                host_entity.update(cx, |this, cx| {
-                    this.new_connection_host = value.to_string();
-                    cx.notify();
-                });
-            },
-        )
-        .border_1()
-        .border_color(input_border);
-
-        let port_entity = entity.clone();
-        let port_field = SettingField::input(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_port.clone().into()
-            },
-            move |value: SharedString, cx: &mut App| {
-                port_entity.update(cx, |this, cx| {
-                    this.new_connection_port = value.to_string();
-                    cx.notify();
-                });
-            },
-        )
-        .border_1()
-        .border_color(input_border);
-
-        let username_entity = entity.clone();
-        let username_field = SettingField::input(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_username.clone().into()
-            },
-            move |value: SharedString, cx: &mut App| {
-                username_entity.update(cx, |this, cx| {
-                    this.new_connection_username = value.to_string();
-                    cx.notify();
-                });
-            },
-        )
-        .border_1()
-        .border_color(input_border);
+        let title = self.new_connection_title.clone();
+        let host = self.new_connection_host.clone();
+        let port = self.new_connection_port.clone();
+        let username = self.new_connection_username.clone();
+        let password = self.new_connection_password.clone();
+        let ssl = self.new_connection_ssl;
 
         let ssl_entity = entity.clone();
-        let ssl_field = SettingField::checkbox(
-            {
-                let entity = entity.clone();
-                move |cx: &App| entity.read(cx).new_connection_ssl
-            },
-            move |value: bool, cx: &mut App| {
-                ssl_entity.update(cx, |this, cx| {
-                    this.new_connection_ssl = value;
-                    cx.notify();
-                });
-            },
-        );
-
-        let password_state = self.new_connection_password.clone();
-
         let browse_entity = entity.clone();
-        let sqlite_connect_entity = entity.clone();
-        let network_connect_entity = entity.clone();
+        let connect_entity = entity.clone();
 
-        let mut group = SettingGroup::new().item(SettingItem::new("Title", title_field));
-
-        group = match db_type {
-            DbType::Sqlite => {
-                // The database file is chosen only through the OS file picker —
-                // no free-text path — so it always points at a real file.
-                group
-                    .item(SettingItem::render(move |_options, _window, cx| {
-                        let path = browse_entity.read(cx).new_connection_path.clone();
-                        let browse_entity = browse_entity.clone();
-                        let (path_label, path_color) = if path.trim().is_empty() {
-                            ("No file selected".to_string(), Color::Muted)
-                        } else {
-                            (path, Color::Default)
-                        };
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Label::new("Database File")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        div().min_w_0().child(
-                                            Label::new(path_label)
-                                                .size(LabelSize::Small)
-                                                .color(path_color)
-                                                .truncate(),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("browse-sqlite-path")
-                                            .outline()
-                                            .label("Choose file…")
-                                            .on_click(move |_, window, cx| {
-                                                let prompt =
-                                                    cx.prompt_for_paths(gpui::PathPromptOptions {
-                                                        files: true,
-                                                        directories: false,
-                                                        multiple: false,
-                                                        prompt: Some(
-                                                            "Select SQLite Database".into(),
-                                                        ),
-                                                    });
-                                                let browse_entity = browse_entity.clone();
-                                                window
-                                                    .spawn(cx, async move |cx| {
-                                                        let Some(mut paths) = prompt
-                                                            .await
-                                                            .ok()
-                                                            .and_then(Result::ok)
-                                                            .flatten()
-                                                        else {
-                                                            return;
-                                                        };
-                                                        let Some(path) = paths.pop() else {
-                                                            return;
-                                                        };
-                                                        browse_entity.update(cx, |this, cx| {
-                                                            // Default the title to the file name
-                                                            // so a pick is enough to connect.
-                                                            if this
-                                                                .new_connection_title
-                                                                .trim()
-                                                                .is_empty()
-                                                                && let Some(stem) = path.file_stem()
-                                                            {
-                                                                this.new_connection_title = stem
-                                                                    .to_string_lossy()
-                                                                    .into_owned();
-                                                            }
-                                                            this.new_connection_path =
-                                                                path.to_string_lossy().into_owned();
-                                                            cx.notify();
-                                                        });
-                                                    })
-                                                    .detach();
-                                            }),
-                                    ),
-                            )
-                            .into_any_element()
-                    }))
-                    .item(SettingItem::render(move |_options, _window, _cx| {
-                        let connect_entity = sqlite_connect_entity.clone();
-                        h_flex()
-                            .justify_end()
-                            .child(
-                                Button::new("add-connection")
-                                    .label("Connect")
-                                    .primary()
-                                    .disabled(busy)
-                                    .on_click(move |_, window, cx| {
-                                        connect_entity.update(cx, |this, cx| {
-                                            this.add_connection(window, cx);
-                                        });
-                                    }),
-                            )
-                            .into_any_element()
-                    }))
-            }
-            DbType::Postgres | DbType::MySql | DbType::MsSql => group
-                .item(SettingItem::new("Host", host_field))
-                .item(SettingItem::new("Port", port_field))
-                .item(SettingItem::new("Username", username_field))
-                .item(SettingItem::render(move |_options, _window, _cx| {
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            Label::new("Password")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            Input::new(&password_state)
-                                .mask_toggle()
-                                .border_1()
-                                .border_color(input_border),
-                        )
-                        .into_any_element()
-                }))
-                .item(SettingItem::new("SSL", ssl_field))
-                .item(SettingItem::render(move |_options, _window, _cx| {
-                    let connect_entity = network_connect_entity.clone();
-                    h_flex()
-                        .justify_end()
-                        .child(
-                            Button::new("add-connection")
-                                .label("Connect")
-                                .primary()
-                                .disabled(busy)
-                                .on_click(move |_, window, cx| {
-                                    connect_entity.update(cx, |this, cx| {
-                                        this.add_connection(window, cx);
-                                    });
-                                }),
-                        )
-                        .into_any_element()
-                })),
+        let text_field = move |label: &'static str, state: &Entity<InputState>| {
+            field()
+                .label(label)
+                .child(Input::new(state).border_1().border_color(input_border))
         };
+
+        let fields = SettingItem::render(move |_options, _window, _cx| {
+            let form = v_form().columns(2).child(text_field("Title", &title));
+            let form = match db_type {
+                DbType::Sqlite => form,
+                DbType::Postgres | DbType::MySql | DbType::MsSql => {
+                    let ssl_entity = ssl_entity.clone();
+                    form.child(text_field("Host", &host))
+                        .child(text_field("Port", &port))
+                        .child(text_field("Username", &username))
+                        .child(
+                            field().label("Password").child(
+                                Input::new(&password)
+                                    .mask_toggle()
+                                    .border_1()
+                                    .border_color(input_border),
+                            ),
+                        )
+                        .child(field().label("SSL").child(
+                            Switch::new("add-connection-ssl").checked(ssl).on_click(
+                                move |checked, _, cx| {
+                                    ssl_entity.update(cx, |this, cx| {
+                                        this.new_connection_ssl = *checked;
+                                        cx.notify();
+                                    });
+                                },
+                            ),
+                        ))
+                }
+            };
+            div()
+                .w_full()
+                .max_w(form_width)
+                .child(form)
+                .into_any_element()
+        });
+
+        let connect = SettingItem::render(move |_options, _window, _cx| {
+            let connect_entity = connect_entity.clone();
+            h_flex()
+                .child(
+                    Button::new("add-connection")
+                        .label("Connect")
+                        .primary()
+                        .disabled(busy)
+                        .on_click(move |_, window, cx| {
+                            connect_entity.update(cx, |this, cx| {
+                                this.add_connection(window, cx);
+                            });
+                        }),
+                )
+                .into_any_element()
+        });
+
+        let mut group = SettingGroup::new().item(fields);
+        if db_type == DbType::Sqlite {
+            // The database file is chosen only through the OS file picker —
+            // no free-text path — so it always points at a real file.
+            group = group.item(SettingItem::render(move |_options, _window, cx| {
+                let path = browse_entity.read(cx).new_connection_path.clone();
+                let browse_entity = browse_entity.clone();
+                let (path_label, path_color) = if path.trim().is_empty() {
+                    ("No file selected".to_string(), Color::Muted)
+                } else {
+                    (path, Color::Default)
+                };
+                v_flex()
+                    .w_full()
+                    .gap_3()
+                    .child(div().text_sm().child("Database File"))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div().min_w_0().child(
+                                    Label::new(path_label)
+                                        .size(LabelSize::Small)
+                                        .color(path_color)
+                                        .truncate(),
+                                ),
+                            )
+                            .child(
+                                Button::new("browse-sqlite-path")
+                                    .outline()
+                                    .label("Choose file…")
+                                    .on_click(move |_, window, cx| {
+                                        let prompt = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                            files: true,
+                                            directories: false,
+                                            multiple: false,
+                                            prompt: Some("Select SQLite Database".into()),
+                                        });
+                                        let browse_entity = browse_entity.clone();
+                                        window
+                                            .spawn(cx, async move |cx| {
+                                                let Some(mut paths) = prompt
+                                                    .await
+                                                    .ok()
+                                                    .and_then(Result::ok)
+                                                    .flatten()
+                                                else {
+                                                    return;
+                                                };
+                                                let Some(path) = paths.pop() else {
+                                                    return;
+                                                };
+                                                let _ = browse_entity.update_in(
+                                                    cx,
+                                                    |this, window, cx| {
+                                                        // Default the title to the file name
+                                                        // so a pick is enough to connect.
+                                                        if this
+                                                            .new_connection_title
+                                                            .read(cx)
+                                                            .value()
+                                                            .trim()
+                                                            .is_empty()
+                                                            && let Some(stem) = path.file_stem()
+                                                        {
+                                                            let stem =
+                                                                stem.to_string_lossy().into_owned();
+                                                            this.new_connection_title.update(
+                                                                cx,
+                                                                |state, cx| {
+                                                                    state
+                                                                        .set_value(stem, window, cx)
+                                                                },
+                                                            );
+                                                        }
+                                                        this.new_connection_path =
+                                                            path.to_string_lossy().into_owned();
+                                                        cx.notify();
+                                                    },
+                                                );
+                                            })
+                                            .detach();
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            }));
+        }
+        let group = group.item(connect);
 
         v_flex()
             .size_full()
@@ -2427,7 +2367,9 @@ impl Panel for DatabasePanel {
     }
 
     fn icon(&self, _window: &Window, cx: &App) -> Option<ui::IconName> {
-        DatabasePanelSettings::get_global(cx).button.then_some(ui::IconName::DatabaseZap)
+        DatabasePanelSettings::get_global(cx)
+            .button
+            .then_some(ui::IconName::DatabaseZap)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -2522,7 +2464,12 @@ impl DatabasePanel {
 }
 
 impl Render for DatabasePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.new_connection_port_pending) {
+            let port = default_port(self.active_type).to_string();
+            self.new_connection_port
+                .update(cx, |state, cx| state.set_value(port, window, cx));
+        }
         let connections = self.connections.clone();
         let active_connection = self.active_connection.and_then(|id| {
             connections
