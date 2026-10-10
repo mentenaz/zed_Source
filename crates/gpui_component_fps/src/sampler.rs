@@ -254,6 +254,9 @@ mod tests {
             invalidations: 1,
             draw_start: start,
             draw_end: start + draw,
+            refresh_interval: None,
+            signal_at: None,
+            phases: gpui::DrawPhases::default(),
         }
     }
 
