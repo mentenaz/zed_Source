@@ -65,12 +65,12 @@ use changes::*;
 use collaborators::*;
 use helm_backend::github::{
     Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
-    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package,
+    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, OrgMember, Package,
     PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
     WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
     gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo, gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
-    gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
+    gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
     gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
     gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_get_workflow_run,
     gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_issue_comments,
@@ -226,6 +226,13 @@ pub struct HelmPanel {
     /// [`Self::set_screen`] lands on a screen that isn't `OrgDetail`.
     selected_org: Option<String>,
     org_detail: Option<OrgDetail>,
+    /// The signed-in user's role in `selected_org` ("admin" or "member"),
+    /// loaded with `org_detail`. `None` when they are not a member.
+    org_role: Option<String>,
+    /// Populated by [`Self::load_org_members_page`] for the `OrgMembers`
+    /// screen.
+    org_members: Section<OrgMember>,
+    org_members_list: ListView,
     /// The main menu and the Profile screen's menu.
     menu_list: ListView,
     profile_menu_list: ListView,
@@ -411,6 +418,9 @@ impl HelmPanel {
                 repo_invitation_count: 0,
                 selected_org: None,
                 org_detail: None,
+                org_role: None,
+                org_members: Section::default(),
+                org_members_list: lists::org_members_list(window, cx),
                 menu_list: lists::menu_list(window, cx),
                 profile_menu_list: lists::profile_menu_list(window, cx),
                 repos: Section::default(),
@@ -643,6 +653,7 @@ impl Render for HelmPanel {
                         HelmScreen::Profile => self.render_profile(cx).into_any_element(),
                         HelmScreen::OrgList => self.render_org_list(cx).into_any_element(),
                         HelmScreen::OrgDetail => self.render_org_detail(cx).into_any_element(),
+                        HelmScreen::OrgMembers => self.render_org_members(cx).into_any_element(),
                         HelmScreen::RepoList => self.render_repo_list(cx).into_any_element(),
                         HelmScreen::GitHubSearch => {
                             self.render_github_search(cx).into_any_element()

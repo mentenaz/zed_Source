@@ -12,6 +12,8 @@ pub(super) enum HelmScreen {
     Profile,
     OrgList,
     OrgDetail,
+    /// The members of the organisation in view, reached from `OrgDetail`.
+    OrgMembers,
     RepoList,
     GitHubSearch,
     RepoDetail,

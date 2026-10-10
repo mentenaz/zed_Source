@@ -605,6 +605,15 @@ pub struct Collaborator {
     pub permissions: Option<serde_json::Value>,
 }
 
+/// One member of an organisation, as its member list gives them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrgMember {
+    pub login: String,
+    pub id: u64,
+    #[serde(default)]
+    pub avatar_url: String,
+}
+
 /// Sub-object shared by issue/PR/release list items (`user`/`author`): just
 /// enough login/avatar for a list row.
 #[derive(Clone, Debug, Serialize, Deserialize)]

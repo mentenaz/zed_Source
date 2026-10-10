@@ -120,6 +120,12 @@ pub fn org_detail(org: &str) -> ApiRequest {
     get(format!("/orgs/{}", seg(org)))
 }
 
+/// An organisation's members. Someone outside the organisation is given its
+/// public members only.
+pub fn org_members(org: &str) -> ApiRequest {
+    get(format!("/orgs/{}/members?per_page=100", seg(org)))
+}
+
 // ── Repositories ───────────────────────────────────────────────────────
 
 /// The repositories of `owner`. `"self"` means the signed-in user's own.
@@ -597,6 +603,10 @@ mod tests {
             "GET /user/memberships/orgs?per_page=100"
         );
         assert_eq!(line(&org_detail("mentenaz")), "GET /orgs/mentenaz");
+        assert_eq!(
+            line(&org_members("mentenaz")),
+            "GET /orgs/mentenaz/members?per_page=100"
+        );
 
         let update = update_user(json!({ "bio": "hello" }));
         assert_eq!(line(&update), "PATCH /user");

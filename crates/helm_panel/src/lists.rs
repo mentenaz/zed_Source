@@ -62,6 +62,21 @@ pub(super) fn org_logins_list(window: &mut Window, cx: &mut Context<HelmPanel>) 
     )
 }
 
+pub(super) fn org_members_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
+    ListView::new(
+        |panel| &panel.org_members,
+        orgs::org_member_row,
+        |this, ix, _, cx| {
+            if let Some(member) = this.org_members.items.get(ix) {
+                let login = member.login.clone();
+                this.open_user_profile(login, cx);
+            }
+        },
+        window,
+        cx,
+    )
+}
+
 pub(super) fn repos_list(window: &mut Window, cx: &mut Context<HelmPanel>) -> ListView {
     ListView::sectioned(
         Vec::new(),

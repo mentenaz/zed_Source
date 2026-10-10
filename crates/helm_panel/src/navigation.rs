@@ -20,8 +20,12 @@ impl HelmPanel {
         // afterwards found no org data left to render — it fell into the
         // "Failed to load" empty state, whose Retry button then no-op'd too
         // since `selected_org` was already gone.
+        // `UserProfile` is here for the same reason: it is reached from
+        // `OrgMembers`, and going back must find the organisation still there.
         const ORG_SCOPED: &[HelmScreen] = &[
             HelmScreen::OrgDetail,
+            HelmScreen::OrgMembers,
+            HelmScreen::UserProfile,
             HelmScreen::RepoList,
             HelmScreen::RepoDetail,
             HelmScreen::Branches,
@@ -59,6 +63,8 @@ impl HelmPanel {
         if !ORG_SCOPED.contains(&screen) {
             self.selected_org = None;
             self.org_detail = None;
+            self.org_role = None;
+            self.org_members.clear();
         }
         // `selected_repo`/clone state is only meaningful on `RepoDetail` and
         // the screens drilled into from it; clearing here also drops the tab

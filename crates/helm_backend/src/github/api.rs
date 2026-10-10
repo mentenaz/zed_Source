@@ -429,6 +429,25 @@ fn active_org_logins(memberships: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+/// The user's role in `org` ("admin" for an owner, or "member"), when they
+/// are an active member of it. Logins are compared without regard to case,
+/// as GitHub does.
+fn org_role(memberships: &[serde_json::Value], org: &str) -> Option<String> {
+    memberships
+        .iter()
+        .filter(|membership| membership.get("state").and_then(|s| s.as_str()) == Some("active"))
+        .find(|membership| {
+            membership
+                .get("organization")
+                .and_then(|organization| organization.get("login"))
+                .and_then(|login| login.as_str())
+                .is_some_and(|login| login.eq_ignore_ascii_case(org))
+        })
+        .and_then(|membership| membership.get("role"))
+        .and_then(|role| role.as_str())
+        .map(str::to_string)
+}
+
 /// The memberships the user has been offered and not yet answered.
 fn pending_org_invitations(memberships: Vec<serde_json::Value>) -> Vec<OrgInvitation> {
     memberships
@@ -927,6 +946,14 @@ pub async fn gh_get_org_detail(org: String, state: &GhState) -> Result<OrgDetail
     fetch(state, requests::org_detail(&org)).await
 }
 
+/// The signed-in user's role in `org`, or `None` when they are not an
+/// active member. Asks for the same membership list sign-in does, so the
+/// answer is usually one GitHub has already given.
+pub async fn gh_get_org_role(org: &str, state: &GhState) -> Result<Option<String>, GhError> {
+    let memberships: Vec<serde_json::Value> = fetch(state, requests::org_memberships()).await?;
+    Ok(org_role(&memberships, org))
+}
+
 pub async fn gh_get_collaborators(
     owner: String,
     name: String,
@@ -1288,6 +1315,16 @@ mod tests {
     fn active_memberships_are_the_users_organisations() {
         assert_eq!(active_org_logins(&memberships()), vec!["mentenaz", "other"]);
         assert!(active_org_logins(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_role_is_given_only_for_an_active_membership() {
+        let memberships = memberships();
+        assert_eq!(org_role(&memberships, "mentenaz").as_deref(), Some("admin"));
+        assert_eq!(org_role(&memberships, "Other").as_deref(), Some("member"));
+        // Invited but not yet accepted, and not a member at all.
+        assert_eq!(org_role(&memberships, "invited"), None);
+        assert_eq!(org_role(&memberships, "elsewhere"), None);
     }
 
     #[test]
