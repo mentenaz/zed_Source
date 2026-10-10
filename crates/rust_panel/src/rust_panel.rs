@@ -783,6 +783,7 @@ impl Render for RustPanel {
                 .track_focus(&self.focus_handle(cx))
                 .flex()
                 .flex_col()
+                .w_full()
                 .h_full()
                 .bg(cx.theme().background)
                 .child(panel_header)

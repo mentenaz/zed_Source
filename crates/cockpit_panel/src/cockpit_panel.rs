@@ -20,13 +20,14 @@ use anyhow::Result;
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, Styled, Task,
-    WeakEntity, Window, actions, px,
+    WeakEntity, Window, actions, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable as _,
+    ActiveTheme, Icon, IconName, Sizable as _, h_flex,
     button::{Button, ButtonVariants as _},
     panel_header::PanelHeader,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
     v_flex,
 };
 use sysinfo::{Disks, Networks, System};
@@ -298,18 +299,31 @@ impl CockpitPanel {
     /// then refreshes again before reading `global_cpu_usage()`.
     fn spawn_metrics_refresh(cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let mut sys = System::new_all();
-            let mut disks = Disks::new_with_refreshed_list();
-            let mut networks = Networks::new_with_refreshed_list();
+            // The sysinfo scans block for long enough to stall the UI, so
+            // they run on the background executor; only the computed
+            // metrics hop back to the main thread via `this.update`.
+            let (mut sys, mut disks, mut networks) = cx
+                .background_spawn(async {
+                    (
+                        System::new_all(),
+                        Disks::new_with_refreshed_list(),
+                        Networks::new_with_refreshed_list(),
+                    )
+                })
+                .await;
             loop {
-                sys.refresh_cpu_all();
-                cx.background_executor()
-                    .timer(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
+                let executor = cx.background_executor().clone();
+                (sys, disks, networks) = cx
+                    .background_spawn(async move {
+                        sys.refresh_cpu_all();
+                        executor.timer(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
+                        sys.refresh_cpu_all();
+                        sys.refresh_memory();
+                        disks.refresh(false);
+                        networks.refresh(false);
+                        (sys, disks, networks)
+                    })
                     .await;
-                sys.refresh_cpu_all();
-                sys.refresh_memory();
-                disks.refresh(false);
-                networks.refresh(false);
 
                 let cpu_usage = sys.global_cpu_usage();
                 let core_usage: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
@@ -467,6 +481,21 @@ impl Render for CockpitPanel {
                 cx.theme().muted_foreground,
                 cx.theme().border,
             ))
+            // No sample yet: the first sysinfo scan is still running on the
+            // background executor, so say so instead of showing zeroes.
+            .when(self.history.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new().xsmall())
+                        .child("Loading system metrics\u{2026}"),
+                )
+            })
             .child(
                 v_flex()
                     .flex_1()

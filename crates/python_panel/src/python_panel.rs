@@ -181,6 +181,10 @@ pub struct PythonPanel {
     missing_deps: Vec<String>,
 
     python_procs: Vec<PythonProcess>,
+    /// False until the first background process scan lands, so the
+    /// Processes section shows a loading row instead of claiming nothing
+    /// is running.
+    procs_loaded: bool,
 
     open: HashMap<String, bool>,
 
@@ -358,6 +362,7 @@ impl PythonPanel {
                 requirements_count: 0,
                 missing_deps: Vec::new(),
                 python_procs: Vec::new(),
+                procs_loaded: false,
                 open,
                 _rescan_task: None,
                 _data_reload_task: None,
@@ -520,26 +525,39 @@ impl PythonPanel {
     /// tick (see the module doc).
     fn spawn_processes_poll(cx: &mut Context<Self>) -> gpui::Task<()> {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let mut sys = System::new_all();
+            // Every sysinfo call here walks the whole process table, which
+            // takes long enough to stall the UI, so the scans run on the
+            // background executor and only the resulting rows hop back to
+            // the main thread via `this.update`.
+            let mut sys = cx.background_spawn(async { System::new_all() }).await;
             loop {
-                sys.refresh_cpu_all();
-                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                let cpu_count = sys.cpus().len() as f32;
-                let procs: Vec<PythonProcess> = sys
-                    .processes()
-                    .iter()
-                    .filter(|(_, p)| p.name().to_string_lossy().to_lowercase().contains("python"))
-                    .map(|(pid, p)| PythonProcess {
-                        name: p.name().to_string_lossy().to_string(),
-                        pid: pid.as_u32(),
-                        cpu_percent: p.cpu_usage() / cpu_count,
-                        memory_mb: p.memory() as f64 / 1_048_576.0,
+                let (scanned, procs) = cx
+                    .background_spawn(async move {
+                        sys.refresh_cpu_all();
+                        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                        let cpu_count = sys.cpus().len() as f32;
+                        let procs: Vec<PythonProcess> = sys
+                            .processes()
+                            .iter()
+                            .filter(|(_, p)| {
+                                p.name().to_string_lossy().to_lowercase().contains("python")
+                            })
+                            .map(|(pid, p)| PythonProcess {
+                                name: p.name().to_string_lossy().to_string(),
+                                pid: pid.as_u32(),
+                                cpu_percent: p.cpu_usage() / cpu_count,
+                                memory_mb: p.memory() as f64 / 1_048_576.0,
+                            })
+                            .collect();
+                        (sys, procs)
                     })
-                    .collect();
+                    .await;
+                sys = scanned;
 
                 let alive = this
                     .update(cx, |this, cx| {
                         this.python_procs = procs;
+                        this.procs_loaded = true;
                         cx.notify();
                     })
                     .is_ok();
@@ -907,6 +925,7 @@ impl Render for PythonPanel {
                 .track_focus(&self.focus_handle(cx))
                 .flex()
                 .flex_col()
+                .w_full()
                 .h_full()
                 .bg(theme.background)
                 .child(panel_header)
@@ -1633,7 +1652,20 @@ impl PythonPanel {
     fn render_processes(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut col = div().flex().flex_col();
 
-        if self.python_procs.is_empty() {
+        if !self.procs_loaded {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().xsmall())
+                    .child("Loading processes\u{2026}"),
+            );
+        } else if self.python_procs.is_empty() {
             col = col.child(
                 div()
                     .px_3()

@@ -36,6 +36,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     menu::PopupMenu,
     panel_header::PanelHeader,
+    spinner::Spinner,
     table::{Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableState},
     tag::Tag,
     v_flex,
@@ -156,6 +157,8 @@ struct ProcessTableDelegate {
     entries: Vec<ProcessEntry>,
     /// Raw snapshot from the last poll (unfiltered, unsorted).
     all: Vec<ProcessEntry>,
+    /// False until the first snapshot arrives from the background scan.
+    loaded: bool,
     /// Lower-cased name/PID filter from the search box.
     filter: String,
     sort_col: usize,
@@ -168,6 +171,7 @@ impl ProcessTableDelegate {
         Self {
             entries: Vec::new(),
             all: Vec::new(),
+            loaded: false,
             filter: String::new(),
             sort_col: 1,
             sort_dir: ColumnSort::Ascending,
@@ -212,6 +216,7 @@ impl ProcessTableDelegate {
     /// Replace the raw snapshot, re-applying the filter and active sort.
     fn set_data(&mut self, all: Vec<ProcessEntry>) {
         self.all = all;
+        self.loaded = true;
         self.apply();
     }
 
@@ -456,6 +461,19 @@ impl TableDelegate for ProcessTableDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        if !self.loaded {
+            return h_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .p_4()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Spinner::new().small())
+                .child("Loading processes\u{2026}")
+                .into_any_element();
+        }
         v_flex()
             .size_full()
             .items_center()
@@ -598,10 +616,16 @@ impl ProcessesPanel {
                 let poll_adopted = adopted.clone();
                 cx.spawn(async move |this, cx| {
                     loop {
-                        // The sysinfo scan blocks for a moment; only the
-                        // resulting rows hop back to the main thread via
-                        // `this.update`.
-                        let processes = list_processes(&poll_system, &poll_adopted);
+                        // The sysinfo scan blocks for a moment, so it runs
+                        // on the background executor; only the resulting
+                        // rows hop back to the main thread via `this.update`.
+                        let processes = cx
+                            .background_spawn({
+                                let system = poll_system.clone();
+                                let adopted = poll_adopted.clone();
+                                async move { list_processes(&system, &adopted) }
+                            })
+                            .await;
                         let alive = this
                             .update(cx, |this, cx| {
                                 this.table.update(cx, |table, _| {
