@@ -263,6 +263,12 @@ pub struct ScriptRunnerPanel {
     /// [`Self::run_external_with_env`]. Empty outside that call.
     run_env: Vec<(OsString, OsString)>,
 
+    /// The command of the run being started, to be shown in the command
+    /// input the next time the panel renders. The input only exists once the
+    /// panel has rendered (it needs a `Window` to build), so a run
+    /// dispatched before then can't set it at dispatch time.
+    pending_command: Option<String>,
+
     /// Latest SPFx debug query-string seen in this run, if any.
     debug_script: Option<String>,
     /// True for ~1.6 s after the copy button is clicked — swaps icon to ✓.
@@ -342,9 +348,9 @@ impl ScriptRunnerPanel {
                                         let marker = if was_killed {
                                             "[killed]".to_string()
                                         } else if exit_code == 0 {
-                                            format!("[done · exit {exit_code}]")
+                                            format!("[exit {exit_code} · passed]")
                                         } else {
-                                            format!("[error · exit {exit_code}]")
+                                            format!("[exit {exit_code} · failed]")
                                         };
                                         panel.output.push(marker);
                                         // Future wiring point: notify a host app's own
@@ -369,6 +375,7 @@ impl ScriptRunnerPanel {
                 running: false,
                 kill_flag: Arc::new(AtomicBool::new(false)),
                 run_env: Vec::new(),
+                pending_command: None,
                 debug_script: None,
                 debug_copied: false,
                 detected_links: Vec::new(),
@@ -421,6 +428,8 @@ impl ScriptRunnerPanel {
         }
 
         self.output.clear();
+        self.output.push(format!("$ {cmd}"));
+        self.pending_command = Some(cmd.clone());
         self.debug_script = None;
         self.debug_copied = false;
         self.detected_links.clear();
@@ -511,6 +520,11 @@ fn kill_process_tree(pid: u32) {
 ///   since the direct child is pwsh/cmd, not the interpreter itself) the
 ///   moment Stop is clicked; killing the process closes its stdout pipe,
 ///   which unblocks the read loop on its own.
+///
+/// stderr is read on its own thread and interleaved with stdout: on Windows a
+/// child process's native stderr reaches this `pwsh` process's stderr rather
+/// than the `*>&1` merge, so without it a Python traceback (or a "not
+/// recognized" error) would be dropped on the floor.
 fn run_shell_blocking(
     cmd: &str,
     cwd: &str,
@@ -521,17 +535,27 @@ fn run_shell_blocking(
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
+    // `*>&1` merges PowerShell's own success/error/warning streams into
+    // stdout, but it does *not* capture a child process's native stderr —
+    // that lands on this `pwsh` process's stderr. Since stderr is piped (not
+    // nulled) below, the reader thread forwards it too, so a Python traceback
+    // or a "not recognized" error isn't silently dropped.
+    //
+    // `; exit $LASTEXITCODE` propagates the command's real exit code: a bare
+    // `-Command` always exits 0, which used to report every failure as
+    // "[done · exit 0]".
     #[cfg(target_os = "windows")]
     let child = {
-        let merged_cmd = format!("& {{ {cmd} }} *>&1");
+        let merged_cmd = format!("& {{ {cmd} }} *>&1; exit $LASTEXITCODE");
         let mut c = gpui_util::new_std_command("pwsh.exe");
         c.args(["-NoProfile", "-NonInteractive", "-Command", &merged_cmd])
             .current_dir(cwd)
             .envs(env.iter().map(|(name, value)| (name, value)))
             .env("PYTHONUNBUFFERED", "1")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // Fallback to cmd.exe if pwsh not found
+            .stderr(Stdio::piped());
+        // Fallback to cmd.exe if pwsh not found (`cmd`'s own `2>&1` already
+        // merges stderr at the OS level, and it propagates the exit code).
         c.spawn().or_else(|_| {
             let fallback_cmd = format!("{cmd} 2>&1");
             let mut c = gpui_util::new_std_command("cmd.exe");
@@ -540,7 +564,7 @@ fn run_shell_blocking(
                 .envs(env.iter().map(|(name, value)| (name, value)))
                 .env("PYTHONUNBUFFERED", "1")
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::piped());
             c.spawn()
         })
     };
@@ -605,6 +629,29 @@ fn run_shell_blocking(
         }
     };
 
+    // A child process's native stderr isn't merged by the shell's own
+    // redirects (see the spawn above), so read it on its own thread and
+    // interleave its lines into the same stream as stdout.
+    let stderr_thread = child.stderr.take().map(|stderr| {
+        let tx = tx.clone();
+        let kill_flag = kill_flag.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if kill_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                match line {
+                    Ok(l) => {
+                        if tx.send(RunnerEvent::Line(strip_ansi(&l))).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    });
+
     for line in BufReader::new(stdout).lines() {
         if kill_flag.load(Ordering::SeqCst) {
             break;
@@ -625,6 +672,9 @@ fn run_shell_blocking(
     }
     let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
     finished.store(true, Ordering::SeqCst);
+    if let Some(thread) = stderr_thread {
+        let _ = thread.join();
+    }
     let _ = tx.send(RunnerEvent::Done {
         exit_code,
         was_killed,
@@ -700,6 +750,11 @@ impl Render for ScriptRunnerPanel {
         if self.command_input.is_none() {
             self.command_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("Enter a command…")));
+        }
+
+        let pending = self.pending_command.take();
+        if let (Some(input), Some(command)) = (self.command_input.as_ref(), pending) {
+            input.update(cx, |state, cx| state.set_value(command, window, cx));
         }
 
         let command_val = self
