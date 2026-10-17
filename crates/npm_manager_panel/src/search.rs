@@ -34,8 +34,6 @@ impl NpmManagerPanel {
         let http_client = cx.http_client();
         let active = self.active();
         let node_version = active.engine.as_ref().map(|e| e.node_version.clone());
-        let installed_names: Vec<String> =
-            active.installed.iter().map(|p| p.name.clone()).collect();
         let page = self.search_page;
         let url = format!(
             "{SEARCH_URL}?text={}&size=25&from={}",
@@ -45,13 +43,7 @@ impl NpmManagerPanel {
         let this = cx.weak_entity();
 
         cx.spawn(async move |_: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let outcome = fetch_search(
-                &http_client,
-                &url,
-                &installed_names,
-                node_version.as_deref(),
-            )
-            .await;
+            let outcome = fetch_search(&http_client, &url, node_version.as_deref()).await;
             let _ = cx.update(|app| {
                 if let Some(panel) = this.upgrade() {
                     let _ = panel.update(app, |panel, cx| {
@@ -139,12 +131,10 @@ impl NpmManagerPanel {
 async fn fetch_search(
     http_client: &Arc<dyn HttpClient>,
     url: &str,
-    installed_names: &[String],
     node_version: Option<&str>,
 ) -> Result<(Vec<NpmSearchResult>, usize), String> {
     let json = fetch_json(http_client, url).await?;
     let (mut results, total) = parse_npm_search(&json);
-    results.retain(|r| !installed_names.contains(&r.name));
     for result in &mut results {
         if let Some(range) = result.engines_node.as_deref() {
             result.compat = node_version.and_then(|v| node_engine_compatible(v, range));

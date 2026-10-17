@@ -367,6 +367,8 @@ impl Render for SearchPage {
         let search_error = panel.search_error.clone();
         let results = &panel.search_results;
         let selected = self.selected;
+        let installed = &panel.active().installed;
+        let outdated = &panel.active().outdated;
 
         v_flex()
             .gap_2()
@@ -512,27 +514,74 @@ impl Render for SearchPage {
                                     .child(format!("{name}@{version}")),
                             );
 
-                        // Description row with the install action on the
-                        // right edge.
-                        let install_button = Button::new(format!("npm-install-{name}"))
-                            .label("Install")
-                            .with_size(Size::Small)
-                            .on_click({
-                                let view = view.clone();
-                                let name = name.clone();
-                                let version = version.clone();
-                                move |_, window, cx| {
-                                    view.update(cx, |panel, cx| {
-                                        panel.install_pkg(
-                                            &name,
-                                            &version,
-                                            panel.install_as_dev,
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            });
+                        // The install/update/uninstall actions on the right
+                        // edge: Install when the package isn't installed, else
+                        // Update (only when the project reports one) plus
+                        // Uninstall.
+                        let installed_version = installed
+                            .iter()
+                            .find(|p| p.name == name)
+                            .map(|p| p.version.clone());
+                        let update_to = outdated
+                            .iter()
+                            .find(|p| p.name == name)
+                            .map(|p| p.latest.clone());
+
+                        let mut actions = h_flex().gap_2().items_center();
+                        if installed_version.is_some() {
+                            if let Some(latest) = update_to {
+                                actions = actions.child(
+                                    Button::new(format!("npm-update-{name}"))
+                                        .label("Update")
+                                        .with_size(Size::Small)
+                                        .on_click({
+                                            let view = view.clone();
+                                            let name = name.clone();
+                                            move |_, window, cx| {
+                                                view.update(cx, |panel, cx| {
+                                                    panel.update_pkg(&name, &latest, window, cx);
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
+                            actions = actions.child(
+                                Button::new(format!("npm-uninstall-{name}"))
+                                    .label("Uninstall")
+                                    .with_size(Size::Small)
+                                    .on_click({
+                                        let view = view.clone();
+                                        let name = name.clone();
+                                        move |_, window, cx| {
+                                            view.update(cx, |panel, cx| {
+                                                panel.remove_package(&name, window, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        } else {
+                            actions = actions.child(
+                                Button::new(format!("npm-install-{name}"))
+                                    .label("Install")
+                                    .with_size(Size::Small)
+                                    .on_click({
+                                        let view = view.clone();
+                                        let name = name.clone();
+                                        let version = version.clone();
+                                        move |_, window, cx| {
+                                            view.update(cx, |panel, cx| {
+                                                panel.install_pkg(
+                                                    &name,
+                                                    &version,
+                                                    panel.install_as_dev,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
 
                         let card = v_flex()
                             .id(("npm-search-card", ix))
@@ -566,7 +615,7 @@ impl Render for SearchPage {
                                             .text_color(theme.muted_foreground)
                                             .child(description),
                                     )
-                                    .child(install_button),
+                                    .child(actions),
                             )
                             .child(
                                 h_flex().w_full().child(
