@@ -1254,7 +1254,7 @@ impl Render for PythonPanel {
             "Environment",
             0,
             self.is_open("Environment", true),
-            self.render_environment(),
+            self.render_environment(cx),
         );
 
         let framework_section = self.framework.as_ref().map(|_| {
@@ -1944,16 +1944,37 @@ impl PythonPanel {
         col
     }
 
-    fn render_environment(&self) -> impl IntoElement {
+    fn render_environment(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut content = v_flex().w_full().gap_1();
 
         if !self.missing_deps.is_empty() {
-            content = content.child(div().w_full().flex().items_center().gap_1().child(
-                Tag::danger().xsmall().child(format!(
-                    "{} missing from requirements.txt",
-                    self.missing_deps.len()
-                )),
-            ));
+            content = content.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(cx.theme().danger)
+                            .rounded_full()
+                            .px_1p5()
+                            .min_w_3p5()
+                            .h_4()
+                            .text_xs()
+                            .text_color(gpui::white())
+                            .child(self.missing_deps.len().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().foreground)
+                            .child("missing from requirements.txt"),
+                    ),
+            );
         }
         if self.requirements_count > 0 {
             content = content.child(div().w_full().child(
