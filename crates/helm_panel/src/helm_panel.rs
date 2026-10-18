@@ -7,6 +7,7 @@
 //! `Spinner`) instead of the old `forge_ui` crate.
 
 mod activity;
+mod attach;
 mod auth;
 mod branches;
 mod changes;
@@ -61,6 +62,7 @@ use gpui_component::{
 use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
+use attach::{CreateRepoAttach, DEFAULT_COMMIT_MESSAGE};
 use changes::*;
 use collaborators::*;
 use helm_backend::github::{
@@ -201,6 +203,11 @@ pub struct HelmPanel {
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `do_auth` once the scope is granted.
     pending_action: Option<PendingAction>,
+    /// The Git panel's "Using Helm" local follow-up, parked when its Create
+    /// dialog confirms and consumed by [`Self::attach_created_repo`] once
+    /// `gh_create_repo` returns the new repository. Cleared on a terminal
+    /// failure so it can't leak into a later, unrelated create.
+    pending_attach: Option<CreateRepoAttach>,
     /// The scope the auth gate's "Authorize" button requests. `repo` for
     /// the startup check; an action's own scope when it sent us there.
     scope_to_authorize: &'static str,
@@ -406,6 +413,7 @@ impl HelmPanel {
                 auth_initialized: false,
                 login_started: false,
                 pending_action: None,
+                pending_attach: None,
                 scope_to_authorize: "repo",
                 device_code: String::new(),
                 device_url: String::new(),
@@ -509,6 +517,38 @@ impl HelmPanel {
                 HelmRepositoryModal::new(kind, parent, org_logins, window, cx)
             });
         });
+    }
+
+    /// Opens the "Create repository" dialog in the mode the Git panel's
+    /// "Using Helm" button uses: on success the new repository is wired to
+    /// this workspace by [`Self::attach_created_repo`] instead of only
+    /// navigating to its detail screen. Without a GitHub login it reports a
+    /// toast and sends the user to the Helm panel, where signing in (or
+    /// installing the missing `gh` CLI) happens.
+    pub fn open_create_repo_for_attach(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account.is_empty() {
+            self.notify(
+                "Sign in to GitHub from the Helm panel to create a repository.",
+                cx,
+            );
+            if let Some(workspace) = self.workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.focus_panel::<HelmPanel>(window, cx);
+                });
+            }
+            return;
+        }
+        self.open_workspace_modal(
+            HelmModalKind::CreateRepo {
+                attach_local: true,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Shows `message` as a toast on the workspace this panel is attached

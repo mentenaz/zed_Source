@@ -4697,6 +4697,26 @@ impl GitPanel {
         .detach();
     }
 
+    /// The empty state's "Using Helm" button: asks the Helm (GitHub) panel
+    /// to open its Create-repository dialog in attach mode — creating the
+    /// repository on GitHub *and* wiring this workspace up to it, instead
+    /// of just `git init` like "Using zed" does. Helm owns the auth check,
+    /// the dialog, and the post-create wiring; the Git panel picks the new
+    /// repository up through the normal project refresh once `git init`
+    /// lands on disk.
+    fn open_helm_create_repo(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(helm) = workspace.read(cx).panel::<helm_panel::HelmPanel>(cx) else {
+            // The panel is loaded when the workspace opens, so this is a
+            // "should never happen" guard rather than a user-facing state.
+            log::warn!("git panel: Helm panel unavailable for create-repository");
+            return;
+        };
+        helm.update(cx, |helm, cx| helm.open_create_repo_for_attach(window, cx));
+    }
+
     pub(crate) fn pull(&mut self, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_push_and_pull(cx) {
             return;
@@ -8239,19 +8259,36 @@ impl GitPanel {
                 .child(Label::new("No Git Repositories").color(Color::Muted))
                 .when(has_directory_worktree, |this| {
                     this.child(
-                        Button::new("initialize_repository", "Initialize Repository")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Outlined)
-                            .tooltip(Tooltip::for_action_title_in(
-                                "git init",
-                                &git::Init,
-                                &self.focus_handle,
-                            ))
-                            .on_click(move |_, _, cx| {
-                                cx.defer(move |cx| {
-                                    cx.dispatch_action(&git::Init);
-                                })
-                            }),
+                        Label::new("Would you like to create a repository in this space?")
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        h_flex().gap_1().child(
+                            Button::new("using_zed", "Using zed")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Outlined)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    "git init",
+                                    &git::Init,
+                                    &self.focus_handle,
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    cx.defer(move |cx| {
+                                        cx.dispatch_action(&git::Init);
+                                    })
+                                }),
+                        )
+                        .child(
+                            Button::new("using_helm", "Using Helm")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Outlined)
+                                .tooltip(Tooltip::text(
+                                    "Create a GitHub repository with Helm and push this workspace to it",
+                                ))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_helm_create_repo(window, cx);
+                                })),
+                        ),
                     )
                 })
                 .into_any_element()

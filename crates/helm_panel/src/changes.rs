@@ -264,6 +264,10 @@ impl HelmPanel {
                     this.action_settled(&action, cx);
                 }
                 (Err(error), TokenScopeCheck::HasScope) => {
+                    // Terminal failure — the parked local follow-up (if any)
+                    // will never run, so don't let it attach a later,
+                    // unrelated create.
+                    this.pending_attach = None;
                     this.notify(format!("Failed to {}: {error}", action.failure_label()), cx);
                     this.action_settled(&action, cx);
                 }
@@ -322,7 +326,13 @@ impl HelmPanel {
             HelmAction::CreateRepo { .. } => {
                 if let Some(repo) = repo {
                     self.repos.items.push(repo.clone());
-                    self.select_repo(repo, cx);
+                    // A create parked the Git panel's local follow-up
+                    // (`handle_create_repo`): wire the workspace up instead
+                    // of — not as well as — navigating to the detail screen.
+                    match self.pending_attach.take() {
+                        Some(attach) => self.attach_created_repo(repo, attach, cx),
+                        None => self.select_repo(repo, cx),
+                    }
                 }
             }
             HelmAction::EditRepo { .. } => {

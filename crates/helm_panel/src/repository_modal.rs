@@ -8,7 +8,15 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) enum HelmModalKind {
-    CreateRepo,
+    /// `attach_local` is set by the Git panel's "Using Helm" button: the
+    /// form then also offers the local follow-up (README/.gitignore and an
+    /// initial commit message) and, on success, wires the workspace to the
+    /// new repository instead of only navigating to its detail screen —
+    /// see [`HelmPanel::open_create_repo_for_attach`] and
+    /// [`HelmPanel::attach_created_repo`].
+    CreateRepo {
+        attach_local: bool,
+    },
     EditRepo(Repo),
     AddCollaborator,
     RemoveCollaborator(String),
@@ -49,6 +57,12 @@ pub(super) struct HelmRepositoryModal {
     pub(super) company: Entity<InputState>,
     pub(super) location: Entity<InputState>,
     pub(super) private: bool,
+    /// Local-follow-up switches, only rendered (and only read on confirm)
+    /// in the `CreateRepo { attach_local: true }` mode — see
+    /// [`HelmPanel::attach_created_repo`].
+    pub(super) gitignore: bool,
+    pub(super) readme: bool,
+    pub(super) commit_message: Entity<InputState>,
     pub(super) has_issues: bool,
     pub(super) has_wiki: bool,
     pub(super) has_projects: bool,
@@ -160,6 +174,11 @@ impl HelmRepositoryModal {
             company: cx.new(|cx| InputState::new(window, cx).default_value(company_value)),
             location: cx.new(|cx| InputState::new(window, cx).default_value(location_value)),
             private,
+            gitignore: true,
+            readme: true,
+            commit_message: cx.new(|cx| {
+                InputState::new(window, cx).default_value(DEFAULT_COMMIT_MESSAGE)
+            }),
             has_issues,
             has_wiki,
             has_projects,
@@ -172,7 +191,7 @@ impl HelmRepositoryModal {
 
     pub(super) fn title(&self) -> &'static str {
         match self.kind {
-            HelmModalKind::CreateRepo => "Create repository",
+            HelmModalKind::CreateRepo { .. } => "Create repository",
             HelmModalKind::EditRepo(_) => "Edit repository",
             HelmModalKind::AddCollaborator => "Add collaborator",
             HelmModalKind::RemoveCollaborator(_) => "Remove collaborator?",
@@ -205,7 +224,7 @@ impl Render for HelmRepositoryModal {
         let show_footer = !matches!(confirm_kind, HelmModalKind::CloneRepo);
 
         let content = match &kind {
-            HelmModalKind::CreateRepo => v_form()
+            HelmModalKind::CreateRepo { attach_local } => v_form()
                 .child(field().label("Name").child(Input::new(&self.name)))
                 .child(field().label("Description").child(Input::new(&self.description)))
                 .child(
@@ -227,6 +246,35 @@ impl Render for HelmRepositoryModal {
                         })),
                     ),
                 )
+                .when(*attach_local, |form| {
+                    form.child(
+                        field().child(
+                            Switch::new("helm-modal-gitignore")
+                            .label("Add .gitignore")
+                            .checked(self.gitignore)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.gitignore = *checked;
+                                cx.notify();
+                            })),
+                        ),
+                    )
+                    .child(
+                        field().child(
+                            Switch::new("helm-modal-readme")
+                            .label("Add README.md")
+                            .checked(self.readme)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.readme = *checked;
+                                cx.notify();
+                            })),
+                        ),
+                    )
+                    .child(
+                        field()
+                            .label("Initial commit message")
+                            .child(Input::new(&self.commit_message)),
+                    )
+                })
                 .into_any_element(),
             HelmModalKind::EditRepo(repo) => v_form()
                 .child(field().label("Name").child(Input::new(&self.name)))
@@ -525,15 +573,24 @@ impl Render for HelmRepositoryModal {
             let location = this.location.read(cx).value().to_string();
             let draft = this.draft;
             let prerelease = this.prerelease;
+            let gitignore = this.gitignore;
+            let readme = this.readme;
+            let commit_message = this.commit_message.read(cx).value().trim().to_string();
 
             match kind {
-                HelmModalKind::CreateRepo => {
+                HelmModalKind::CreateRepo { attach_local } => {
+                    let attach = attach_local.then_some(CreateRepoAttach {
+                        message: commit_message,
+                        readme,
+                        gitignore,
+                    });
                     parent.update(cx, |this, cx| {
                         this.handle_create_repo(
                             name,
                             description,
                             private,
                             (!organization.is_empty()).then_some(organization),
+                            attach,
                             window,
                             cx,
                         );
@@ -647,7 +704,7 @@ impl Render for HelmRepositoryModal {
                             Button::new("helm-modal-confirm")
                                 .primary()
                                 .label(match confirm_kind {
-                                    HelmModalKind::CreateRepo => "Create",
+                                    HelmModalKind::CreateRepo { .. } => "Create",
                                     HelmModalKind::EditRepo(_) => "Save",
                                     HelmModalKind::AddCollaborator => "Add",
                                     HelmModalKind::RemoveCollaborator(_) => "Remove",

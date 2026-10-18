@@ -171,15 +171,23 @@ impl HelmPanel {
     /// the new repo's detail screen; on failure, surfaces the error via a
     /// notification since the Menu screen (where this is triggered from) has
     /// no dedicated place to show it.
+    ///
+    /// `attach` is the Git panel's "Using Helm" local follow-up: parked in
+    /// `pending_attach` until GitHub confirms the repository, then run by
+    /// [`Self::attach_created_repo`] instead of the navigation above. The
+    /// plain Helm dialog passes `None`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_create_repo(
         &mut self,
         name: String,
         description: String,
         private: bool,
         owner: Option<String>,
+        attach: Option<CreateRepoAttach>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_attach = attach;
         let mut opts = json!({
             "name": name,
             "description": description,
@@ -237,7 +245,13 @@ impl HelmPanel {
     /// "Organization" field creates it org-scoped instead (`gh_create_repo`
     /// reroutes the `"owner"` key to `POST /orgs/{org}/repos`).
     pub(super) fn open_create_repo_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_workspace_modal(HelmModalKind::CreateRepo, window, cx);
+        self.open_workspace_modal(
+            HelmModalKind::CreateRepo {
+                attach_local: false,
+            },
+            window,
+            cx,
+        );
     }
 
     /// The repo list — mirrors the old `RepoListScreen`. Loads either the

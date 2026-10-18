@@ -7931,6 +7931,7 @@ dependencies = [
  "git_ui_core",
  "gpui",
  "gpui-component",
+ "helm_panel",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -9236,6 +9237,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "tokio",
  "ui",
  "workspace",
 ]
