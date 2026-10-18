@@ -500,9 +500,13 @@ impl HelmPanel {
             return;
         };
         let parent = cx.entity();
+        // Read while this panel's lease is still held: the modal's build
+        // closure runs synchronously inside `toggle_modal`, where `parent`
+        // cannot be read (it would double-lease the panel and panic).
+        let org_logins = self.org_logins.items.clone();
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, move |window, cx| {
-                HelmRepositoryModal::new(kind, parent, window, cx)
+                HelmRepositoryModal::new(kind, parent, org_logins, window, cx)
             });
         });
     }

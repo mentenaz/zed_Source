@@ -2,6 +2,8 @@
 //! repository, create pull request and release, edit profile, collaborators,
 //! and the clone dialog.
 
+use gpui_component::select::{Select, SelectEvent, SelectState};
+
 use super::*;
 
 #[derive(Clone)]
@@ -35,6 +37,11 @@ pub(super) struct HelmRepositoryModal {
     pub(super) homepage: Entity<InputState>,
     pub(super) topics: Entity<InputState>,
     pub(super) organization: Entity<InputState>,
+    /// Dropdown over `parent`'s already-loaded org logins, shown in the
+    /// CreateRepo form's "Owner" field. Keeps `organization` in sync on
+    /// confirm so `handle_create_repo` reads a plain string either way.
+    pub(super) organization_select: Entity<SelectState<Vec<String>>>,
+    pub(super) _organization_sub: Subscription,
     pub(super) username: Entity<InputState>,
     pub(super) tag_name: Entity<InputState>,
     pub(super) head_branch: Entity<InputState>,
@@ -55,6 +62,10 @@ impl HelmRepositoryModal {
     pub(super) fn new(
         kind: HelmModalKind,
         parent: Entity<HelmPanel>,
+        // Read by `open_workspace_modal` while the panel's lease is held —
+        // the build closure that calls this runs inside an update on
+        // `HelmPanel`, so `parent.read(cx)` here would panic.
+        org_logins: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -103,10 +114,34 @@ impl HelmRepositoryModal {
         let clone_progress_sub = matches!(kind, HelmModalKind::CloneRepo)
             .then(|| cx.observe(&parent, |_, _, cx| cx.notify()));
 
+        // The Owner dropdown lists the orgs already fetched at login
+        // (`HelmPanel::org_logins`), so no extra network work happens here.
+        // The backing `organization` InputState stays the source of truth —
+        // `handle_create_repo` reads its value unchanged.
+        let organization = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Organization (blank = your account)")
+        });
+        let organization_select =
+            cx.new(|cx| SelectState::new(org_logins, None, window, cx).searchable(true));
+        let organization_for_sub = organization.clone();
+        let organization_sub = cx.subscribe_in(
+            &organization_select,
+            window,
+            move |_, _, event: &SelectEvent<Vec<String>>, window, cx| {
+                // `Confirm(None)` (clean button) clears back to blank, which
+                // `handle_create_repo` maps to "your own account".
+                let SelectEvent::Confirm(choice) = event;
+                organization_for_sub.update(cx, |input, cx| {
+                    input.set_value(choice.clone().unwrap_or_default(), window, cx);
+                });
+            },
+        );
+
         Self {
             kind,
             parent,
             _clone_progress_sub: clone_progress_sub,
+            _organization_sub: organization_sub,
             focus_handle: cx.focus_handle(),
             name: cx.new(|cx| InputState::new(window, cx).default_value(name_value)),
             description: cx.new(|cx| InputState::new(window, cx).default_value(description_value)),
@@ -116,9 +151,8 @@ impl HelmRepositoryModal {
                     .default_value(topics_value)
                     .placeholder("comma, separated, topics")
             }),
-            organization: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Organization (blank = your account)")
-            }),
+            organization,
+            organization_select,
             username: cx.new(|cx| InputState::new(window, cx).placeholder("GitHub username")),
             tag_name: cx.new(|cx| InputState::new(window, cx).placeholder("v1.0.0")),
             head_branch: cx.new(|cx| InputState::new(window, cx).placeholder("feature-branch")),
@@ -174,7 +208,14 @@ impl Render for HelmRepositoryModal {
             HelmModalKind::CreateRepo => v_form()
                 .child(field().label("Name").child(Input::new(&self.name)))
                 .child(field().label("Description").child(Input::new(&self.description)))
-                .child(field().label("Owner").child(Input::new(&self.organization)))
+                .child(
+                    field().label("Owner").child(
+                        Select::new(&self.organization_select)
+                            .placeholder("Organization (blank = your account)")
+                            .search_placeholder("Search…")
+                            .cleanable(true),
+                    ),
+                )
                 .child(
                     field().child(
                         Switch::new("helm-modal-private")

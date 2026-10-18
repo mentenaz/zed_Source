@@ -1346,6 +1346,12 @@ impl WorkspaceTab {
                         this.tree.finish(Ok(RepoTree::default()));
                     }
                     Ok(TreeLoadResult::Tree(tree)) => {
+                        if tree.entries.is_empty() {
+                            this.tree_empty = true;
+                            this.tree.finish(Ok(RepoTree::default()));
+                            cx.notify();
+                            return;
+                        }
                         let nodes = build_tree(&tree.entries);
                         for entry in &tree.entries {
                             if entry.kind != TreeEntryKind::Tree {
@@ -1652,6 +1658,12 @@ impl WorkspaceTab {
                         this.tree.finish(Ok(RepoTree::default()));
                     }
                     Ok(TreeLoadResult::Tree(tree)) => {
+                        if tree.entries.is_empty() {
+                            this.tree_empty = true;
+                            this.tree.finish(Ok(RepoTree::default()));
+                            cx.notify();
+                            return;
+                        }
                         this.tree_entries = tree
                             .entries
                             .iter()
@@ -2033,21 +2045,22 @@ impl WorkspaceTab {
     }
 
     fn resolve_selected_ref(&mut self, cx: &mut Context<Self>) {
-        if self.ref_name.is_empty() {
+                if self.ref_name.is_empty() {
             self.ref_load.clear();
             if self.repo.default_branch.is_empty() {
                 self.load_empty_repository_tree(cx);
             } else {
-                let load = self.ref_load.begin();
-                if self.ref_load.is_current(load) {
-                    self.ref_load
-                        .finish(Err("This repository has no default branch.".into()));
-                }
+                self.tree_empty = true;
+                self.tree.finish(Ok(RepoTree::default()));
+                self.ref_load.clear();
+                self.ref_load
+                    .finish(Err("This repository has no default branch.".into()));
             }
             self.resolved_ref = None;
             cx.notify();
             return;
         }
+
         let owner = self.repo.owner.login.clone();
         let repo = self.repo.name.clone();
         let ref_name = self.ref_name.clone();
@@ -2070,7 +2083,19 @@ impl WorkspaceTab {
                         this.resolved_ref = Some(resolved);
                         this.pending_ref = None;
                     }
-                    Err(error) => this.ref_load.finish(Err(error.to_string())),
+                    Err(error) => {
+                        let error = error.to_string();
+                        let is_empty = error
+                            .to_ascii_lowercase()
+                            .contains("git repository is empty");
+                        if is_empty {
+                            this.tree_empty = true;
+                            this.tree.finish(Ok(RepoTree::default()));
+                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading {
+                            this.tree.finish(Err(error.clone()));
+                        }
+                        this.ref_load.finish(Err(error));
+                    }
                 }
                 cx.notify();
             })
@@ -2118,7 +2143,19 @@ impl WorkspaceTab {
                         this.ref_load.finish(Ok(resolved.clone()));
                         this.pending_ref = Some(resolved);
                     }
-                    Err(error) => this.ref_load.finish(Err(error.to_string())),
+                    Err(error) => {
+                        let error = error.to_string();
+                        let is_empty = error
+                            .to_ascii_lowercase()
+                            .contains("git repository is empty");
+                        if is_empty {
+                            this.tree_empty = true;
+                            this.tree.finish(Ok(RepoTree::default()));
+                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading {
+                            this.tree.finish(Err(error.clone()));
+                        }
+                        this.ref_load.finish(Err(error));
+                    }
                 }
                 cx.notify();
             })
