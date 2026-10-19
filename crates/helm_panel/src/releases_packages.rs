@@ -56,12 +56,16 @@ impl HelmPanel {
         self.package_versions_error = None;
         cx.notify();
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(async move {
                 gh_list_package_versions(owner, pkg.package_type, pkg.name.clone(), &gh_state).await
             })
             .await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 match result {
                     Ok(versions) => this.package_versions = versions,
                     Err(e) => this.package_versions_error = Some(e.to_string()),

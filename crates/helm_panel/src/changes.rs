@@ -238,6 +238,7 @@ impl HelmPanel {
         let performed = action.clone();
 
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let (result, scope_check) = on_tokio(async move {
                 let result = performed.perform(repo, &gh_state).await;
@@ -262,6 +263,25 @@ impl HelmPanel {
             })
             .await;
             this.update(cx, |this, cx| match (result, scope_check) {
+                // The panel switched account while this was on its way: the
+                // change was sent as the previous account, so say how it went
+                // but leave the new account's screens alone.
+                (result, _) if !this.is_current_state(&started) => {
+                    this.pending_attach = None;
+                    match result {
+                        Ok(_) => this.notify(
+                            "A change finished after the account switch; it was made with the                              previous account.",
+                            cx,
+                        ),
+                        Err(error) => this.notify(
+                            format!(
+                                "Failed to {} with the previous account: {error}",
+                                action.failure_label()
+                            ),
+                            cx,
+                        ),
+                    }
+                }
                 (Ok(repo), _) => {
                     this.action_succeeded(&action, repo, cx);
                     this.action_settled(&action, cx);
@@ -350,10 +370,14 @@ impl HelmPanel {
             HelmAction::UpdateProfile { .. } => {
                 self.notify("Profile updated", cx);
                 let gh_state = self.gh_state.clone();
+                let started = gh_state.clone();
                 cx.spawn(async move |this, cx| {
                     let updated =
                         on_tokio(async move { gh_get_current_user(&gh_state).await }).await;
                     this.update(cx, |this, cx| {
+                        if !this.is_current_state(&started) {
+                            return;
+                        }
                         if let Ok(user) = updated {
                             this.user = Some(user);
                         }

@@ -238,9 +238,13 @@ pub trait HelmViewExt: HelmView {
         let load = loaded(self).begin();
         cx.notify();
         let gh_state = self.gh_state().clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(gh_state)).await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 let loaded = loaded(this);
                 if loaded.is_current(load) {
                     loaded.finish(result.map_err(|error| error.to_string()));
@@ -288,9 +292,13 @@ pub trait HelmViewExt: HelmView {
         section(self).begin();
         cx.notify();
         let gh_state = self.gh_state().clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(gh_state)).await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 section(this).finish(result.map_err(|error| error.to_string()));
                 cx.notify();
             })
@@ -345,9 +353,13 @@ pub trait HelmViewExt: HelmView {
             None => section(self).begin_page(page),
         };
         cx.notify();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(repo, gh_state)).await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 let section = section(this);
                 // Another page was asked for, or the screen was left, while
                 // this one was on its way.

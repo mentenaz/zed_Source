@@ -148,7 +148,7 @@ Result: Helm runs with no `gh` installed, no new transport stack, and no loss of
 1. **OAuth App vs GitHub App: decided, OAuth App with device flow.** It keeps classic scopes (`repo`, `read:org`, `user`) and the scope-gating UI as is. A GitHub App would have given fine-grained permissions but removed scopes, changing `required_scope()` and the "missing scope" flow. The consequence is item 6.
    **Registered 19 Oct:** OAuth App **`Helm_GPUI`**, Client ID **`Ov23li4HBhs95CCtVsmP`** (public; safe to put in source, as Copilot's is in `copilot_chat/src/copilot_oauth.rs:21`). Device Flow enabled. No client secret generated, and none is needed: device flow uses only the client ID. The redirect URI is required by the form but never used. **Template for the sign-in code:** `copilot_chat/src/copilot_oauth.rs` (device flow) plus `copilot_chat.rs:566` (token read from `credentials_provider`).
 2. **Goal: decided 19 Oct, move away from `gh` entirely, so Helm needs as few separate installs as possible.** Consequences:
-   - **No `gh` import.** Helm never reads `gh`'s token, and no `gh` code path is kept. People who used Helm through `gh` sign in once with "Login with GitHub".
+   - ~~**No `gh` import.**~~ **Revised 19 Oct: "Use GitHub CLI" as an optional third way to sign in** (see section 12). Helm's own OAuth App stays the default and recommended option; `gh` is never a runtime dependency.
    - **Pasting a token as an advanced option.** A small "Use a token instead" link on the sign-in screen accepts a personal access token. It needs no install and no app approval, so it covers orgs that block the OAuth App and locked-down machines. It is stored like any other account (`helm://github.com/<login>`, login learned from `GET /user`). Scopes come from `X-OAuth-Scopes`; fine-grained tokens report none, so for them a missing permission shows up per request (403) rather than up front.
    - **External programs after `gh` is gone:** `git` only. Zed's own git panel already needs a system `git` on Windows and Linux (macOS bundles one), so it is not an extra install for Helm. **npm** was the other one (below).
    - **npm after a clone: decided, drop Helm's own step.** Helm's clone currently runs the system `npm.cmd install` itself (`clone.rs:97`, "Phase 2"). `npm_bootstrap` already offers `npm install` whenever a workspace with a `package.json` but no `node_modules` opens, a fresh clone included, so Helm's step is removed. `npm_bootstrap` itself also calls the system `npm.cmd` (`npm_bootstrap.rs:121`); it is switched to Zed's managed Node (`node_runtime`, `npm_command` / `run_npm_subcommand`), so `npm install` anywhere in Forge works without a system Node. To check when doing it: that `npm_bootstrap`'s offer fires for the workspace Helm opens after a clone, and the exact `NodeRuntime` call to use.
@@ -159,6 +159,7 @@ Result: Helm runs with no `gh` installed, no new transport stack, and no loss of
    - Detect the restriction. GitHub answers with a 403 whose message names the OAuth App access restrictions. Map it to its own `GhError` variant next to `SsoRequired`. The exact message and status still need checking against a restricted org.
    - Show an "approval needed for <org>" state with a link to the app's page in the user's GitHub settings (`https://github.com/settings/connections/applications/<client_id>`), where the user can request approval from the org owners.
    - Mention it in the sign-in screen's help text, and test against a restricted org before dropping `gh`.
+   - **Seen 19 Oct (Sencorp login, org Sencorp-Interim, not approved):** GitHub does not answer with an error for the org list. `GET /user/memberships/orgs` simply leaves the restricted org out, so Helm's menu showed only Mentenaz-Server (approved) and Helm cannot tell an approval is missing. A 403 is still expected when opening one of that org's repos directly (not yet checked). Consequences: the sign-in help text and the link to the app's settings page are the main way users find out; an idea for later is to compare the account's public org memberships (`GET /users/<login>/orgs`) with the approved list and mark the missing ones as "approval needed" (works only for public memberships). After the owners approve, confirm the org appears.
 
 ---
 
@@ -230,7 +231,7 @@ Keep upstream-able patches (P2, P3, P5) as clean commits so they can be sent as 
 5. Replace `gh repo clone` with `git`; remove the clone's npm phase; delete `cli.rs`, `gh_cmd` and the gate screen.
 6. Switch `npm_bootstrap` from the system `npm.cmd` to Zed's managed Node (`node_runtime`). Independent of the steps above; can be done at any time.
 
-*Status (19 Oct):* step 4 is built (single-account UI): device-flow and pasted-token sign-in (`helm_backend/src/github/oauth.rs`, `helm_panel/src/auth.rs`), tokens under `helm://github.com/<login>`, `accounts` / `default_account` settings, the `HelmAccounts` event store (`helm_panel/src/accounts.rs`), scopes from `X-OAuth-Scopes`, and the wrong-account check. Still open from step 4: the `GhState` identity check for late results, the account picker and per-workspace binding, and the organisation-approval error. Clone still uses `gh` until step 5.
+*Status (19 Oct):* step 4 is built (single-account UI): device-flow and pasted-token sign-in (`helm_backend/src/github/oauth.rs`, `helm_panel/src/auth.rs`), tokens under `helm://github.com/<login>`, `accounts` / `default_account` settings, the `HelmAccounts` event store (`helm_panel/src/accounts.rs`), scopes from `X-OAuth-Scopes`, and the wrong-account check. Also built 19 Oct: the account menu in the panel header (switch, add, make default, sign out, remove; `helm_panel/src/account_switcher.rs`), the per-workspace account in the key-value store (`helm_panel_account-<id>`), and the `GhState` identity check for late results (`HelmView::is_current_state`). Still open from step 4: the organisation-approval message (see section 7, item 6). Clone still uses `gh` until step 5.
 
 *Note (19 Oct):* step 4 does not depend on octocrab. The current REST layer only needs a token, and the device flow is two HTTP calls (as in `copilot_chat/src/copilot_oauth.rs`), so sign-in can be done **before** steps 1 to 3, which makes Helm work without `gh` for everything except cloning early on.
 
@@ -328,3 +329,48 @@ The `gh` CLI gate (`check_cli`, `render_gate`) is removed; the code/copy/Open sc
 ### Where it fits in the work order
 
 Build the storage and the per-workspace client as account-aware from the start, as part of step 4 (replacing `gh` sign-in), but ship the UI for a single account first. That first version already includes: tokens under `helm://github.com/<login>`, the `accounts` list as index, the `HelmAccounts` store with its events, the `GhState` identity check, and the wrong-account check. With one account none of it shows; the startup steps simply land on that account. The account picker, the header switcher and per-workspace binding then land as a follow-up with no data rework.
+
+---
+
+## 11. Git follows the workspace's account (agreed need, 19 Oct; design not final)
+
+**Why:** the user works with two unrelated GitHub logins: `mentenaz` (personal, `mentenaz@outlook.de`) and a separate Sencorp login (`francoish@sencorpdigital.com`). Today three different things decide "who you are", and only the first follows Helm's sign-in:
+
+| | Decided by | Today |
+|---|---|---|
+| Helm's API calls | Helm's token (section 10) | the workspace's Helm account |
+| Commit author | `user.name` / `user.email`: repo `.git/config`, else `~/.gitconfig` | always `Mentenaz-Server (Francois) <mentenaz@outlook.de>` (global) |
+| Push / pull / fetch | git's credential helper for github.com | `gh auth git-credential`, so `gh`'s active account (`gh auth switch` changes it for every repo at once) |
+
+**Goal:** a workspace bound to an account commits and pushes as that account, side by side with a workspace on the other account, with no `gh`.
+
+### Design
+
+1. **Which account a repo uses.** The workspace binding from section 10. The optional rule table there becomes the default: a repo whose `origin` owner is an account's login, or one of that account's organisations, uses that account. The binding overrides the rule.
+2. **Commit identity: per repo, written to that repo's `.git/config`** (`user.name`, `user.email`), never to the global config. It then also applies to commits made from a terminal or another tool. Written when Helm clones a repo and when a workspace is bound to an account, and only after asking if the repo already has a different local identity. Per account, the identity is stored in settings next to the login (`git_name`, `git_email`), defaulting to the GitHub name and primary verified email (`GET /user/emails`, covered by the `user` scope); the user can pick the `noreply` address instead.
+3. **Push / pull / fetch from Zed's git panel: the token through env config, as for the clone (section 3).** `run_git_command` (`crates/git/src/repository.rs:4175`) already passes `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` (for its GPG wrapper, only when the env has no `GIT_CONFIG_COUNT`). For github.com HTTPS remotes, Forge adds: an empty `credential.https://github.com.helper` (so `gh` / Git Credential Manager are not asked) and `http.https://github.com/.extraHeader` with the account's token. The GPG wrapper entry has to be merged into the same numbered list instead of being skipped. To check: where the per-call `env` comes from, so the workspace's account can be looked up there, and that `extraHeader` works for push over HTTPS (it does for fetch and clone).
+4. **Git in the integrated terminal: not covered by item 3.** Putting the token in the terminal's environment would expose it to every program run there. Options for later: a Forge credential helper (`zeddev --git-credential`) configured per repo, or leave the terminal on the global helper. Undecided.
+5. **SSH remotes** (`git@github.com:`) use SSH keys, not tokens; out of scope.
+
+### Order
+
+After step 5 (clone with `git`) and the account switcher with per-workspace binding (section 10), since every part here needs to know the workspace's account.
+
+---
+
+## 12. "Use GitHub CLI" as an optional sign-in (decided 19 Oct)
+
+**Why it was added after all:** an organisation that restricts third-party apps hides itself from an unapproved app's token without any error (section 7, item 6). `gh`'s own OAuth App is already approved in many company orgs, so users who already use `gh` get a way in while Helm's approval is pending, and a choice of which app they authorise.
+
+**Why Helm's own app stays the default:** it can be revoked on GitHub separately from `gh`, org owners approve or block it separately, and it shows up under its own name in the user's authorised apps and the security log. Note for the help text: the app registration does not limit what Forge can do. Forge holds the token either way, so a `gh` token is not "safer"; a fine-grained personal access token is the option for users who want to limit Forge's access (specific repos, an expiry date).
+
+**Design:**
+
+1. The sign-in screen offers three ways: **Login with GitHub** (Helm's app, default), **Use GitHub CLI** (shown only when `gh` is found), **Use a token**.
+2. "Use GitHub CLI" lists `gh`'s signed-in accounts and copies the chosen one's token once (`gh auth token --user <login>`). From then on it is stored and used exactly like any other account (`helm://github.com/<login>`); `gh` is not called again. Cloning, push and pull never fall back to `gh`.
+3. Each account remembers how it was signed in (a `source` field in the settings entry: `oauth_app`, `gh_cli`, `token`), and the panel shows it ("via GitHub CLI").
+4. **Adding a scope** for a `gh_cli` account does not run Helm's device flow (that would swap in a Helm-app token and lose `gh`'s org approvals). It tells the user to run `gh auth refresh -s <scope>` and offers "Import again".
+5. At import the panel says once that `gh auth logout` does not sign Helm out; Helm's own "Sign out" does.
+6. A copied token can be revoked later by GitHub's per-app token limit after many `gh` logins. Handled by the existing 401 path: the stored token is deleted and the account shows "Sign in again".
+
+**Order:** after step 5. Self-contained: it touches only the sign-in screen and the account settings entry.

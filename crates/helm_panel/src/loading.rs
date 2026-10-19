@@ -29,9 +29,13 @@ impl HelmPanel {
         self.error_msg.clear();
         cx.notify();
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(fetch(gh_state)).await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 match result {
                     Ok(value) => {
                         store(this, value);

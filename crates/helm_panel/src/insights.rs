@@ -50,6 +50,7 @@ impl HelmPanel {
         self.secret_scanning_alerts.begin();
         cx.notify();
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let (dependabot, secret_scanning) = on_tokio(async move {
                 let owner = repo.owner.login;
@@ -64,6 +65,9 @@ impl HelmPanel {
             })
             .await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 // Neither list fails the screen: an alert type that is turned
                 // off, or that the token may not read, is shown as empty.
                 this.dependabot_alerts.finish(Ok(dependabot));

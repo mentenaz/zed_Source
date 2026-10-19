@@ -65,6 +65,33 @@ pub fn remember_account(login: &str, cx: &mut App) {
     });
 }
 
+/// Makes `login` the account workspaces use when they have not picked one.
+pub fn set_default_account(login: &str, cx: &mut App) {
+    let login = login.to_string();
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        settings.helm_panel.get_or_insert_default().default_account = Some(login);
+    });
+}
+
+/// Removes `login` from the `accounts` list, and from `default_account` if
+/// it is the default. The token is deleted separately ([`delete_token`]).
+pub fn forget_account(login: &str, cx: &mut App) {
+    let login = login.to_string();
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        let panel = settings.helm_panel.get_or_insert_default();
+        if let Some(accounts) = panel.accounts.as_mut() {
+            accounts.retain(|account| !account.login.eq_ignore_ascii_case(&login));
+        }
+        if panel
+            .default_account
+            .as_deref()
+            .is_some_and(|default| default.eq_ignore_ascii_case(&login))
+        {
+            panel.default_account = None;
+        }
+    });
+}
+
 /// Something that happened to one account, for every Helm panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HelmAccountEvent {
@@ -73,12 +100,16 @@ pub enum HelmAccountEvent {
     SignedIn { login: String },
     /// This login's token was deleted.
     SignedOut { login: String },
+    /// This login's token was deleted and the account taken off the list.
+    Removed { login: String },
 }
 
 impl HelmAccountEvent {
     pub fn login(&self) -> &str {
         match self {
-            HelmAccountEvent::SignedIn { login } | HelmAccountEvent::SignedOut { login } => login,
+            HelmAccountEvent::SignedIn { login }
+            | HelmAccountEvent::SignedOut { login }
+            | HelmAccountEvent::Removed { login } => login,
         }
     }
 }

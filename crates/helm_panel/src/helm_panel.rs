@@ -6,6 +6,7 @@
 //! `gpui_component` elements (`Button`, `list::ListItem`, `Icon`,
 //! `Spinner`) instead of the old `forge_ui` crate.
 
+mod account_switcher;
 mod accounts;
 mod activity;
 mod attach;
@@ -213,6 +214,9 @@ pub struct HelmPanel {
     /// The pasted-token field, and whether it is shown.
     token_input: Entity<InputState>,
     token_input_open: bool,
+    /// Set while "Add account" from the account menu is signing in, so
+    /// cancelling goes back to the account in use.
+    adding_account: bool,
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
@@ -442,6 +446,7 @@ impl HelmPanel {
                 sign_in_task: None,
                 token_input,
                 token_input_open: false,
+                adding_account: false,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",
@@ -517,7 +522,7 @@ impl HelmPanel {
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };
-            this.start_session(cx);
+            this.restore_account_and_start(cx);
             this
         })
     }
@@ -706,7 +711,8 @@ impl Render for HelmPanel {
                                     .text_sm()
                                     .text_color(cx.theme().foreground)
                                     .child("Helm"),
-                            ),
+                            )
+                            .children(self.render_account_menu(cx)),
                     )
                     .when(show_nav, |row| row.child(self.render_nav_bar(cx))),
             )

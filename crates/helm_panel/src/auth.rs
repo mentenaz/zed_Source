@@ -79,6 +79,7 @@ impl HelmPanel {
         self.active_login = Some(login.clone());
 
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let outcome = match read_token(&login, cx).await {
                 Err(error) => AuthOutcome::Failed(format!(
@@ -102,8 +103,13 @@ impl HelmPanel {
                     outcome
                 }
             };
-            this.update(cx, |this, cx| this.apply_auth_outcome(login, outcome, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                // Switched to another account while this one was checked.
+                if this.is_current_state(&started) {
+                    this.apply_auth_outcome(login, outcome, cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -172,26 +178,53 @@ impl HelmPanel {
                 self.start_session(cx);
             }
             HelmAccountEvent::SignedOut { .. } if ours => self.reset_session(cx),
+            // The account is gone: fall back to the default account, or the
+            // sign-in screen.
+            HelmAccountEvent::Removed { login } if ours => {
+                // The settings file may not have been reloaded yet, so the
+                // removed account can still be listed (even as default).
+                let settings = HelmPanelSettings::get_global(cx);
+                let remaining: Vec<&HelmAccount> = settings
+                    .accounts
+                    .iter()
+                    .filter(|account| !account.login.eq_ignore_ascii_case(login))
+                    .collect();
+                let fallback = settings
+                    .default_account()
+                    .filter(|account| !account.login.eq_ignore_ascii_case(login))
+                    .or(match remaining.as_slice() {
+                        [only] => Some(*only),
+                        _ => None,
+                    })
+                    .map(|account| account.login.clone());
+
+                self.drop_current_token(cx);
+                self.save_account_binding(None, cx);
+                let has_fallback = fallback.is_some();
+                self.use_account(fallback, cx);
+                if has_fallback {
+                    self.start_session(cx);
+                } else {
+                    self.auth_initialized = true;
+                    self.load_state = LoadState::Idle;
+                    cx.notify();
+                }
+            }
             _ => {}
         }
     }
 
     /// Forgets everything about the signed-in account and shows the
-    /// sign-in screen for it.
+    /// sign-in screen for it. The account stays this panel's.
     fn reset_session(&mut self, cx: &mut Context<Self>) {
-        let gh_state = self.gh_state.clone();
-        cx.background_spawn(async move { gh_state.set_token(None).await })
-            .detach();
-        self.account.clear();
-        self.scopes.clear();
-        self.org_logins.clear();
-        self.user = None;
+        self.drop_current_token(cx);
+        // Kept: a notice about why the account was signed out.
+        let notice = std::mem::take(&mut self.error_msg);
+        let login = self.active_login.clone();
+        self.use_account(login, cx);
+        self.error_msg = notice;
         self.auth_initialized = true;
-        self.pending_action = None;
-        self.back_stack.clear();
-        self.forward_stack.clear();
         self.load_state = LoadState::Idle;
-        self.screen = HelmScreen::Auth;
         cx.notify();
     }
 
@@ -338,17 +371,20 @@ impl HelmPanel {
             let stored = write_token(&login, &token, cx).await;
             this.update(cx, |this, cx| match stored {
                 Ok(()) => {
-                    // A different account than the one an action was parked
-                    // for must not re-send it.
-                    if this
+                    remember_account(&login, cx);
+                    // Signed in to an account this panel was not using (a
+                    // new account, or "Use a different account"): switch to
+                    // it with fresh state, so nothing of the previous
+                    // account, a parked action included, carries over.
+                    if !this
                         .active_login
                         .as_deref()
-                        .is_some_and(|active| !active.eq_ignore_ascii_case(&login))
+                        .is_some_and(|active| active.eq_ignore_ascii_case(&login))
                     {
-                        this.pending_action = None;
+                        this.use_account(Some(login.clone()), cx);
+                        this.save_account_binding(Some(&login), cx);
                     }
-                    remember_account(&login, cx);
-                    this.active_login = Some(login.clone());
+                    this.adding_account = false;
                     this.sign_in = SignIn::Idle;
                     HelmAccounts::emit(HelmAccountEvent::SignedIn { login }, cx);
                 }
@@ -369,6 +405,10 @@ impl HelmPanel {
     pub(super) fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
         self.sign_in_task = None;
         self.sign_in = SignIn::Idle;
+        // "Add account" was started from a working session: go back to it.
+        if std::mem::take(&mut self.adding_account) && self.user.is_some() {
+            self.set_screen(HelmScreen::Menu, cx);
+        }
         cx.notify();
     }
 
@@ -743,6 +783,38 @@ impl HelmPanel {
                         })),
                 ),
         };
+
+        let others: Vec<HelmAccount> = HelmPanelSettings::get_global(cx)
+            .accounts
+            .iter()
+            .filter(|account| {
+                !self
+                    .active_login
+                    .as_deref()
+                    .is_some_and(|login| login.eq_ignore_ascii_case(&account.login))
+            })
+            .cloned()
+            .collect();
+        if !others.is_empty() {
+            col = col.child(
+                div()
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child("Or use another account:"),
+            );
+            for (ix, account) in others.into_iter().enumerate() {
+                let label = format!("Switch to {}", account.display_name());
+                col = col.child(
+                    Button::new(("helm-switch-account", ix))
+                        .outline()
+                        .small()
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switch_account(account.login.clone(), cx)
+                        })),
+                );
+            }
+        }
 
         col = col.child(Separator::horizontal());
         col = if self.token_input_open {

@@ -61,12 +61,16 @@ impl HelmPanel {
         self.detail_comments.clear();
         cx.notify();
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let result = on_tokio(async move {
                 gh_list_issue_comments(repo.owner.login, repo.name, number, &gh_state).await
             })
             .await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 match result {
                     Ok(comments) => {
                         this.detail_comments = comments;

@@ -10,6 +10,7 @@ impl HelmPanel {
     /// previous state for that list in place.
     pub(super) fn load_repo_invitations(&mut self, cx: &mut Context<Self>) {
         let gh_state = self.gh_state.clone();
+        let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
             let (repo_result, org_result) = on_tokio(async move {
                 let repo_result = gh_get_repo_invitations(&gh_state).await;
@@ -18,6 +19,9 @@ impl HelmPanel {
             })
             .await;
             this.update(cx, |this, cx| {
+                if !this.is_current_state(&started) {
+                    return;
+                }
                 if let Ok(invitations) = repo_result {
                     this.invitations.items = invitations;
                 }

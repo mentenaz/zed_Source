@@ -18,4 +18,11 @@ pub use widgets::*;
 pub trait HelmView: Sized + 'static {
     fn gh_state(&self) -> &Arc<GhState>;
     fn repo(&self) -> Option<&Repo>;
+
+    /// Whether `started` is still the view's GitHub state. A view that
+    /// switches account gets a new state, so an answer fetched with the old
+    /// one belongs to the previous account and must be dropped.
+    fn is_current_state(&self, started: &Arc<GhState>) -> bool {
+        Arc::ptr_eq(self.gh_state(), started)
+    }
 }
