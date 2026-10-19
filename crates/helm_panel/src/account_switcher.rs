@@ -138,10 +138,16 @@ impl HelmPanel {
             .detach();
     }
 
+    /// The login this workspace's panel is signed in as, once the sign-in
+    /// has been checked. For other panels (the git panel) to show.
+    pub fn signed_in_login(&self) -> Option<&str> {
+        (!self.account.is_empty() && self.user.is_some()).then_some(self.account.as_str())
+    }
+
     /// Switches this workspace to `login`, which is already signed in (or
     /// shows its sign-in screen if its token is missing). Nothing is signed
     /// out.
-    pub(super) fn switch_account(&mut self, login: String, cx: &mut Context<Self>) {
+    pub fn switch_account(&mut self, login: String, cx: &mut Context<Self>) {
         self.cancel_sign_in(cx);
         self.use_account(Some(login.clone()), cx);
         self.save_account_binding(Some(&login), cx);

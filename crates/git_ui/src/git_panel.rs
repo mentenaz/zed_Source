@@ -1,3 +1,5 @@
+mod github_account;
+
 use git_ui_core::askpass_modal::AskPassModal;
 pub(crate) use git_ui_core::notifications::{open_output, show_error_toast};
 
@@ -1231,6 +1233,9 @@ pub struct GitPanel {
     history_keyboard_nav: bool,
     _commit_message_buffer_subscription: Option<Subscription>,
     _repo_subscriptions: Vec<Subscription>,
+    /// Re-renders when the Helm panel's account or repository access changes
+    /// (`github_account.rs`).
+    _helm_observation: Option<Subscription>,
     _settings_subscription: Subscription,
     git_access: Option<GitAccess>,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1569,6 +1574,7 @@ impl GitPanel {
                 history_keyboard_nav: false,
                 _commit_message_buffer_subscription: None,
                 _repo_subscriptions: Vec::new(),
+                _helm_observation: None,
                 _settings_subscription,
                 git_access: None,
                 commit_menu_handle: PopoverMenuHandle::default(),
@@ -6947,6 +6953,7 @@ impl GitPanel {
                 head_commit,
                 Some(git_panel),
             ))
+            .children(self.render_github_account(cx))
             .when(title_exceeds_limit, |this| {
                 this.child(
                     h_flex()
@@ -9648,6 +9655,7 @@ impl GitPanel {
 
 impl Render for GitPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.observe_helm_panel(cx);
         let project = self.project.read(cx);
         let has_entries = !self.entries.is_empty();
         let has_write_access = self.has_write_access(cx);

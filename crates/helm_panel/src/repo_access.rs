@@ -2,8 +2,8 @@
 //! repository, and if not, which other signed-in account can (section 11,
 //! item 1a of `helm_backend/octocrab-helm-coverage.md`).
 //!
-//! The repository comes from the active git repository's remote (upstream,
-//! else origin). The workspace's account is asked first; only if it cannot
+//! The repository comes from the remote the active git repository pushes
+//! to (`origin`, or `upstream` when the current branch tracks it). The workspace's account is asked first; only if it cannot
 //! push are the other signed-in accounts asked, each with its own token in
 //! a state of its own, so nothing is switched. When one can push, a toast
 //! offers to switch to it. The result is kept on the panel for the git
@@ -84,22 +84,32 @@ impl HelmPanel {
         ));
     }
 
-    /// The github.com repository of the workspace's active git repository.
+    /// The github.com repository the workspace's active git repository
+    /// pushes to: the remote its current branch tracks when that is
+    /// `upstream`, else `origin`. In a fork, `upstream` is usually the
+    /// original project, which the user cannot push to, so `origin` comes
+    /// first unless the branch really tracks `upstream`.
     fn workspace_github_remote(&self, cx: &App) -> Option<GitHubRemote> {
         let workspace = self.workspace.upgrade()?;
         let project = workspace.read(cx).project().read(cx);
         let repository = project.git_store().read(cx).active_repository()?;
         let repository = repository.read(cx);
-        repository
-            .remote_upstream_url
-            .as_deref()
+        let tracks_upstream = repository
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.upstream.as_ref())
+            .and_then(|upstream| upstream.remote_name())
+            == Some("upstream");
+        let origin = repository.remote_origin_url.as_deref();
+        let upstream = repository.remote_upstream_url.as_deref();
+        let (first, second) = if tracks_upstream {
+            (upstream, origin)
+        } else {
+            (origin, upstream)
+        };
+        first
             .and_then(parse_github_remote)
-            .or_else(|| {
-                repository
-                    .remote_origin_url
-                    .as_deref()
-                    .and_then(parse_github_remote)
-            })
+            .or_else(|| second.and_then(parse_github_remote))
     }
 
     /// Checks whether the workspace's account can push to the workspace's
