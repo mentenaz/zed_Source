@@ -60,10 +60,222 @@ impl HelmPanel {
         }));
     }
 
+    /// Signs the GitHub CLI in to another account in the browser, showing
+    /// `gh`'s one-time code, then imports that account. `gh`'s previously
+    /// active account is made active again, so git keeps pushing as it did.
+    pub(super) fn start_gh_cli_sign_in(&mut self, cx: &mut Context<Self>) {
+        let (canceller, cancel_signal) = gh_cli_sign_in_canceller();
+        self.gh_cli_login = Some(GhCliLogin {
+            code: None,
+            url: None,
+            error: None,
+            canceller: Some(canceller),
+        });
+        self.code_copied = false;
+        cx.notify();
+
+        let (output, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let (line, rest) = on_tokio(async move { (lines.recv().await, lines) }).await;
+                lines = rest;
+                let Some(line) = line else {
+                    break;
+                };
+                let (code, url) = parse_device_prompt(&line);
+                if code.is_none() && url.is_none() {
+                    continue;
+                }
+                let alive = this.update(cx, |this, cx| {
+                    if let Some(login) = this.gh_cli_login.as_mut() {
+                        if code.is_some() {
+                            login.code = code;
+                        }
+                        if url.is_some() {
+                            login.url = url;
+                        }
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let result = on_tokio(gh_cli_sign_in(output, cancel_signal)).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(signed_in) => {
+                        this.gh_cli_login = None;
+                        match (&signed_in.previous_active, signed_in.switched_back) {
+                            (Some(previous), true) => this.notify(
+                                format!(
+                                    "Signed the GitHub CLI in to {}. Its active account is still {previous}.",
+                                    signed_in.login
+                                ),
+                                cx,
+                            ),
+                            (Some(previous), false) => this.notify(
+                                format!(
+                                    "Signed the GitHub CLI in to {}, which is now its active account. Run `gh auth switch --user {previous}` to switch back.",
+                                    signed_in.login
+                                ),
+                                cx,
+                            ),
+                            (None, _) => {}
+                        }
+                        this.check_gh_cli(true, cx);
+                        this.import_from_gh_cli(signed_in.login, cx);
+                    }
+                    Err(GhCliSignInFailure::Cancelled) => this.gh_cli_login = None,
+                    Err(GhCliSignInFailure::Failed(error)) => {
+                        if let Some(login) = this.gh_cli_login.as_mut() {
+                            login.error = Some(error);
+                            login.canceller = None;
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Stops signing `gh` in; `gh`'s accounts stay as they were.
+    pub(super) fn cancel_gh_cli_sign_in(&mut self, cx: &mut Context<Self>) {
+        match self.gh_cli_login.as_mut().and_then(|login| login.canceller.take()) {
+            Some(canceller) => canceller.cancel(),
+            // Finished with an error: just close it.
+            None => self.gh_cli_login = None,
+        }
+        cx.notify();
+    }
+
+    /// Signing `gh` in: the code and link while it waits, or why it failed.
+    fn render_gh_cli_login(&self, login: &GhCliLogin, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let muted_foreground = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
+        let mut col = v_flex()
+            .gap_2()
+            .child(div().text_color(foreground).child("Sign in to the GitHub CLI"))
+            .child(div().text_xs().text_color(muted_foreground).child(
+                "This signs the GitHub CLI (gh) in to an account, then imports it into Helm. \
+                 The token belongs to the GitHub CLI's app.",
+            ));
+
+        if let Some(error) = &login.error {
+            return col
+                .child(Alert::error("helm-gh-login-error", error.clone()))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("helm-gh-login-retry")
+                                .outline()
+                                .small()
+                                .label("Try again")
+                                .on_click(cx.listener(|this, _, _, cx| this.start_gh_cli_sign_in(cx))),
+                        )
+                        .child(
+                            Button::new("helm-gh-login-close")
+                                .ghost()
+                                .small()
+                                .label("Close")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_gh_cli_sign_in(cx)),
+                                ),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        col = match &login.code {
+            Some(code) => {
+                let copied = self.code_copied;
+                let code_to_copy = code.clone();
+                col.child(div().text_xs().text_color(muted_foreground).child("Your one-time code"))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family("Cascadia Mono")
+                                    .text_lg()
+                                    .text_color(foreground)
+                                    .child(code.clone()),
+                            )
+                            .child(
+                                Button::new("helm-gh-login-copy")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(if copied { IconName::Check } else { IconName::Copy })
+                                    .tooltip(if copied { "Copied" } else { "Copy code" })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            code_to_copy.clone(),
+                                        ));
+                                        this.code_copied = true;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+            }
+            None => col.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Spinner::new().small())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .child("Waiting for the GitHub CLI's code…"),
+                    ),
+            ),
+        };
+
+        let url = login
+            .url
+            .clone()
+            .unwrap_or_else(|| "https://github.com/login/device".to_string());
+        col.child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("helm-gh-login-open")
+                        .outline()
+                        .small()
+                        .icon(IconName::Github)
+                        .label("Open")
+                        .tooltip(url.clone())
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+                .child(
+                    Button::new("helm-gh-login-cancel")
+                        .ghost()
+                        .small()
+                        .label("Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_gh_cli_sign_in(cx))),
+                ),
+        )
+        .child(div().text_xs().text_color(muted_foreground).child(
+            "Enter the code on GitHub, signed in as the account you want to add, then return here.",
+        ))
+        .into_any_element()
+    }
+
     /// The "Use GitHub CLI" button, or the list of `gh`'s accounts once it
     /// is open. Nothing when `gh` is not installed.
     pub(super) fn render_gh_cli_option(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let muted_foreground = cx.theme().muted_foreground;
+        if let Some(login) = &self.gh_cli_login {
+            return Some(self.render_gh_cli_login(login, cx));
+        }
         if !self.gh_cli_picker_open {
             return match &self.gh_cli {
                 GhCliState::Listed(_) | GhCliState::Failed(_) => Some(
@@ -117,10 +329,12 @@ impl HelmPanel {
                 col = col.child(Alert::error("helm-gh-cli-error", error.clone()));
             }
             GhCliState::Listed(accounts) if accounts.is_empty() => {
-                col = col.child(div().text_sm().text_color(muted_foreground).child(
-                    "The GitHub CLI is not signed in to any github.com account. Run \
-                     `gh auth login` first.",
-                ));
+                col = col.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted_foreground)
+                        .child("The GitHub CLI is not signed in to any github.com account."),
+                );
             }
             GhCliState::Listed(accounts) => {
                 let settings = HelmPanelSettings::get_global(cx);
@@ -165,6 +379,15 @@ impl HelmPanel {
                     );
                 }
             }
+        }
+        if matches!(self.gh_cli, GhCliState::Listed(_)) {
+            col = col.child(
+                Button::new("helm-gh-cli-sign-in")
+                    .ghost()
+                    .small()
+                    .label("Account not listed? Sign it in to the GitHub CLI")
+                    .on_click(cx.listener(|this, _, _, cx| this.start_gh_cli_sign_in(cx))),
+            );
         }
         Some(col.child(close).into_any_element())
     }

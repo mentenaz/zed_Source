@@ -334,7 +334,7 @@ Build the storage and the per-workspace client as account-aware from the start, 
 
 ---
 
-## 11. Git follows the workspace's account (agreed need, 19 Oct; design not final)
+## 11. Git follows the workspace's account (agreed 19 Oct; items 1a and 4 added the same day)
 
 **Why:** the user works with two unrelated GitHub logins: `mentenaz` (personal, `mentenaz@outlook.de`) and a separate Sencorp login (`francoish@sencorpdigital.com`). Today three different things decide "who you are", and only the first follows Helm's sign-in:
 
@@ -349,14 +349,32 @@ Build the storage and the per-workspace client as account-aware from the start, 
 ### Design
 
 1. **Which account a repo uses.** The workspace binding from section 10. The optional rule table there becomes the default: a repo whose `origin` owner is an account's login, or one of that account's organisations, uses that account. The binding overrides the rule.
-2. **Commit identity: per repo, written to that repo's `.git/config`** (`user.name`, `user.email`), never to the global config. It then also applies to commits made from a terminal or another tool. Written when Helm clones a repo and when a workspace is bound to an account, and only after asking if the repo already has a different local identity. Per account, the identity is stored in settings next to the login (`git_name`, `git_email`), defaulting to the GitHub name and primary verified email (`GET /user/emails`, covered by the `user` scope); the user can pick the `noreply` address instead.
+1a. **Suggest the account that can push (agreed 19 Oct).** When a workspace opens, Helm reads its git remote; for a github.com repository it asks `GET /repos/<owner>/<repo>` with the workspace's account. If that account cannot see the repository (404), or can see it but `permissions.push` is false, Helm asks the same with each other signed-in account's token, in the background, switching nothing. If another account can push, a workspace toast offers it: *"This repository is accessible to B, not A."* **[Switch to B]** **[Not now]**. Switching is the existing account switch, so the workspace remembers it.
+   - *Push, not read:* every account can read a public repository, so the check is which account can push.
+   - *When:* once when the workspace opens, and again after a failure (a Helm action rejected with 403/404, or a push from the git panel or terminal once items 3 and 4 exist). The answer is remembered for the session, so it costs a request per account once, not per request.
+   - *"Not now"* stops it asking again for that workspace. A possible extra is "Always use B for `<owner>/*`", which is item 1's owner rule set from the toast.
+   - *No account has access:* no toast. A 404 also means "does not exist", which cannot be told apart.
+   - It also covers an organisation that has approved one app and not the other: an account imported from `gh` that can see a repository Helm's own token cannot (section 7, item 6) is suggested.
+1b. **The git panel shows the account and acts on 1a (agreed 19 Oct).** For a workspace whose repository has a github.com HTTPS remote, the git panel shows which GitHub account the workspace uses, with the same switch as Helm's header (one menu of the signed-in accounts).
+   - *When 1a finds the account cannot push,* the git panel shows a warning line above the commit area: *"mentenaz can't push to owner/repo."* with **[Switch to B]** when another account can, as a single button. Switching is the same account switch as in Helm, so both panels follow it.
+   - *Disabled while the account cannot do it, to avoid git's own error messages, which often do not say that the account is the problem:* **Push** (and **Publish branch**) when it cannot push; **Pull** and **Fetch** as well when it cannot even see the repository (404); and the combined **Commit & Push**. Each disabled button's tooltip says why and which account can.
+   - *Plain Commit stays enabled* with the warning above it: a commit is local, never contacts GitHub and cannot fail for this reason, and disabling it would block committing offline or before switching. (Discussed 19 Oct; the user had asked for Commit to be disabled too. Recorded here so it can be revisited.)
+   - *Only when Helm knows.* Buttons are disabled only after 1a's check answered for this remote and account. Unknown (offline, not signed in to Helm, the check still running, a remote that is not github.com) leaves everything as it is today. **SSH remotes** (`git@github.com:`) are never disabled: SSH keys, not the Helm account, decide access there.
+   - *Re-checked* after a switch, after a push or pull fails, and when the remote changes.
+   - *Where it lives:* the git panel already reaches the Helm panel (`crates/git_ui/src/git_panel.rs`, around line 4711, for "Using Helm"). Helm would expose the workspace's account and the access result (for example `HelmPanel::repo_access(cx)` and an event when it changes), and the git panel reads it when rendering its buttons.
+2. **Commit identity: per repo, written to that repo's `.git/config`** (`user.name`, `user.email`), never to the global config. It then also applies to commits made from a terminal or another tool. Written when Helm clones a repo and when a workspace is bound to an account, and only after asking if the repo already has a different local identity. Per account, the identity is stored in settings next to the login (`git_name`, `git_email`), defaulting to the GitHub name and primary verified email (`GET /user/emails`, covered by the `user` scope); the user can pick the `noreply` address instead. An account whose token lacks `user` (the Sencorp login's `gh` token has `gist, read:org, repo, workflow`) cannot read its emails, so the email is asked for, or the `noreply` address used. Because git reads `.git/config` at every commit, terminals that are already open follow a switch at once.
 3. **Push / pull / fetch from Zed's git panel: the token through env config, as for the clone (section 3).** `run_git_command` (`crates/git/src/repository.rs:4175`) already passes `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` (for its GPG wrapper, only when the env has no `GIT_CONFIG_COUNT`). For github.com HTTPS remotes, Forge adds: an empty `credential.https://github.com.helper` (so `gh` / Git Credential Manager are not asked) and `http.https://github.com/.extraHeader` with the account's token. The GPG wrapper entry has to be merged into the same numbered list instead of being skipped. To check: where the per-call `env` comes from, so the workspace's account can be looked up there, and that `extraHeader` works for push over HTTPS (it does for fetch and clone).
-4. **Git in the integrated terminal: not covered by item 3.** Putting the token in the terminal's environment would expose it to every program run there. Options for later: a Forge credential helper (`zeddev --git-credential`) configured per repo, or leave the terminal on the global helper. Undecided.
+4. **Git in the integrated terminal (decided 19 Oct): through `ide_env` and a Forge credential helper.** The same idea as the per-workspace Node.js (`ide_env`, commits `b4363b6a28` and `8add55c506`): a provider registers what a workspace's new processes get, and terminals, the Script Runner and workflows ask for it. `ide_env` today only carries folders for PATH; it gains environment variables. For a workspace, Helm registers `GIT_CONFIG_*` entries that clear git's github.com credential helpers (`gh auth git-credential`, Git Credential Manager) and set Forge's own helper instead.
+   - *The token is never in the terminal's environment,* so programs run there cannot read it. The helper is a `zeddev.exe` subcommand that git starts when it needs to log in; it asks the running Forge for the workspace's token.
+   - *It looks the account up when git asks,* not when the terminal opens, so an open terminal follows an account switch at its next `git push`. This is the counterpart of Node's re-pointed link.
+   - *To work out:* how the helper reaches the running app. Zed's git panel already has a channel of this kind (its askpass socket, `ZED_ASKPASS_SOCKET`), which may be reusable. Also: the helper must answer only for `github.com` and only for this workspace's account.
+   - *`gh` commands in the terminal* (`gh pr create` and so on) only take a per-terminal account through `GH_TOKEN`, which would put the token in the environment. An opt-in setting, off by default.
+   - *Remote and WSL terminals* are left alone, as `ide_env` does for Node.
 5. **SSH remotes** (`git@github.com:`) use SSH keys, not tokens; out of scope.
 
 ### Order
 
-After step 5 (clone with `git`) and the account switcher with per-workspace binding (section 10), since every part here needs to know the workspace's account.
+Step 5 and the account switcher with per-workspace binding (section 10) are done, so this can start. Suggested order inside it: 1a (it only reads, and decides which account the rest follows), then 1b, then 2, then 3, then 4 (the most design work).
 
 ---
 
@@ -374,6 +392,8 @@ After step 5 (clone with `git`) and the account switcher with per-workspace bind
 4. **Adding a scope** for a `gh_cli` account does not run Helm's device flow (that would swap in a Helm-app token and lose `gh`'s org approvals). It tells the user to run `gh auth refresh -s <scope>` and offers "Import again".
 5. At import the panel says once that `gh auth logout` does not sign Helm out; Helm's own "Sign out" does.
 6. A copied token can be revoked later by GitHub's per-app token limit after many `gh` logins. Handled by the existing 401 path: the stored token is deleted and the account shows "Sign in again".
+
+**12b (decided 19 Oct): signing `gh` in from Helm.** Under the GitHub CLI list, "Account not listed? Sign it in to the GitHub CLI" runs `gh auth login --hostname github.com --git-protocol https --web --scopes repo,read:org,user` with no stdin, shows the code and link it prints (read from its text output, `parse_device_prompt`; there is no JSON form), then imports the account. `gh auth login` makes the new account `gh`'s active one, which changes who every `git push` goes out as when git's github.com helper is `gh`; so `gh`'s previously active account is switched back with `gh auth switch`, and the panel says so (or says how to switch back if that failed). Cancel kills `gh`. Built in `helm_backend/src/github/gh_cli.rs` (`gh_cli_sign_in`) and `helm_panel/src/gh_cli_import.rs`. Tested 19 Oct: the Sencorp login was signed in to `gh` from Helm and imported, and `gh` was left with mentenaz active.
 
 **Order:** after step 5. Self-contained: it touches only the sign-in screen and the account settings entry.
 

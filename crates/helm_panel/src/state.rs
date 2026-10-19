@@ -106,6 +106,18 @@ pub(super) enum SignIn {
     },
 }
 
+/// Signing the GitHub CLI in to another account from Helm
+/// (`gh auth login --web`), while it runs or after it failed.
+pub(super) struct GhCliLogin {
+    /// The one-time code and link `gh` printed, once it has.
+    pub(super) code: Option<String>,
+    pub(super) url: Option<String>,
+    /// Why it failed; `None` while it runs.
+    pub(super) error: Option<String>,
+    /// Stops `gh`. `None` once it has finished.
+    pub(super) canceller: Option<GhCliSignInCanceller>,
+}
+
 /// What the panel knows about the GitHub CLI, for the "Use GitHub CLI"
 /// sign-in. Checked only when a sign-in screen is shown.
 pub(super) enum GhCliState {

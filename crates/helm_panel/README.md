@@ -31,7 +31,11 @@ Open with `ctrl-k h` (`cmd-k h` on macOS), the status bar icon (tooltip
    `user`; a fine-grained one limits Helm to the repositories you choose).
    **Use GitHub CLI** (shown only when `gh` is installed) copies one of the
    GitHub CLI's accounts' token once; Helm keeps its own copy and does not
-   run `gh` again for it. Helm checks that the token has the `repo` scope
+   run `gh` again for it. An account `gh` does not have yet can be signed in
+   to `gh` from there ("Account not listed?"): Helm runs
+   `gh auth login --web`, shows its code, imports the account, and switches
+   `gh` back to the account that was active before, so git keeps pushing as
+   it did. Helm checks that the token has the `repo` scope
    and prompts for it if missing.
 2. **Menu** — your profile summary and the main sections.
 

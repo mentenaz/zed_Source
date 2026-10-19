@@ -24,7 +24,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "sync"] }
 ui.workspace = true
 workspace.workspace = true
 zed_credentials_provider.workspace = true

@@ -42,7 +42,10 @@ pub use api::{
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
 pub use clone::{CloneCancelSignal, CloneCanceller, CloneFailure, clone_canceller, clone_repo};
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
-pub use gh_cli::{GhCliAccount, gh_cli_accounts, gh_cli_token};
+pub use gh_cli::{
+    GhCliAccount, GhCliSignInCancelSignal, GhCliSignInCanceller, GhCliSignInFailure, GhCliSignedIn,
+    gh_cli_accounts, gh_cli_sign_in, gh_cli_sign_in_canceller, gh_cli_token, parse_device_prompt,
+};
 pub use oauth::{
     DeviceFlow, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, poll_for_token,
     request_device_code,
