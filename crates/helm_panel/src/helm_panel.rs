@@ -68,11 +68,11 @@ use attach::{CreateRepoAttach, DEFAULT_COMMIT_MESSAGE};
 use changes::*;
 use collaborators::*;
 use helm_backend::github::{
-    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
+    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
     GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, OrgMember, Package,
     PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
     WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
-    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, gh_add_collaborator, gh_clone_repo,
+    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, clone_canceller, clone_repo, gh_add_collaborator,
     gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
     gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
@@ -291,6 +291,11 @@ pub struct HelmPanel {
     clone_url_copied: bool,
     cloning: bool,
     clone_lines: Vec<String>,
+    /// git's progress line ("Receiving objects: 42%"), which it rewrites in
+    /// place; shown under `clone_lines` and replaced by each update.
+    clone_progress: Option<String>,
+    /// Stops the running clone. `Some` while `cloning`.
+    clone_canceller: Option<CloneCanceller>,
     clone_error: Option<String>,
     /// Set on a successful clone, to the path it landed at — drives the
     /// `HelmModalKind::CloneRepo` modal's "Would you like to open that
@@ -479,6 +484,8 @@ impl HelmPanel {
                 clone_url_copied: false,
                 cloning: false,
                 clone_lines: Vec::new(),
+                clone_progress: None,
+                clone_canceller: None,
                 clone_error: None,
                 clone_succeeded_path: None,
                 clone_file_to_open: None,

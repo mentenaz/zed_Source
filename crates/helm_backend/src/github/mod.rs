@@ -1,14 +1,14 @@
 //! GitHub (Helm) backend — ported from `github.rs`.
 //!
 //! Split into single-purpose submodules:
-//! - `mod`: types, `GhState`, `gh_cmd` helper
+//! - `mod`: the public surface
 //! - `oauth`: signing in with the OAuth device flow
 //! - `api`: REST API fetch helpers + endpoint functions
 //! - `requests`: what each endpoint asks for, as data (method, path, body)
 //! - `cache`: remembered answers (`ETag`s) and the rate limit
 //! - `paging`: one page of a list, and reading the `Link` header
 //! - `error`: `GhError`, and turning an HTTP answer into a value or an error
-//! - `clone`: `gh repo clone` with streaming (event-log) output
+//! - `clone`: `git clone` with the account's token, streaming its output
 
 mod api;
 mod cache;
@@ -38,7 +38,7 @@ pub use api::{
     gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
 };
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
-pub use clone::gh_clone_repo;
+pub use clone::{CloneCancelSignal, CloneCanceller, CloneFailure, clone_canceller, clone_repo};
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
 pub use oauth::{
     DeviceFlow, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, poll_for_token,
@@ -57,16 +57,3 @@ pub use types::{
     TreeLoadResult, TreeNode, WorkflowJob, WorkflowRun, build_tree, classify_file,
     classify_ref_movement,
 };
-
-/// Returns a `gh` Command with CREATE_NO_WINDOW set on Windows so no external
-/// console flashes. Only cloning still uses `gh`.
-pub fn gh_cmd() -> tokio::process::Command {
-    #[cfg_attr(
-        not(target_os = "windows"),
-        expect(unused_mut, reason = "only the Windows creation flag changes it")
-    )]
-    let mut c = tokio::process::Command::new("gh");
-    #[cfg(target_os = "windows")]
-    c.creation_flags(0x0800_0000);
-    c
-}

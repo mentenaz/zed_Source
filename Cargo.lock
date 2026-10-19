@@ -9214,6 +9214,7 @@ dependencies = [
  "base64 0.22.1",
  "futures 0.3.34",
  "http_client",
+ "log",
  "reqwest_client",
  "serde",
  "serde_json",

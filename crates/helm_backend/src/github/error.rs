@@ -16,8 +16,6 @@ use serde::de::DeserializeOwned;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GhError {
-    /// `gh` could not be run, or would not hand over a token.
-    Cli(String),
     /// The request never got an answer: no connection, a timeout, DNS.
     Network(String),
     /// 401. GitHub no longer accepts the token.
@@ -83,7 +81,6 @@ impl GhError {
             GhError::Validation { .. } => Some(422),
             GhError::Status { status, .. } => Some(*status),
             GhError::RateLimited { .. }
-            | GhError::Cli(_)
             | GhError::Network(_)
             | GhError::Parse(_)
             | GhError::Other(_) => None,
@@ -118,7 +115,7 @@ pub fn rate_limit_message(reset_at: Option<u64>, retry_after: Option<u64>, now: 
 impl fmt::Display for GhError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GhError::Cli(message) | GhError::Other(message) => write!(f, "{message}"),
+            GhError::Other(message) => write!(f, "{message}"),
             GhError::Network(message) => write!(f, "Network error: {message}"),
             GhError::Unauthorized { message } => write!(f, "GitHub API 401: {message}"),
             GhError::Forbidden { message } => write!(f, "GitHub API 403: {message}"),
@@ -403,7 +400,6 @@ mod tests {
         assert!(!error(422).is_permission());
         assert!(!error(500).is_permission());
         assert!(!GhError::Network("timed out".into()).is_permission());
-        assert!(!GhError::Cli("gh auth token failed: GitHub API 403".into()).is_permission());
     }
 
     #[test]

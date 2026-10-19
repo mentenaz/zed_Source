@@ -1,7 +1,9 @@
-//! Asks GitHub who you are, using the `gh` CLI's existing sign-in — a way to
-//! try the backend against the real API from a terminal, with no editor
-//! involved. Read-only: it changes nothing on GitHub.
+//! Asks GitHub who you are, with the token in the `GITHUB_TOKEN` environment
+//! variable — a way to try the backend against the real API from a
+//! terminal, with no editor involved. Read-only: it changes nothing on
+//! GitHub.
 //!
+//!     $env:GITHUB_TOKEN = gh auth token    # or a personal access token
 //!     cargo run -p helm_backend --example whoami
 
 use std::sync::Arc;
@@ -15,9 +17,14 @@ fn main() -> Result<(), String> {
     let http = reqwest_client::ReqwestClient::user_agent("helm-backend-example")
         .map_err(|error| error.to_string())?;
     let state = GhState::new(Arc::new(http));
+    let token = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or("Set GITHUB_TOKEN to a GitHub token first.")?;
 
     reqwest_client::runtime()
         .block_on(async {
+            state.set_token(Some(token.trim().to_string())).await;
             let user = gh_get_current_user(&state).await?;
             println!("signed in as {}", user.login);
 

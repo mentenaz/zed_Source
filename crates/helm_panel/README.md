@@ -12,9 +12,11 @@ place of the old `forge_ui` crate.
 
 ## Requirements
 
-The [GitHub CLI](https://cli.github.com/) (`gh`) must be installed and on
-PATH. Helm uses it for sign-in and for the access token; it does not handle
-credentials itself.
+A GitHub account, and `git` on PATH for cloning. The GitHub CLI is not
+needed: Helm signs in through its own OAuth App ("Helm for Forge") and keeps
+each account's token in the system credential store (Windows Credential
+Manager on Windows), under `helm://github.com/<login>`. Tokens are never
+written to `settings.json`.
 
 ## Using it
 
@@ -23,11 +25,31 @@ Open with `ctrl-k h` (`cmd-k h` on macOS), the status bar icon (tooltip
 
 ### First run
 
-1. **Gate** — Helm checks that `gh` is available.
-2. **Auth** — if you are not signed in, start the `gh` login from here. Helm
-   also checks that the token has the `repo` scope and prompts for it if
+1. **Auth** — **Login with GitHub** shows a one-time code and a link; enter
+   the code on GitHub and Helm signs in. **Use a token instead** takes a
+   personal access token (a classic one needs `repo`, `read:org` and
+   `user`; a fine-grained one limits Helm to the repositories you choose).
+   Helm checks that the token has the `repo` scope and prompts for it if
    missing.
-3. **Menu** — your profile summary and the main sections.
+2. **Menu** — your profile summary and the main sections.
+
+An organisation that restricts third-party apps does not show up, and its
+private repositories cannot be seen, until its owners approve Helm. The
+sign-in screen links to Helm's page in your GitHub settings, where you can
+request that.
+
+### Accounts
+
+You can sign in to several GitHub accounts. The account button next to
+"Helm" in the panel header switches between them without signing out, adds
+an account, makes one the default, signs out of one (its token is deleted;
+it stays listed) or removes it.
+
+Each workspace remembers which account it uses; a workspace that never
+chose one uses the default account. The list of accounts is
+`helm_panel.accounts` in settings, and the default is
+`helm_panel.default_account`; the tokens are only in the credential store,
+so an account listed on a machine without its token shows "Sign in as …".
 
 ### What you can do
 
@@ -74,8 +96,8 @@ A refusal is handled as described below.
 
 Every change Helm sends — creating or editing a repository, pull requests,
 releases, collaborators, invitations, your profile — goes through one path.
-If GitHub rejects one with a permission error, Helm checks `gh auth status`
-to see whether your login has the scope that action needs:
+If GitHub rejects one with a permission error, Helm checks the scopes GitHub
+reported for the token to see whether it has the scope that action needs:
 
 | Action | Scope |
 | --- | --- |
@@ -84,21 +106,32 @@ to see whether your login has the scope that action needs:
 | Organisation invitations | `write:org` |
 
 - **Scope missing:** Helm switches to the auth screen with an
-  "Authorize <scope> scope" prompt. The button runs
-  `gh auth refresh -s <scope> --hostname github.com` and shows the device
-  code and link. Once you have authorized, Helm returns you to the screen
-  you were on and sends the change again. It retries once; a second
-  rejection is reported as a normal failure.
-- **Scope present:** you get a "Failed to …" notification. Your account
-  lacks rights on that resource, or the organisation blocks the change, and
-  re-authorizing cannot fix that.
+  "Authorize <scope> scope" prompt. The button signs in again for the same
+  account, asking for that scope on top of the ones it has, and shows the
+  code and link. If the browser signs in a different account, Helm stores
+  nothing and offers to try again or add that account instead. Once you
+  have authorized, Helm returns you to the screen you were on and sends the
+  change again. It retries once; a second rejection is reported as a normal
+  failure.
+- **Scope present, or not reported:** you get a "Failed to …"
+  notification. Your account lacks rights on that resource, or the
+  organisation blocks the change, and re-authorizing cannot fix that.
+  Fine-grained tokens do not report scopes, so for them every rejection is
+  reported this way.
 - **No longer signed in:** you get the login prompt, and the change is sent
   again after you sign in.
 
 ### Cloning
 
-**Clone** runs `gh repo clone` and streams its output to a progress screen.
-It can then run `npm install` in the cloned folder as a second phase.
+**Clone** runs `git clone` as the account the window uses and streams its
+output to a progress screen, then opens the clone as a new workspace. The
+token is handed to `git` for that one command and is not stored in the
+clone. **Cancel** stops the clone and removes the half-cloned folder.
+
+Helm does not install dependencies itself: when the new workspace has a
+`package.json` and no `node_modules`, it offers `npm install`. Pushing and
+pulling in the clone later use git's own credential helper (Git Credential
+Manager, or `gh` if you set that up), not Helm's token.
 
 ### Pages
 
@@ -162,7 +195,9 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/loading.rs` | The shared loader for screens that show one thing, not a list |
 | `src/state.rs` | Which screen is showing, load state, menu rows |
 | `src/navigation.rs` | Switching screens, back and forward, the navigation bar |
-| `src/auth.rs` | The `gh` check, sign-in, scope authorization, sign-out, and the gate and auth screens |
+| `src/auth.rs` | Sign-in (device flow or pasted token), scope authorization, sign-out, and the auth screen |
+| `src/accounts.rs` | Tokens in the credential store, the account list in settings, and the event that tells every panel when an account signs in or out |
+| `src/account_switcher.rs` | The account menu, switching account, and each workspace's remembered account |
 | `src/changes.rs` | `HelmAction` and `run_action`: the one path every change to GitHub goes through |
 | `src/profile.rs` | Your profile and menu, the identity header, other users' profiles, edit profile |
 | `src/orgs.rs` | Organisation list and detail |
@@ -180,8 +215,8 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/workflow_run_tab.rs` | A workflow run as its own tab, with its jobs as a graph |
 | `src/widgets.rs` | Small shared helpers |
 
-The GitHub code itself (sign-in through `gh`, the REST endpoints, cloning,
-the response types) is in [`helm_backend`](../helm_backend/README.md).
+The GitHub code itself (the device flow, the REST endpoints, cloning, the
+response types) is in [`helm_backend`](../helm_backend/README.md).
 
 ### How requests work
 
@@ -192,8 +227,13 @@ executor. In practice a screen never does that by hand: list screens load
 through `load_section` (`section.rs`) and the others through `load_with`
 (`loading.rs`).
 
-Streaming operations (login, clone) broadcast each output line through
-channels on `GhState`, which the progress screens subscribe to.
+A clone broadcasts each output line through a channel on `GhState`, which
+the progress screen subscribes to.
+
+Switching account gives the panel a new `GhState`. Every loader checks,
+when its answer arrives, that the panel still has the state it started with
+(`HelmView::is_current_state`), and drops the answer otherwise, so one
+account's data never appears under another's.
 
 To add a list screen: add the endpoint and its response type in
 `helm_backend`, a `Section` field on the panel, a loader, a row function, an

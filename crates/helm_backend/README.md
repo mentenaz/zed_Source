@@ -1,7 +1,7 @@
 # helm_backend
 
-The GitHub side of Helm: signing in through the `gh` CLI, calling the REST
-API, and cloning repositories. No UI.
+The GitHub side of Helm: signing in with Helm's own OAuth App (device flow),
+calling the REST API, and cloning repositories with `git`. No UI.
 
 ## Why it exists
 
@@ -14,17 +14,19 @@ This is phase C of `crates/helm_panel/Helm_Refactor_Plan.md`.
 
 ## Requirements
 
-The [GitHub CLI](https://cli.github.com/) (`gh`) must be installed and on
-PATH. This crate uses it to sign in and to get the access token; it does not
-handle credentials itself.
+`git` on PATH, for cloning (Zed's own git features need it anyway on Windows
+and Linux). The GitHub CLI is not needed. This crate does not store tokens:
+the host keeps them (Helm uses the system credential store) and hands the
+one to use to `GhState::set_token`.
 
 ## Trying it
 
 ```sh
-cargo run -p helm_backend --example whoami -j 8
+GITHUB_TOKEN=<a token> cargo run -p helm_backend --example whoami -j 8
 ```
 
-It uses the `gh` CLI's existing sign-in and only reads:
+It uses the token in `GITHUB_TOKEN` (`gh auth token` prints one, if you use
+the GitHub CLI) and only reads:
 
 ```text
 signed in as mentenaz
@@ -53,16 +55,21 @@ let gh_state = Arc::new(GhState::new(cx.http_client()));
 let repos = on_tokio(async move { gh_get_repos("self".into(), &gh_state).await }).await?;
 ```
 
-The functions are `async` and still need a tokio runtime, because the `gh`
-child processes do; a GPUI host awaits them through
+The functions are `async` and still need a tokio runtime, because the HTTP
+client and the `git` child process do; a GPUI host awaits them through
 `helm_backend::on_tokio`.
 
-`GhState` also holds the cached token, the API base URL, and two broadcast
-channels that the streaming operations (sign-in, clone) report progress on.
+`GhState` also holds the token (set with `set_token`), the scopes GitHub last
+reported for it (`token_scopes`, from `X-OAuth-Scopes`), the API base URL,
+and the broadcast channel a clone reports its output on.
+
+Signing in is `request_device_code` and then `poll_for_token`, repeated at
+the interval GitHub gives, in `oauth.rs`. The host does the waiting between
+polls, so dropping its task cancels the sign-in.
 
 | Area | Functions |
 | --- | --- |
-| Sign-in | `gh_check_cli`, `gh_auth_status`, `gh_login`, `gh_ensure_scope`, `gh_logout` |
+| Sign-in | `request_device_code`, `poll_for_token` (`HELM_OAUTH_CLIENT_ID`, `HELM_OAUTH_SCOPES`) |
 | Account | `gh_get_current_user`, `gh_get_user`, `gh_update_user`, `gh_get_org_logins`, `gh_get_org_detail` |
 | Repositories | `gh_get_repos`, `gh_get_repo`, `gh_create_repo`, `gh_update_repo`, `gh_update_topics`, `gh_get_branches`, `gh_list_tags`, `gh_list_recent_commits` |
 | Collaboration | `gh_list_issues`, `gh_list_pulls`, `gh_list_issue_comments`, `gh_create_pull`, `gh_get_collaborators`, `gh_add_collaborator`, `gh_remove_collaborator` |
@@ -70,7 +77,7 @@ channels that the streaming operations (sign-in, clone) report progress on.
 | Releases and packages | `gh_list_releases`, `gh_create_release`, `gh_list_packages`, `gh_list_package_versions` |
 | Actions and deployments | `gh_list_workflow_runs`, `gh_get_workflow_run`, `gh_get_workflow_run_jobs`, `gh_list_deployments` |
 | Insights | the four `gh_get_traffic_*` functions, `gh_list_dependabot_alerts`, `gh_list_secret_scanning_alerts` |
-| Cloning | `gh_clone_repo` |
+| Cloning | `clone_repo`, with `clone_canceller` to stop it |
 
 ## Errors
 
@@ -86,12 +93,11 @@ message:
 | `Status` | Any other status of 400 or above |
 | `Network` | No answer: no connection, timeout, DNS |
 | `Parse` | The answer was not the JSON expected |
-| `Cli` | `gh` could not be run, or would not hand over a token |
 | `Other` | Something wrong before GitHub was asked |
 
 `GhError` implements `Display`, and converts into a `String`, for code that
-only shows the message. The sign-in functions (`gh_login` and the rest of
-`cli.rs`) still return `Result<_, String>`.
+only shows the message. A request sent with no token set fails as
+`Unauthorized` ("Not signed in to GitHub.").
 
 `interpret` and `interpret_empty` are the whole rule for turning an HTTP
 answer into a value or an error. They take a plain `RawResponse`, which is
@@ -136,23 +142,28 @@ what lets them be tested without a network.
   A container package named `owner/image` is sent with `%2F`.
 - **Requests time out after 30 seconds** and follow up to 10 redirects
   (GitHub redirects a renamed or moved repository).
-- **Sign-in and clone report progress on channels.** `gh_login` and
-  `gh_clone_repo` send each line of `gh`'s output to `GhState::auth_tx` and
-  `clone_tx`. A host subscribes before starting them.
+- **Clone reports its output on a channel.** `clone_repo` sends each line of
+  `git`'s output to `GhState::clone_tx` (`CloneEvent::Progress` for git's
+  in-place progress line), then `Done`. A host subscribes before starting it.
+- **The clone's token never reaches the command line.** It goes to `git` as
+  an `Authorization` header in environment config (`GIT_CONFIG_*`), with
+  credential helpers and prompts turned off, so it is not stored in the
+  clone's `.git/config` either. A cancelled or failed clone removes the
+  folder it created.
 
 ## Layout
 
 | File | Contents |
 | --- | --- |
 | `src/helm_backend.rs` | `on_tokio`, and the event error a host matches on |
-| `src/github/mod.rs` | What the crate exports, and `gh_cmd` |
-| `src/github/cli.rs` | `gh auth`: check, status, login, scopes, logout |
+| `src/github/mod.rs` | What the crate exports |
+| `src/github/oauth.rs` | The OAuth device flow: a sign-in code, then the token |
 | `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
 | `src/github/api.rs` | The endpoint functions, and `send` |
 | `src/github/paging.rs` | `Page`, and reading the `Link` header |
 | `src/github/cache.rs` | Remembered answers (`ResponseCache`) and `RateLimit` |
 | `src/github/error.rs` | `GhError`, and turning an HTTP answer into a value or an error |
-| `src/github/clone.rs` | `gh repo clone` with streamed output |
+| `src/github/clone.rs` | `git clone` with the token in environment config, streamed output, cancel |
 | `src/github/types.rs` | Response types and `GhState` |
 | `examples/whoami.rs` | Asks GitHub who you are (read-only, uses the network) |
 
@@ -167,9 +178,8 @@ Phase C is done:
   function; both are unit-tested.
 - HTTP goes through the host's client. `reqwest` is no longer a dependency.
 
-Still on tokio: running `gh` (sign-in, the token, cloning) and the two
-progress channels. Moving those off it would mean rewriting the sign-in
-flow, which cannot be tested without signing in by hand, so it was left.
+Still on tokio: the HTTP client, running `git` for a clone, and the clone's
+output channel.
 
 Pagination (phase D) and rate limits and caching (phase E) are done too.
 Not done from phase E: two callers asking for the same thing at the same

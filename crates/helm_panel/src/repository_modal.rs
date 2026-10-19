@@ -466,7 +466,9 @@ impl Render for HelmRepositoryModal {
                         .take(20)
                         .rev()
                         .cloned()
+                        .chain(panel.clone_progress.clone())
                         .collect();
+                    let can_cancel = panel.clone_canceller.is_some();
                     v_flex()
                         .gap_2()
                         .child(
@@ -483,6 +485,20 @@ impl Render for HelmRepositoryModal {
                                 .text_color(muted)
                                 .child(line)
                         }))
+                        .child(
+                            h_flex().justify_end().child(
+                                Button::new("helm-clone-cancel")
+                                    .outline()
+                                    .label("Cancel")
+                                    .disabled(!can_cancel)
+                                    .on_click({
+                                        let parent = parent.clone();
+                                        cx.listener(move |_, _, _, cx| {
+                                            parent.update(cx, |panel, cx| panel.cancel_clone(cx));
+                                        })
+                                    }),
+                            ),
+                        )
                         .into_any_element()
                 } else if let Some(err) = panel.clone_error.clone() {
                     v_flex()

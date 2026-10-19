@@ -919,15 +919,17 @@ pub struct WorkflowJob {
     pub steps: Vec<WorkflowStep>,
 }
 
-/// A line of `gh repo clone`/`npm install` output, the npm phase starting, or
-/// the whole clone's final result. Replaces the Tauri `gh-clone-line` window
-/// event: panels subscribe via `GhState::clone_tx.subscribe()` while a clone
-/// is in flight. `Done` carries no payload: the clone's result is returned
-/// by `gh_clone_repo` itself, and this event only marks "stop listening".
+/// Output of a running clone, or its end. Panels subscribe via
+/// `GhState::clone_tx.subscribe()` while a clone is in flight. `Done`
+/// carries no payload: the clone's result is returned by `clone_repo`
+/// itself, and this event only marks "stop listening".
 #[derive(Clone, Debug)]
 pub enum CloneEvent {
+    /// A finished line of output.
     Line(String),
-    NpmStart,
+    /// A progress update that replaces the previous one (git rewrites its
+    /// "Receiving objects: 42%" line in place).
+    Progress(String),
     Done,
 }
 

@@ -75,6 +75,7 @@ impl HelmPanel {
     ) {
         self.cloning = false;
         self.clone_lines.clear();
+        self.clone_progress = None;
         self.clone_error = None;
         self.clone_succeeded_path = None;
         self.clone_file_to_open = file;
@@ -105,11 +106,12 @@ impl HelmPanel {
             .ok();
     }
 
-    /// Clones `self.selected_repo` into [`Self::clone_target_path`]. On
-    /// success, stores the landing path in `clone_succeeded_path` instead of
-    /// opening it automatically — see `HelmModalKind::CloneRepo`'s render,
-    /// which then offers to open it. No-ops if no folder is open yet (see
-    /// `render_repo_detail`, which disables the Clone button in that case).
+    /// Clones `self.selected_repo` into [`Self::clone_target_path`] with
+    /// `git`, as the account this panel uses, and opens the clone as a new
+    /// workspace window. Installing dependencies is left to the new
+    /// workspace (`npm_bootstrap` offers it when there is a `package.json`).
+    /// No-ops if no folder is open yet (see `render_repo_detail`, which
+    /// disables the Clone button in that case).
     pub(super) fn handle_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.selected_repo.clone() else {
             return;
@@ -120,8 +122,11 @@ impl HelmPanel {
 
         self.cloning = true;
         self.clone_lines.clear();
+        self.clone_progress = None;
         self.clone_error = None;
         let file_to_open = self.clone_file_to_open.clone();
+        let (canceller, cancel_signal) = clone_canceller();
+        self.clone_canceller = Some(canceller);
         cx.notify();
 
         // Subscribe before starting the clone so no early lines are missed:
@@ -135,22 +140,23 @@ impl HelmPanel {
                 })
                 .await;
                 rx = rx2;
-                let line = match event {
-                    Ok(CloneEvent::Line(line)) => line,
-                    Ok(CloneEvent::NpmStart) => "Installing npm dependencies…".to_string(),
+                let alive = match event {
+                    Ok(CloneEvent::Line(line)) => this.update(cx, |this, cx| {
+                        this.clone_progress = None;
+                        this.clone_lines.push(line);
+                        cx.notify();
+                    }),
+                    Ok(CloneEvent::Progress(line)) => this.update(cx, |this, cx| {
+                        this.clone_progress = Some(line);
+                        cx.notify();
+                    }),
                     Ok(CloneEvent::Done) => break,
                     // `Lagged` means missed events, not a dead channel —
                     // resync and keep listening; only `Closed` ends this loop.
                     Err(EventRecvError::Lagged(_)) => continue,
                     Err(EventRecvError::Closed) => break,
                 };
-                let alive = this
-                    .update(cx, |this, cx| {
-                        this.clone_lines.push(line);
-                        cx.notify();
-                    })
-                    .is_ok();
-                if !alive {
+                if alive.is_err() {
                     break;
                 }
             }
@@ -159,27 +165,22 @@ impl HelmPanel {
 
         let gh_state = self.gh_state.clone();
         let full_name = repo.full_name.clone();
-        let target_for_gh = target_path.clone();
+        let target_for_git = target_path.clone();
         let repo_name = repo.name.clone();
         cx.spawn_in(window, async move |this, cx| {
-            // `run_npm: true` — installs dependencies as Phase 2 of the same
-            // clone, streamed into this same progress view (`CloneEvent::NpmStart`
-            // switches the "Cloning…" label, see the modal's render) instead of
-            // leaving it to `npm_bootstrap`'s separate post-open prompt. By the
-            // time the new workspace opens, `node_modules` already exists, so
-            // that prompt's own `check_worktree` guard skips it there.
-            let result =
-                on_tokio(
-                    async move { gh_clone_repo(full_name, target_for_gh, true, &gh_state).await },
-                )
-                .await;
+            let result = on_tokio(async move {
+                clone_repo(full_name, target_for_git, cancel_signal, &gh_state).await
+            })
+            .await;
             this.update_in(cx, |this, window, cx| {
                 this.cloning = false;
+                this.clone_canceller = None;
+                this.clone_progress = None;
                 match result {
                     Ok(()) => {
                         this.clone_lines
                             .push(format!("Cloned repository to {target_path}"));
-                        this.notify(format!("Cloned {repo_name} and installed dependencies"), cx);
+                        this.notify(format!("Cloned {repo_name}"), cx);
                         let mut paths = vec![std::path::PathBuf::from(&target_path)];
                         if let Some(file) = file_to_open.as_deref()
                             && let Some(file_path) = safe_clone_file_path(&target_path, file)
@@ -200,13 +201,27 @@ impl HelmPanel {
                             .ok();
                         this.clone_file_to_open = None;
                     }
-                    Err(e) => this.clone_error = Some(e),
+                    // Back to the start of the dialog, as if it had not run.
+                    Err(CloneFailure::Cancelled) => {
+                        this.clone_lines.clear();
+                        this.notify(format!("Cancelled cloning {repo_name}"), cx);
+                    }
+                    Err(CloneFailure::Failed(error)) => this.clone_error = Some(error),
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Stops the clone in progress; the half-cloned folder is removed.
+    pub(super) fn cancel_clone(&mut self, cx: &mut Context<Self>) {
+        if let Some(canceller) = self.clone_canceller.take() {
+            canceller.cancel();
+            self.clone_progress = Some("Cancelling…".into());
+            cx.notify();
+        }
     }
 
     /// Native folder picker for the Clone destination — stores the chosen

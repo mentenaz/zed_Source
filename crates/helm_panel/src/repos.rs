@@ -299,8 +299,8 @@ impl HelmPanel {
     }
 
     /// Repo detail: name/visibility, description, homepage, topics, clone
-    /// URL + a Clone action that streams `gh repo clone` output and, on
-    /// success, sets the clone as the new workspace root. The old app's
+    /// URL + a Clone action that streams `git clone` output and, on
+    /// success, opens the clone as a new workspace. The old app's
     /// inline-editable description/homepage is now the Settings/Edit dialog,
     /// there's no feature-toggle port, and Branches/Collaborators drill into
     /// real screens — so the read side plus Clone (with an optional custom
