@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
@@ -10,18 +11,22 @@ use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Global};
 use release_channel::ReleaseChannel;
 
-/// An environment variable whose presence indicates that the system keychain
-/// should be used in development.
+/// An environment variable whose presence makes a development build store
+/// credentials in a plain-text file instead of the system keychain.
 ///
-/// By default, running Zed in development uses the development credentials
-/// provider. Setting this environment variable allows you to interact with the
-/// system keychain (for instance, if you need to test something).
+/// Upstream Zed defaults to the file in development to avoid macOS keychain
+/// prompts. This fork ships its builds on the development channel, so the
+/// default is the keychain and the file is opt-in, for throwaway testing.
 ///
 /// Only works in development. Setting this environment variable in other
 /// release channels is a no-op.
-static ZED_DEVELOPMENT_USE_KEYCHAIN: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN").is_ok_and(|value| !value.is_empty())
+static ZED_DEVELOPMENT_USE_FILE_CREDENTIALS: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("ZED_DEVELOPMENT_USE_FILE_CREDENTIALS").is_ok_and(|value| !value.is_empty())
 });
+
+/// Set once the move of the old credentials file into the keychain has been
+/// started, so it runs once per process however often [`global`] is called.
+static MIGRATION_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub struct ZedCredentialsProvider(pub Arc<dyn CredentialsProvider>);
 
@@ -44,29 +49,82 @@ pub fn global(cx: &App) -> Arc<dyn CredentialsProvider> {
 
 fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
     let use_development_provider = match ReleaseChannel::try_global(cx) {
-        Some(ReleaseChannel::Dev) => {
-            // In development we default to using the development
-            // credentials provider to avoid getting spammed by relentless
-            // keychain access prompts.
-            //
-            // However, if the `ZED_DEVELOPMENT_USE_KEYCHAIN` environment
-            // variable is set, we will use the actual keychain.
-            !*ZED_DEVELOPMENT_USE_KEYCHAIN
-        }
+        Some(ReleaseChannel::Dev) => *ZED_DEVELOPMENT_USE_FILE_CREDENTIALS,
         Some(ReleaseChannel::Nightly | ReleaseChannel::Preview | ReleaseChannel::Stable) | None => {
             false
         }
     };
 
     if use_development_provider {
-        Arc::new(DevelopmentCredentialsProvider::new())
-    } else {
-        Arc::new(KeychainCredentialsProvider)
+        return Arc::new(DevelopmentCredentialsProvider::new());
     }
+
+    let provider = Arc::new(KeychainCredentialsProvider {
+        legacy_file: DevelopmentCredentialsProvider::new(),
+    });
+    if !MIGRATION_STARTED.swap(true, Ordering::SeqCst) {
+        let provider = provider.clone();
+        cx.spawn(async move |cx| provider.migrate_legacy_file(cx).await)
+            .detach();
+    }
+    provider
 }
 
 /// A credentials provider that stores credentials in the system keychain.
-struct KeychainCredentialsProvider;
+///
+/// Earlier builds of this fork stored credentials in the development file
+/// (see [`DevelopmentCredentialsProvider`]). Entries still in that file are
+/// moved into the keychain: all of them once at startup, and any single one
+/// as soon as it is read, so a read that runs before the startup move still
+/// finds its credential. An entry leaves the file only after the keychain
+/// has accepted it, and the file is deleted once it is empty.
+struct KeychainCredentialsProvider {
+    legacy_file: DevelopmentCredentialsProvider,
+}
+
+impl KeychainCredentialsProvider {
+    /// Moves every entry of the old credentials file into the keychain.
+    /// An entry the keychain already holds is dropped from the file, since
+    /// the keychain's copy is the newer one.
+    async fn migrate_legacy_file(&self, cx: &AsyncApp) {
+        if !self.legacy_file.exists() {
+            return;
+        }
+        let entries = match self.legacy_file.load_credentials() {
+            Ok(entries) => entries,
+            Err(error) => {
+                log::error!("could not read the old credentials file: {error:#}");
+                return;
+            }
+        };
+
+        let mut moved = 0;
+        for (url, (username, password)) in entries {
+            let in_keychain = cx
+                .update(|cx| cx.read_credentials(&url))
+                .await
+                .is_ok_and(|found| found.is_some());
+            if !in_keychain {
+                if let Err(error) = cx
+                    .update(|cx| cx.write_credentials(&url, &username, &password))
+                    .await
+                {
+                    log::error!(
+                        "could not move the credential for {url} into the keychain: {error:#}"
+                    );
+                    continue;
+                }
+                moved += 1;
+            }
+            self.legacy_file.forget(&url);
+        }
+        if moved > 0 {
+            log::info!(
+                "moved {moved} credential(s) from the old credentials file into the keychain"
+            );
+        }
+    }
+}
 
 impl CredentialsProvider for KeychainCredentialsProvider {
     fn read_credentials<'a>(
@@ -74,7 +132,27 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         url: &'a str,
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
-        async move { cx.update(|cx| cx.read_credentials(url)).await }.boxed_local()
+        async move {
+            if let Some(found) = cx.update(|cx| cx.read_credentials(url)).await? {
+                return Ok(Some(found));
+            }
+            let Some((username, password)) = self.legacy_file.get(url) else {
+                return Ok(None);
+            };
+            match cx
+                .update(|cx| cx.write_credentials(url, &username, &password))
+                .await
+            {
+                Ok(()) => self.legacy_file.forget(url),
+                Err(error) => {
+                    log::error!(
+                        "could not move the credential for {url} into the keychain: {error:#}"
+                    )
+                }
+            }
+            Ok(Some((username, password)))
+        }
+        .boxed_local()
     }
 
     fn write_credentials<'a>(
@@ -86,7 +164,9 @@ impl CredentialsProvider for KeychainCredentialsProvider {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
             cx.update(move |cx| cx.write_credentials(url, username, password))
-                .await
+                .await?;
+            self.legacy_file.forget(url);
+            Ok(())
         }
         .boxed_local()
     }
@@ -96,7 +176,13 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         url: &'a str,
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move { cx.update(move |cx| cx.delete_credentials(url)).await }.boxed_local()
+        async move {
+            // Dropped from the old file first, so a deleted credential cannot
+            // come back from it on the next read.
+            self.legacy_file.forget(url);
+            cx.update(move |cx| cx.delete_credentials(url)).await
+        }
+        .boxed_local()
     }
 }
 
@@ -118,6 +204,10 @@ impl DevelopmentCredentialsProvider {
         Self { path }
     }
 
+    fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
     fn load_credentials(&self) -> Result<HashMap<String, (String, Vec<u8>)>> {
         let json = std::fs::read(&self.path)?;
         let credentials: HashMap<String, (String, Vec<u8>)> = serde_json::from_slice(&json)?;
@@ -130,6 +220,35 @@ impl DevelopmentCredentialsProvider {
         std::fs::write(&self.path, json)?;
 
         Ok(())
+    }
+
+    /// The entry for `url`, if the file exists and holds one.
+    fn get(&self, url: &str) -> Option<(String, Vec<u8>)> {
+        if !self.exists() {
+            return None;
+        }
+        self.load_credentials().ok()?.remove(url)
+    }
+
+    /// Removes the entry for `url`, and the file itself once it is empty.
+    fn forget(&self, url: &str) {
+        if !self.exists() {
+            return;
+        }
+        let Ok(mut credentials) = self.load_credentials() else {
+            return;
+        };
+        if credentials.remove(url).is_none() && !credentials.is_empty() {
+            return;
+        }
+        let result = if credentials.is_empty() {
+            std::fs::remove_file(&self.path).map_err(anyhow::Error::from)
+        } else {
+            self.save_credentials(&credentials)
+        };
+        if let Err(error) = result {
+            log::error!("could not update the old credentials file: {error:#}");
+        }
     }
 }
 

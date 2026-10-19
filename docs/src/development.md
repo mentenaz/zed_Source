@@ -45,18 +45,19 @@ your password again the next time something changes in the binary.
 
 This quickly becomes annoying and impedes development speed.
 
-That is why, by default, when running a development build of Zed an alternative
-credential provider is used to bypass the system keychain.
+This fork ships its builds on the development channel, so development builds
+use the system keychain too, the same as every other release channel.
 
-> **Note:** This is **only** the case for development builds. For all non-development
-> release channels the system keychain is always used.
-
-If you need to test something out using the real system keychain in a
-development build, run Zed with the following environment variable set:
+To store credentials in a plain-text file instead (for throwaway testing
+only), run a development build with the following environment variable set:
 
 ```
-ZED_DEVELOPMENT_USE_KEYCHAIN=1
+ZED_DEVELOPMENT_USE_FILE_CREDENTIALS=1
 ```
+
+Builds before this change stored credentials in that file
+(`development_credentials` in the config directory). Its entries are moved
+into the keychain at startup, and the file is deleted once it is empty.
 
 ## Performance Measurements
 
