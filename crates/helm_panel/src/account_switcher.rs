@@ -144,12 +144,18 @@ impl HelmPanel {
         self.start_session(cx);
     }
 
-    /// Opens the sign-in screen to add another account. Cancelling it goes
-    /// back to the current account.
+    /// Opens the sign-in screen to add another account, with every way to
+    /// sign in. Cancelling it goes back to the current account.
     pub(super) fn add_account(&mut self, cx: &mut Context<Self>) {
+        self.sign_in_task = None;
+        self.sign_in = SignIn::Idle;
+        self.sign_in_for = SignInFor::AnyAccount;
         self.adding_account = true;
+        self.gh_cli_picker_open = false;
+        self.error_msg.clear();
         self.screen = HelmScreen::Auth;
-        self.start_sign_in(SignInFor::AnyAccount, cx);
+        self.check_gh_cli(false, cx);
+        cx.notify();
     }
 
     /// Deletes `login`'s token and takes it off the account list. Every
@@ -204,11 +210,13 @@ impl HelmPanel {
                         let is_default = default_login
                             .as_deref()
                             .is_some_and(|default| default.eq_ignore_ascii_case(&account.login));
-                        let label = if is_default {
-                            format!("{} (default)", account.display_name())
-                        } else {
-                            account.display_name().to_string()
-                        };
+                        let mut label = account.display_name().to_string();
+                        if account.source == HelmAccountSource::GhCli {
+                            label.push_str(" · via GitHub CLI");
+                        }
+                        if is_default {
+                            label.push_str(" (default)");
+                        }
                         let panel = panel.clone();
                         let login = account.login.clone();
                         menu = menu.item(

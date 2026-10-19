@@ -159,7 +159,7 @@ Result: Helm runs with no `gh` installed, no new transport stack, and no loss of
    - Detect the restriction. GitHub answers with a 403 whose message names the OAuth App access restrictions. Map it to its own `GhError` variant next to `SsoRequired`. The exact message and status still need checking against a restricted org.
    - Show an "approval needed for <org>" state with a link to the app's page in the user's GitHub settings (`https://github.com/settings/connections/applications/<client_id>`), where the user can request approval from the org owners.
    - Mention it in the sign-in screen's help text, and test against a restricted org before dropping `gh`.
-   - **Seen 19 Oct (Sencorp login, org Sencorp-Interim, not approved):** GitHub does not answer with an error for the org list. `GET /user/memberships/orgs` simply leaves the restricted org out, so Helm's menu showed only Mentenaz-Server (approved) and Helm cannot tell an approval is missing. A 403 is still expected when opening one of that org's repos directly (not yet checked). Consequences: the sign-in help text and the link to the app's settings page are the main way users find out; an idea for later is to compare the account's public org memberships (`GET /users/<login>/orgs`) with the approved list and mark the missing ones as "approval needed" (works only for public memberships). After the owners approve, confirm the org appears.
+   - **Seen 19 Oct (Sencorp login, org Sencorp-Interim, not approved for Helm):** GitHub does not answer with an error for the org list. `GET /user/memberships/orgs` simply leaves the restricted org out, so Helm's menu showed only Mentenaz-Server (approved) and Helm cannot tell an approval is missing. A 403 is still expected when opening one of that org's repos directly (not yet checked). Consequences: the sign-in help text and the link to the app's settings page are the main way users find out; an idea for later is to compare the account's public org memberships (`GET /users/<login>/orgs`) with the approved list and mark the missing ones as "approval needed" (works only for public memberships). After the owners approve, confirm the org appears.
 
 ---
 
@@ -376,3 +376,7 @@ After step 5 (clone with `git`) and the account switcher with per-workspace bind
 6. A copied token can be revoked later by GitHub's per-app token limit after many `gh` logins. Handled by the existing 401 path: the stored token is deleted and the account shows "Sign in again".
 
 **Order:** after step 5. Self-contained: it touches only the sign-in screen and the account settings entry.
+
+*Verified 19 Oct:* importing the Sencorp login's token from `gh` made Sencorp-Interim appear in Helm. That organisation restricts OAuth apps, had approved the GitHub CLI at some point but not "Helm for Forge", and was invisible with Helm's own token for the same login. This is the case the option exists for.
+
+*Status (19 Oct):* built and tested (import of FrancoisHuyzers-Sencorp from `gh`). Backend: `helm_backend/src/github/gh_cli.rs` (`gh_cli_accounts`, `gh_cli_token`). Panel: `helm_panel/src/gh_cli_import.rs`; the account's `source` is stored in settings (`oauth_app`, `gh_cli`, `token`). "Add account…" now opens a screen offering all three ways instead of going straight to the device flow.

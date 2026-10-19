@@ -51,6 +51,21 @@ pub struct HelmAccountContent {
     /// A name to show for the account instead of the login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// How the account was signed in. Decides how a missing scope is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<HelmAccountSource>,
+}
+
+/// How a Helm account's token was obtained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HelmAccountSource {
+    /// Helm's own OAuth App ("Login with GitHub").
+    OauthApp,
+    /// Copied once from the GitHub CLI ("Use GitHub CLI").
+    GhCli,
+    /// A pasted personal access token.
+    Token,
 }
 
 /// Settings for a panel that can sit in any of the three docks.

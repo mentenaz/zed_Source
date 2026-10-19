@@ -29,8 +29,10 @@ Open with `ctrl-k h` (`cmd-k h` on macOS), the status bar icon (tooltip
    the code on GitHub and Helm signs in. **Use a token instead** takes a
    personal access token (a classic one needs `repo`, `read:org` and
    `user`; a fine-grained one limits Helm to the repositories you choose).
-   Helm checks that the token has the `repo` scope and prompts for it if
-   missing.
+   **Use GitHub CLI** (shown only when `gh` is installed) copies one of the
+   GitHub CLI's accounts' token once; Helm keeps its own copy and does not
+   run `gh` again for it. Helm checks that the token has the `repo` scope
+   and prompts for it if missing.
 2. **Menu** — your profile summary and the main sections.
 
 An organisation that restricts third-party apps does not show up, and its
@@ -43,7 +45,10 @@ request that.
 You can sign in to several GitHub accounts. The account button next to
 "Helm" in the panel header switches between them without signing out, adds
 an account, makes one the default, signs out of one (its token is deleted;
-it stays listed) or removes it.
+it stays listed) or removes it. Accounts imported from the GitHub CLI show
+"via GitHub CLI"; a missing scope for one of them is added in `gh`
+(`gh auth refresh --scopes <scope>`) and the token imported again, since
+Helm's own sign-in would replace it with a token of Helm's app.
 
 Each workspace remembers which account it uses; a workspace that never
 chose one uses the default account. The list of accounts is
@@ -198,6 +203,7 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/auth.rs` | Sign-in (device flow or pasted token), scope authorization, sign-out, and the auth screen |
 | `src/accounts.rs` | Tokens in the credential store, the account list in settings, and the event that tells every panel when an account signs in or out |
 | `src/account_switcher.rs` | The account menu, switching account, and each workspace's remembered account |
+| `src/gh_cli_import.rs` | "Use GitHub CLI": listing `gh`'s accounts, importing one's token, and its missing-scope prompt |
 | `src/changes.rs` | `HelmAction` and `run_action`: the one path every change to GitHub goes through |
 | `src/profile.rs` | Your profile and menu, the identity header, other users' profiles, edit profile |
 | `src/orgs.rs` | Organisation list and detail |

@@ -270,7 +270,7 @@ impl HelmPanel {
                     this.pending_attach = None;
                     match result {
                         Ok(_) => this.notify(
-                            "A change finished after the account switch; it was made with the                              previous account.",
+                            "A change finished after the account switch; it was made with the previous account.",
                             cx,
                         ),
                         Err(error) => this.notify(

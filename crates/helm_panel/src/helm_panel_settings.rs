@@ -1,5 +1,7 @@
 use settings::{DockSide, RegisterSetting, Settings};
 
+pub use settings::HelmAccountSource;
+
 /// The Helm panel's user settings, read from the `"helm_panel"` settings key.
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct HelmPanelSettings {
@@ -19,6 +21,9 @@ pub struct HelmPanelSettings {
 pub struct HelmAccount {
     pub login: String,
     pub label: Option<String>,
+    /// How it was signed in; accounts listed before this was recorded count
+    /// as signed in through Helm's OAuth App.
+    pub source: HelmAccountSource,
 }
 
 impl HelmAccount {
@@ -66,6 +71,7 @@ impl Settings for HelmPanelSettings {
                 .map(|account| HelmAccount {
                     login: account.login.clone(),
                     label: account.label.clone(),
+                    source: account.source.unwrap_or(HelmAccountSource::OauthApp),
                 })
                 .collect(),
         }

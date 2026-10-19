@@ -69,7 +69,7 @@ polls, so dropping its task cancels the sign-in.
 
 | Area | Functions |
 | --- | --- |
-| Sign-in | `request_device_code`, `poll_for_token` (`HELM_OAUTH_CLIENT_ID`, `HELM_OAUTH_SCOPES`) |
+| Sign-in | `request_device_code`, `poll_for_token` (`HELM_OAUTH_CLIENT_ID`, `HELM_OAUTH_SCOPES`); optionally `gh_cli_accounts`, `gh_cli_token` to import a token from the GitHub CLI |
 | Account | `gh_get_current_user`, `gh_get_user`, `gh_update_user`, `gh_get_org_logins`, `gh_get_org_detail` |
 | Repositories | `gh_get_repos`, `gh_get_repo`, `gh_create_repo`, `gh_update_repo`, `gh_update_topics`, `gh_get_branches`, `gh_list_tags`, `gh_list_recent_commits` |
 | Collaboration | `gh_list_issues`, `gh_list_pulls`, `gh_list_issue_comments`, `gh_create_pull`, `gh_get_collaborators`, `gh_add_collaborator`, `gh_remove_collaborator` |
@@ -158,6 +158,7 @@ what lets them be tested without a network.
 | `src/helm_backend.rs` | `on_tokio`, and the event error a host matches on |
 | `src/github/mod.rs` | What the crate exports |
 | `src/github/oauth.rs` | The OAuth device flow: a sign-in code, then the token |
+| `src/github/gh_cli.rs` | Listing the GitHub CLI's accounts and copying one's token (optional sign-in) |
 | `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
 | `src/github/api.rs` | The endpoint functions, and `send` |
 | `src/github/paging.rs` | `Page`, and reading the `Link` header |

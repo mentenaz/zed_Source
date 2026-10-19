@@ -102,7 +102,18 @@ pub(super) enum SignIn {
         expected: String,
         actual: String,
         token: String,
+        source: HelmAccountSource,
     },
+}
+
+/// What the panel knows about the GitHub CLI, for the "Use GitHub CLI"
+/// sign-in. Checked only when a sign-in screen is shown.
+pub(super) enum GhCliState {
+    Unknown,
+    Checking,
+    NotInstalled,
+    Listed(Vec<GhCliAccount>),
+    Failed(String),
 }
 
 impl SignIn {

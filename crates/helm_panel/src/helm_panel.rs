@@ -15,6 +15,7 @@ mod branches;
 mod changes;
 mod clone;
 mod collaborators;
+mod gh_cli_import;
 mod helm_panel_settings;
 mod insights;
 mod invitations;
@@ -68,11 +69,12 @@ use attach::{CreateRepoAttach, DEFAULT_COMMIT_MESSAGE};
 use changes::*;
 use collaborators::*;
 use helm_backend::github::{
-    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
+    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, GhCliAccount, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
     GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, OrgMember, Package,
     PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
     WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
-    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, clone_canceller, clone_repo, gh_add_collaborator,
+    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, clone_canceller, clone_repo, gh_add_collaborator, gh_cli_accounts,
+    gh_cli_token,
     gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
     gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
@@ -85,7 +87,7 @@ use helm_backend::github::{
     search_repositories_page,
 };
 use helm_backend::{EventRecvError, on_tokio};
-pub use helm_panel_settings::{HelmAccount, HelmPanelSettings};
+pub use helm_panel_settings::{HelmAccount, HelmAccountSource, HelmPanelSettings};
 use helm_ui::*;
 use repository_modal::*;
 use settings::{DockSide, Settings as _};
@@ -217,6 +219,10 @@ pub struct HelmPanel {
     /// Set while "Add account" from the account menu is signing in, so
     /// cancelling goes back to the account in use.
     adding_account: bool,
+    /// Whether the GitHub CLI is installed and which accounts it has, for
+    /// "Use GitHub CLI", and whether that list is open.
+    gh_cli: GhCliState,
+    gh_cli_picker_open: bool,
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
@@ -452,6 +458,8 @@ impl HelmPanel {
                 token_input,
                 token_input_open: false,
                 adding_account: false,
+                gh_cli: GhCliState::Unknown,
+                gh_cli_picker_open: false,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",

@@ -73,6 +73,7 @@ impl HelmPanel {
         let Some(login) = self.bound_login(cx) else {
             self.auth_initialized = true;
             self.load_state = LoadState::Idle;
+            self.check_gh_cli(false, cx);
             cx.notify();
             return;
         };
@@ -147,8 +148,9 @@ impl HelmPanel {
                 self.scope_to_authorize = "repo";
                 self.error_msg = missing_scope_message("repo");
             }
-            AuthOutcome::NotLoggedIn => {}
+            AuthOutcome::NotLoggedIn => self.check_gh_cli(false, cx),
             AuthOutcome::Revoked => {
+                self.check_gh_cli(false, cx);
                 self.error_msg = format!(
                     "GitHub no longer accepts the saved sign-in for {}. Sign in again.",
                     Self::account_name(&login, cx)
@@ -300,7 +302,7 @@ impl HelmPanel {
                 }
             };
             this.update(cx, |this, cx| match token {
-                Ok(token) => this.identify_token(token, cx),
+                Ok(token) => this.identify_token(token, HelmAccountSource::OauthApp, cx),
                 Err(error) => this.sign_in_failed(error, cx),
             })
             .ok();
@@ -315,12 +317,17 @@ impl HelmPanel {
         }
         self.token_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.identify_token(token, cx);
+        self.identify_token(token, HelmAccountSource::Token, cx);
     }
 
     /// Asks GitHub whose `token` is, then stores it for that account, unless
     /// the sign-in was for a different account.
-    fn identify_token(&mut self, token: String, cx: &mut Context<Self>) {
+    pub(super) fn identify_token(
+        &mut self,
+        token: String,
+        source: HelmAccountSource,
+        cx: &mut Context<Self>,
+    ) {
         self.sign_in = SignIn::Finishing;
         self.error_msg.clear();
         cx.notify();
@@ -346,11 +353,12 @@ impl HelmPanel {
                             expected: expected.to_string(),
                             actual: login,
                             token,
+                            source,
                         };
                         cx.notify();
                         return;
                     }
-                    this.store_account(login, token, cx);
+                    this.store_account(login, token, source, cx);
                 }
                 Err(GhError::Unauthorized { .. }) => {
                     this.sign_in_failed("GitHub did not accept that token.".into(), cx)
@@ -363,7 +371,13 @@ impl HelmPanel {
 
     /// Stores `token` as `login`'s, lists the account in settings and makes
     /// it this panel's. Every panel bound to `login` then reloads.
-    fn store_account(&mut self, login: String, token: String, cx: &mut Context<Self>) {
+    fn store_account(
+        &mut self,
+        login: String,
+        token: String,
+        source: HelmAccountSource,
+        cx: &mut Context<Self>,
+    ) {
         self.sign_in = SignIn::Finishing;
         cx.notify();
 
@@ -371,7 +385,15 @@ impl HelmPanel {
             let stored = write_token(&login, &token, cx).await;
             this.update(cx, |this, cx| match stored {
                 Ok(()) => {
-                    remember_account(&login, cx);
+                    remember_account(&login, source, cx);
+                    if source == HelmAccountSource::GhCli {
+                        this.notify(
+                            format!(
+                                "Imported {login} from the GitHub CLI. Signing out of gh does not sign Helm out; use Sign out in Helm's account menu."
+                            ),
+                            cx,
+                        );
+                    }
                     // Signed in to an account this panel was not using (a
                     // new account, or "Use a different account"): switch to
                     // it with fresh state, so nothing of the previous
@@ -396,7 +418,7 @@ impl HelmPanel {
         }));
     }
 
-    fn sign_in_failed(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(super) fn sign_in_failed(&mut self, error: String, cx: &mut Context<Self>) {
         self.sign_in = SignIn::Failed(error);
         cx.notify();
     }
@@ -545,6 +567,14 @@ impl HelmPanel {
         // Missing scope: `repo` from the startup check, or whichever scope
         // a rejected action needs.
         if self.error_msg == missing_scope_message(self.scope_to_authorize) {
+            // An account imported from `gh` gets its scope there.
+            if let Some(login) = self.bound_login(cx)
+                && HelmPanelSettings::get_global(cx)
+                    .account(&login)
+                    .is_some_and(|account| account.source == HelmAccountSource::GhCli)
+            {
+                return self.render_gh_cli_scope_prompt(&login, self.scope_to_authorize, cx);
+            }
             let muted_foreground = cx.theme().muted_foreground;
             let scope = self.scope_to_authorize;
             return v_flex()
@@ -709,12 +739,16 @@ impl HelmPanel {
                             .outline()
                             .label(format!("Add {actual} as a new account"))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let SignIn::WrongAccount { actual, token, .. } =
-                                    std::mem::replace(&mut this.sign_in, SignIn::Idle)
+                                let SignIn::WrongAccount {
+                                    actual,
+                                    token,
+                                    source,
+                                    ..
+                                } = std::mem::replace(&mut this.sign_in, SignIn::Idle)
                                 else {
                                     return;
                                 };
-                                this.store_account(actual, token, cx);
+                                this.store_account(actual, token, source, cx);
                             })),
                     )
                     .child(
@@ -732,12 +766,21 @@ impl HelmPanel {
     fn render_sign_in_start(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let muted_foreground = cx.theme().muted_foreground;
         let foreground = cx.theme().foreground;
-        let known_login = self.active_login.clone();
+        // "Add account" from the menu: any account, nobody to sign in again.
+        let known_login = if self.adding_account {
+            None
+        } else {
+            self.active_login.clone()
+        };
 
         let mut col = v_flex()
             .gap_3()
             .p_4()
-            .child(div().text_color(foreground).child("GitHub"))
+            .child(div().text_color(foreground).child(if self.adding_account {
+                "Add a GitHub account"
+            } else {
+                "GitHub"
+            }))
             .child(Separator::horizontal());
 
         if !self.error_msg.is_empty() {
@@ -795,7 +838,7 @@ impl HelmPanel {
             })
             .cloned()
             .collect();
-        if !others.is_empty() {
+        if !others.is_empty() && !self.adding_account {
             col = col.child(
                 div()
                     .text_xs()
@@ -817,6 +860,16 @@ impl HelmPanel {
         }
 
         col = col.child(Separator::horizontal());
+        col = col.children(self.render_gh_cli_option(cx));
+        if self.adding_account {
+            col = col.child(
+                Button::new("helm-add-account-cancel")
+                    .ghost()
+                    .small()
+                    .label("Back to the current account")
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_sign_in(cx))),
+            );
+        }
         col = if self.token_input_open {
             col.child(
                 v_flex()

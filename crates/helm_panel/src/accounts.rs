@@ -8,7 +8,7 @@
 
 use anyhow::{Context as _, Result};
 use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, Global};
-use settings::HelmAccountContent;
+use settings::{HelmAccountContent, HelmAccountSource};
 
 /// The credential-store name of `login`'s token. Logins are compared
 /// ignoring case on GitHub, so the name is lowercased.
@@ -43,21 +43,24 @@ pub async fn delete_token(login: &str, cx: &AsyncApp) -> Result<()> {
         .await
 }
 
-/// Adds `login` to the `accounts` list in settings if it is not listed yet.
-/// The first account listed also becomes the default.
-pub fn remember_account(login: &str, cx: &mut App) {
+/// Adds `login` to the `accounts` list in settings if it is not listed yet,
+/// and records how it was signed in. The first account listed also becomes
+/// the default.
+pub fn remember_account(login: &str, source: HelmAccountSource, cx: &mut App) {
     let login = login.to_string();
     settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
         let panel = settings.helm_panel.get_or_insert_default();
         let accounts = panel.accounts.get_or_insert_default();
-        if !accounts
-            .iter()
-            .any(|account| account.login.eq_ignore_ascii_case(&login))
+        match accounts
+            .iter_mut()
+            .find(|account| account.login.eq_ignore_ascii_case(&login))
         {
-            accounts.push(HelmAccountContent {
+            Some(account) => account.source = Some(source),
+            None => accounts.push(HelmAccountContent {
                 login: login.clone(),
                 label: None,
-            });
+                source: Some(source),
+            }),
         }
         if panel.default_account.is_none() {
             panel.default_account = Some(login);

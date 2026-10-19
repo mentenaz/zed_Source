@@ -3,6 +3,7 @@
 //! Split into single-purpose submodules:
 //! - `mod`: the public surface
 //! - `oauth`: signing in with the OAuth device flow
+//! - `gh_cli`: importing a token from the GitHub CLI (optional sign-in)
 //! - `api`: REST API fetch helpers + endpoint functions
 //! - `requests`: what each endpoint asks for, as data (method, path, body)
 //! - `cache`: remembered answers (`ETag`s) and the rate limit
@@ -14,6 +15,7 @@ mod api;
 mod cache;
 mod clone;
 mod error;
+mod gh_cli;
 mod oauth;
 mod paging;
 pub mod requests;
@@ -40,6 +42,7 @@ pub use api::{
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
 pub use clone::{CloneCancelSignal, CloneCanceller, CloneFailure, clone_canceller, clone_repo};
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
+pub use gh_cli::{GhCliAccount, gh_cli_accounts, gh_cli_token};
 pub use oauth::{
     DeviceFlow, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, poll_for_token,
     request_device_code,
