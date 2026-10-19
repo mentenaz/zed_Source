@@ -158,6 +158,7 @@ what lets them be tested without a network.
 | `src/helm_backend.rs` | `on_tokio`, and the event error a host matches on |
 | `src/github/mod.rs` | What the crate exports |
 | `src/github/oauth.rs` | The OAuth device flow: a sign-in code, then the token |
+| `src/github/remote.rs` | Which github.com repository a git remote URL points at (HTTPS or SSH) |
 | `src/github/gh_cli.rs` | Listing the GitHub CLI's accounts and copying one's token (optional sign-in) |
 | `src/github/requests.rs` | Each endpoint's request as data: method, path, body |
 | `src/github/api.rs` | The endpoint functions, and `send` |

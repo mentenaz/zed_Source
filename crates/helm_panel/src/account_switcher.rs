@@ -59,6 +59,7 @@ impl HelmPanel {
                 {
                     this.active_login = Some(account.login.clone());
                 }
+                this.watch_git_store(cx);
                 this.start_session(cx);
             })
             .ok();
@@ -100,6 +101,9 @@ impl HelmPanel {
         self.gh_state = Arc::new(GhState::new(self.gh_state.http.clone()));
         self.active_login = login;
         self.adding_account = false;
+        // Checked again for the new account once it is signed in.
+        self.repo_access = None;
+        self.repo_access_key = None;
 
         self.account.clear();
         self.scopes.clear();

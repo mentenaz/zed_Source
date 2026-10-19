@@ -9236,6 +9236,7 @@ dependencies = [
  "helm_ui",
  "helm_workspace",
  "log",
+ "project",
  "serde",
  "serde_json",
  "settings",

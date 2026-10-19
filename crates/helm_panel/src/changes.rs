@@ -291,6 +291,10 @@ impl HelmPanel {
                     // will never run, so don't let it attach a later,
                     // unrelated create.
                     this.pending_attach = None;
+                    // Maybe the workspace's repository wants another account.
+                    if error.is_permission() {
+                        this.check_repo_access(true, cx);
+                    }
                     this.notify(format!("Failed to {}: {error}", action.failure_label()), cx);
                     this.action_settled(&action, cx);
                 }

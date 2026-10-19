@@ -133,6 +133,7 @@ impl HelmPanel {
                 self.error_msg.clear();
                 self.screen = HelmScreen::Menu;
                 self.load_repo_invitations(cx);
+                self.check_repo_access(false, cx);
                 // An action that was bounced here for a missing scope: put
                 // the user back where they were and re-send it.
                 // `may_reauthorize: false` so a second rejection reports the

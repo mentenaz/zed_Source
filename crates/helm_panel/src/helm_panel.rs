@@ -27,6 +27,7 @@ mod orgs;
 mod profile;
 mod pulls;
 mod releases_packages;
+mod repo_access;
 mod repos;
 mod repository_modal;
 mod state;
@@ -89,6 +90,7 @@ use helm_backend::github::{
 };
 use helm_backend::{EventRecvError, on_tokio};
 pub use helm_panel_settings::{HelmAccount, HelmAccountSource, HelmPanelSettings};
+pub use repo_access::RepoAccess;
 use helm_ui::*;
 use repository_modal::*;
 use settings::{DockSide, Settings as _};
@@ -226,6 +228,13 @@ pub struct HelmPanel {
     gh_cli_picker_open: bool,
     /// Signing `gh` in to an account it does not have yet.
     gh_cli_login: Option<GhCliLogin>,
+    /// Whether the workspace's account can push to the workspace's GitHub
+    /// repository (see `repo_access.rs`), which account and repository that
+    /// was checked for, and the checks already offered as a toast.
+    repo_access: Option<RepoAccess>,
+    repo_access_key: Option<String>,
+    repo_access_offered: repo_access::OfferedChecks,
+    _git_store_subscription: Option<Subscription>,
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
@@ -464,6 +473,10 @@ impl HelmPanel {
                 gh_cli: GhCliState::Unknown,
                 gh_cli_picker_open: false,
                 gh_cli_login: None,
+                repo_access: None,
+                repo_access_key: None,
+                repo_access_offered: Default::default(),
+                _git_store_subscription: None,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",

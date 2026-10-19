@@ -7,6 +7,7 @@
 //! - `api`: REST API fetch helpers + endpoint functions
 //! - `requests`: what each endpoint asks for, as data (method, path, body)
 //! - `cache`: remembered answers (`ETag`s) and the rate limit
+//! - `remote`: which GitHub repository a git remote URL points at
 //! - `paging`: one page of a list, and reading the `Link` header
 //! - `error`: `GhError`, and turning an HTTP answer into a value or an error
 //! - `clone`: `git clone` with the account's token, streaming its output
@@ -18,6 +19,7 @@ mod error;
 mod gh_cli;
 mod oauth;
 mod paging;
+mod remote;
 pub mod requests;
 mod types;
 
@@ -51,6 +53,7 @@ pub use oauth::{
     request_device_code,
 };
 pub use paging::{Page, PageLinks, interpret_page, interpret_page_under, last_page, parse_link};
+pub use remote::{GitHubRemote, parse_github_remote};
 
 pub use types::{
     BlobData, BlobKind, Branch, CloneEvent, Collaborator, CombinedCommitStatus, Comment,

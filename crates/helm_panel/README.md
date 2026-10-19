@@ -55,7 +55,14 @@ it stays listed) or removes it. Accounts imported from the GitHub CLI show
 Helm's own sign-in would replace it with a token of Helm's app.
 
 Each workspace remembers which account it uses; a workspace that never
-chose one uses the default account. The list of accounts is
+chose one uses the default account.
+
+When the workspace is a git repository on github.com, Helm checks whether
+the workspace's account can push to it. If it cannot, Helm asks your other
+signed-in accounts in the background (switching nothing), and when one of
+them can push, a notification offers **Switch to …**. It is offered once
+per account and repository in a session, and checked again when the
+repository changes or GitHub rejects a change as not allowed. The list of accounts is
 `helm_panel.accounts` in settings, and the default is
 `helm_panel.default_account`; the tokens are only in the credential store,
 so an account listed on a machine without its token shows "Sign in as …".
@@ -207,6 +214,7 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/auth.rs` | Sign-in (device flow or pasted token), scope authorization, sign-out, and the auth screen |
 | `src/accounts.rs` | Tokens in the credential store, the account list in settings, and the event that tells every panel when an account signs in or out |
 | `src/account_switcher.rs` | The account menu, switching account, and each workspace's remembered account |
+| `src/repo_access.rs` | Whether the workspace's account can push to the workspace's GitHub repository, and the offer to switch to one that can |
 | `src/gh_cli_import.rs` | "Use GitHub CLI": listing `gh`'s accounts, importing one's token, and its missing-scope prompt |
 | `src/changes.rs` | `HelmAction` and `run_action`: the one path every change to GitHub goes through |
 | `src/profile.rs` | Your profile and menu, the identity header, other users' profiles, edit profile |
