@@ -24,6 +24,9 @@ pub struct HelmAccount {
     /// How it was signed in; accounts listed before this was recorded count
     /// as signed in through Helm's OAuth App.
     pub source: HelmAccountSource,
+    /// The commit identity for workspaces using this account, once chosen.
+    pub git_name: Option<String>,
+    pub git_email: Option<String>,
 }
 
 impl HelmAccount {
@@ -72,6 +75,8 @@ impl Settings for HelmPanelSettings {
                     login: account.login.clone(),
                     label: account.label.clone(),
                     source: account.source.unwrap_or(HelmAccountSource::OauthApp),
+                    git_name: account.git_name.clone(),
+                    git_email: account.git_email.clone(),
                 })
                 .collect(),
         }

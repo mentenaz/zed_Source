@@ -104,6 +104,8 @@ impl HelmPanel {
         // Checked again for the new account once it is signed in.
         self.repo_access = None;
         self.repo_access_key = None;
+        self.commit_identity = CommitIdentity::Unknown;
+        self.commit_identity_key = None;
 
         self.account.clear();
         self.scopes.clear();
@@ -247,6 +249,18 @@ impl HelmPanel {
                     }
 
                     menu = menu.separator();
+                    if active.is_some() {
+                        let identity_panel = panel.clone();
+                        menu = menu.item(PopupMenuItem::new("Commit email…").on_click(
+                            move |_, window, cx| {
+                                identity_panel
+                                    .update(cx, |this, cx| {
+                                        this.open_commit_identity_dialog(window, cx)
+                                    })
+                                    .ok();
+                            },
+                        ));
+                    }
                     let add_panel = panel.clone();
                     menu = menu.item(PopupMenuItem::new("Add account…").on_click(
                         move |_, _, cx| {

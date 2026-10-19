@@ -25,6 +25,14 @@ pub(super) enum HelmModalKind {
     CreateRelease,
     /// Carries the signed-in user's current profile, prefilled into the form.
     EditProfile(GitHubUser),
+    /// The commit name and email for workspaces that use `login`, prefilled
+    /// with the current ones. Uses the `name` field for the name and the
+    /// `homepage` field for the email.
+    CommitIdentity {
+        login: String,
+        name: String,
+        email: String,
+    },
     /// No form fields of its own — reads `parent`'s `cloning`/`clone_lines`/
     /// `clone_error`/`clone_succeeded_path` directly and walks through
     /// picking a folder, showing progress, and offering to open the result,
@@ -96,6 +104,9 @@ impl HelmRepositoryModal {
                 user.blog.clone().unwrap_or_default(),
                 String::new(),
             ),
+            HelmModalKind::CommitIdentity { name, email, .. } => {
+                (name.clone(), String::new(), email.clone(), String::new())
+            }
             _ => (String::new(), String::new(), String::new(), String::new()),
         };
         let (has_issues, has_wiki, has_projects, has_discussions) = match &kind {
@@ -198,6 +209,7 @@ impl HelmRepositoryModal {
             HelmModalKind::CreatePull(_) => "Create pull request",
             HelmModalKind::CreateRelease => "Create release",
             HelmModalKind::EditProfile(_) => "Edit profile",
+            HelmModalKind::CommitIdentity { .. } => "Commit email",
             HelmModalKind::CloneRepo => "Clone repository",
         }
     }
@@ -403,6 +415,15 @@ impl Render for HelmRepositoryModal {
                 .child(field().label("Company").child(Input::new(&self.company)))
                 .child(field().label("Location").child(Input::new(&self.location)))
                 .child(field().label("Blog / website").child(Input::new(&self.homepage)))
+                .into_any_element(),
+            HelmModalKind::CommitIdentity { login, .. } => v_form()
+                .child(field().child(div().text_sm().text_color(muted).child(format!(
+                    "Commits in workspaces that use {login} are authored with this name and \
+                     email. It is written into each repository's own git config; your global \
+                     git config is not changed."
+                ))))
+                .child(field().label("Name").child(Input::new(&self.name)))
+                .child(field().label("Email").child(Input::new(&self.homepage)))
                 .into_any_element(),
             HelmModalKind::CloneRepo => {
                 let panel = parent.read(cx);
@@ -686,6 +707,15 @@ impl Render for HelmRepositoryModal {
                         );
                     });
                 }
+                HelmModalKind::CommitIdentity { login, .. } => {
+                    let (name, email) = (name.trim().to_string(), homepage.trim().to_string());
+                    if name.is_empty() || !email.contains('@') {
+                        return;
+                    }
+                    parent.update(cx, |this, cx| {
+                        this.save_commit_identity(login, name, email, cx);
+                    });
+                }
                 // The footer's generic Confirm button is hidden for this kind
                 // (see below) — its own content has its own buttons/handlers,
                 // each dismissing explicitly where appropriate.
@@ -727,6 +757,7 @@ impl Render for HelmRepositoryModal {
                                     HelmModalKind::CreatePull(_) => "Create",
                                     HelmModalKind::CreateRelease => "Create",
                                     HelmModalKind::EditProfile(_) => "Save",
+                                    HelmModalKind::CommitIdentity { .. } => "Save",
                                     HelmModalKind::CloneRepo => "Clone",
                                 })
                                 .on_click(confirm),

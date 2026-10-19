@@ -89,7 +89,7 @@ impl HelmPanel {
     /// `upstream`, else `origin`. In a fork, `upstream` is usually the
     /// original project, which the user cannot push to, so `origin` comes
     /// first unless the branch really tracks `upstream`.
-    fn workspace_github_remote(&self, cx: &App) -> Option<GitHubRemote> {
+    pub(super) fn workspace_github_remote(&self, cx: &App) -> Option<GitHubRemote> {
         let workspace = self.workspace.upgrade()?;
         let project = workspace.read(cx).project().read(cx);
         let repository = project.git_store().read(cx).active_repository()?;
@@ -116,6 +116,8 @@ impl HelmPanel {
     /// repository, unless that was already checked for this account and
     /// repository (`force` checks again, after a failure).
     pub(super) fn check_repo_access(&mut self, force: bool, cx: &mut Context<Self>) {
+        // The commit identity follows the same account and repository.
+        self.refresh_commit_identity(false, cx);
         let Some(remote) = self.workspace_github_remote(cx) else {
             if self.repo_access.take().is_some() {
                 cx.notify();

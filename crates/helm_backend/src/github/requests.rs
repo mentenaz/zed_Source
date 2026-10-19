@@ -103,6 +103,12 @@ pub fn current_user() -> ApiRequest {
     get("/user".to_string())
 }
 
+/// The signed-in user's email addresses. Needs the `user` (or `user:email`)
+/// scope.
+pub fn current_user_emails() -> ApiRequest {
+    get("/user/emails?per_page=100".to_string())
+}
+
 pub fn update_user(changes: Value) -> ApiRequest {
     with_body("PATCH", "/user".to_string(), changes)
 }

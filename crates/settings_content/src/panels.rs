@@ -54,6 +54,14 @@ pub struct HelmAccountContent {
     /// How the account was signed in. Decides how a missing scope is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<HelmAccountSource>,
+    /// The name commits are authored with in workspaces that use this
+    /// account. Written into each repository's own `.git/config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_name: Option<String>,
+    /// The email commits are authored with in workspaces that use this
+    /// account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_email: Option<String>,
 }
 
 /// How a Helm account's token was obtained.

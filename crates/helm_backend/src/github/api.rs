@@ -901,6 +901,23 @@ pub async fn gh_get_current_user(state: &GhState) -> Result<GitHubUser, GhError>
     fetch(state, requests::current_user()).await
 }
 
+/// The signed-in user's verified email addresses, the primary one first.
+/// Fails with a permission error for a token without the `user` scope.
+pub async fn gh_get_verified_emails(state: &GhState) -> Result<Vec<String>, GhError> {
+    #[derive(Deserialize)]
+    struct UserEmail {
+        email: String,
+        #[serde(default)]
+        primary: bool,
+        #[serde(default)]
+        verified: bool,
+    }
+    let mut emails: Vec<UserEmail> = fetch(state, requests::current_user_emails()).await?;
+    emails.retain(|email| email.verified);
+    emails.sort_by_key(|email| !email.primary);
+    Ok(emails.into_iter().map(|email| email.email).collect())
+}
+
 pub async fn gh_get_repos(owner: String, state: &GhState) -> Result<Vec<Repo>, GhError> {
     // Every page: the repository list is filtered by a search box, which
     // only works over the whole list.

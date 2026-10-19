@@ -35,7 +35,7 @@ pub use api::{
     gh_get_branches, gh_get_collaborators, gh_get_combined_status, gh_get_current_user,
     gh_get_org_detail, gh_get_org_logins, gh_get_org_role, gh_get_repo, gh_get_repo_invitations, gh_get_repos,
     gh_get_traffic_clones, gh_get_traffic_paths, gh_get_traffic_referrers, gh_get_traffic_views,
-    gh_get_user, gh_get_workflow_run, gh_get_workflow_run_jobs, gh_list_dependabot_alerts,
+    gh_get_user, gh_get_verified_emails, gh_get_workflow_run, gh_get_workflow_run_jobs, gh_list_dependabot_alerts,
     gh_list_deployments, gh_list_issue_comments, gh_list_issues, gh_list_org_invitations,
     gh_list_package_versions, gh_list_packages, gh_list_pulls, gh_list_recent_commits,
     gh_list_releases, gh_list_secret_scanning_alerts, gh_list_tags, gh_list_workflow_runs,

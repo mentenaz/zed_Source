@@ -60,10 +60,30 @@ pub fn remember_account(login: &str, source: HelmAccountSource, cx: &mut App) {
                 login: login.clone(),
                 label: None,
                 source: Some(source),
+                git_name: None,
+                git_email: None,
             }),
         }
         if panel.default_account.is_none() {
             panel.default_account = Some(login);
+        }
+    });
+}
+
+/// Records the name and email commits are authored with in workspaces
+/// that use `login`.
+pub fn set_commit_identity(login: &str, name: &str, email: &str, cx: &mut App) {
+    let (login, name, email) = (login.to_string(), name.to_string(), email.to_string());
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        let panel = settings.helm_panel.get_or_insert_default();
+        if let Some(account) = panel
+            .accounts
+            .get_or_insert_default()
+            .iter_mut()
+            .find(|account| account.login.eq_ignore_ascii_case(&login))
+        {
+            account.git_name = Some(name);
+            account.git_email = Some(email);
         }
     });
 }

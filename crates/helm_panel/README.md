@@ -57,6 +57,13 @@ Helm's own sign-in would replace it with a token of Helm's app.
 Each workspace remembers which account it uses; a workspace that never
 chose one uses the default account.
 
+Commits are authored with a name and email chosen per account (the
+account menu's **Commit email…**, or the git panel's one-time question).
+Helm writes them into each repository's own git config when a workspace
+uses that account, and asks first if the repository already names someone
+else. The global git config is never changed. If the global git email is
+already one of the account's verified addresses, it is used without asking.
+
 When the workspace is a git repository on github.com, Helm checks whether
 the workspace's account can push to it. If it cannot, Helm asks your other
 signed-in accounts in the background (switching nothing), and when one of
@@ -214,6 +221,7 @@ itself, with all of its fields, stays in `src/helm_panel.rs`. See
 | `src/auth.rs` | Sign-in (device flow or pasted token), scope authorization, sign-out, and the auth screen |
 | `src/accounts.rs` | Tokens in the credential store, the account list in settings, and the event that tells every panel when an account signs in or out |
 | `src/account_switcher.rs` | The account menu, switching account, and each workspace's remembered account |
+| `src/commit_identity.rs` | The commit name and email per account, written into the workspace repository's own git config |
 | `src/repo_access.rs` | Whether the workspace's account can push to the workspace's GitHub repository, and the offer to switch to one that can |
 | `src/gh_cli_import.rs` | "Use GitHub CLI": listing `gh`'s accounts, importing one's token, and its missing-scope prompt |
 | `src/changes.rs` | `HelmAction` and `run_action`: the one path every change to GitHub goes through |

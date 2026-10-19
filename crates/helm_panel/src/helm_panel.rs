@@ -15,6 +15,7 @@ mod branches;
 mod changes;
 mod clone;
 mod collaborators;
+mod commit_identity;
 mod gh_cli_import;
 mod helm_panel_settings;
 mod insights;
@@ -90,6 +91,7 @@ use helm_backend::github::{
 };
 use helm_backend::{EventRecvError, on_tokio};
 pub use helm_panel_settings::{HelmAccount, HelmAccountSource, HelmPanelSettings};
+pub use commit_identity::CommitIdentity;
 pub use repo_access::RepoAccess;
 use helm_ui::*;
 use repository_modal::*;
@@ -235,6 +237,10 @@ pub struct HelmPanel {
     repo_access_key: Option<String>,
     repo_access_offered: repo_access::OfferedChecks,
     _git_store_subscription: Option<Subscription>,
+    /// Who commits in the workspace are authored as (`commit_identity.rs`),
+    /// and which account and repository that was worked out for.
+    commit_identity: CommitIdentity,
+    commit_identity_key: Option<String>,
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
@@ -477,6 +483,8 @@ impl HelmPanel {
                 repo_access_key: None,
                 repo_access_offered: Default::default(),
                 _git_store_subscription: None,
+                commit_identity: CommitIdentity::Unknown,
+                commit_identity_key: None,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",
