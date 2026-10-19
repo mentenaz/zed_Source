@@ -26,3 +26,4 @@ settings.workspace = true
 tokio = { workspace = true, features = ["process"] }
 ui.workspace = true
 workspace.workspace = true
+zed_credentials_provider.workspace = true

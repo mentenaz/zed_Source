@@ -1,7 +1,6 @@
 //! GitHub REST API commands (was part of `github.rs`).
 //!
-//! `send` resolves the token (cached or via `gh auth token`) and makes the
-//! request; `error::interpret` turns the answer into a value or a
+//! `send` makes the request with the token the host handed to `GhState`; `error::interpret` turns the answer into a value or a
 //! [`GhError`]. All endpoint functions are thin wrappers over those two.
 
 use std::collections::VecDeque;
@@ -14,7 +13,6 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use super::cache::{CachedResponse, RateLimit};
 use super::error::{GhError, RawResponse, interpret, interpret_empty, unix_now};
-use super::gh_cmd;
 use super::paging::{Page, interpret_page, interpret_page_under};
 use super::requests::{self, ApiRequest, ApiResponseFormat};
 use super::types::{
@@ -26,23 +24,11 @@ use super::types::{
     TreeEntryKind, TreeLoadResult, WorkflowJob, WorkflowRun, classify_file, classify_ref_movement,
 };
 
-/// The access token: the cached one, or a fresh one from `gh auth token`.
+/// The access token, or the error a request without one would get.
 async fn token(state: &GhState) -> Result<String, GhError> {
-    if let Some(token) = &*state.token.read().await {
-        return Ok(token.clone());
-    }
-    match gh_cmd().arg("auth").arg("token").output().await {
-        Ok(out) if out.status.success() => {
-            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            *state.token.write().await = Some(token.clone());
-            Ok(token)
-        }
-        Ok(out) => Err(GhError::Cli(format!(
-            "gh auth token failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))),
-        Err(e) => Err(GhError::Cli(format!("Failed to run gh: {e}"))),
-    }
+    state.token().await.ok_or_else(|| GhError::Unauthorized {
+        message: "Not signed in to GitHub.".into(),
+    })
 }
 
 /// How long a request may take, answer included, before it is given up on.
@@ -123,6 +109,11 @@ async fn send_once(
     let link = text("link");
     let etag = text("etag");
     let github_sso = text("x-github-sso");
+    // Classic OAuth tokens report their scopes on every answer; fine-grained
+    // tokens send no such header, which leaves the scopes unknown.
+    if let Some(scopes) = text("x-oauth-scopes") {
+        state.record_token_scopes(parse_scopes(&scopes));
+    }
     let rate = RateLimit::from_headers(number("x-ratelimit-limit"), rate_remaining, rate_reset);
     state.record_rate_limit(request.rate_limit_resource, rate, retry_after, unix_now());
 
@@ -145,6 +136,17 @@ async fn send_once(
         },
         etag,
     ))
+}
+
+/// The scopes in an `X-OAuth-Scopes` header: a comma-separated list, empty
+/// for a token with no scopes.
+fn parse_scopes(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Sends a request, using and keeping the remembered answer for it.
@@ -1291,6 +1293,16 @@ pub async fn gh_update_topics(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn oauth_scopes_header_is_split_and_trimmed() {
+        assert_eq!(
+            parse_scopes("repo, read:org,user"),
+            vec!["repo", "read:org", "user"]
+        );
+        assert!(parse_scopes("").is_empty());
+        assert!(parse_scopes(" , ").is_empty());
+    }
 
     #[test]
     fn search_paging_uses_total_count_and_github_limit() {

@@ -30,7 +30,7 @@ use helm_backend::{
         Pull, Readme, RefMovement, Repo, RepoTree, ResolvedRef, SearchCodeMatch, TreeEntry,
         TreeEntryKind, TreeLoadResult, build_tree, compare_ref_movement, fetch_blob_at_path,
         fetch_commit_detail, fetch_compare, fetch_page, fetch_page_under, fetch_readme,
-        fetch_readme_at_path, fetch_repo_tree, gh_auth_status, gh_get_branches,
+        fetch_readme_at_path, fetch_repo_tree, gh_get_branches,
         gh_get_current_user, gh_get_repo, gh_list_tags, requests, resolve_ref, search_code_page,
     },
     on_tokio,
@@ -963,33 +963,28 @@ impl WorkspaceTab {
         self.repository_scope_missing = false;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (result, auth_status, user_info) = on_tokio(async move {
+            let (result, user_info, scopes) = on_tokio(async move {
                 let result = gh_get_repo(owner, name, &gh_state).await;
-                let auth_status = gh_auth_status().await;
                 // `/user` gives the display name (and login); prefer the
-                // display name for the "Signed in as" line. Falls back to the
-                // `gh auth status` account if the API call fails.
-                let user_info = gh_get_current_user(&gh_state).await.ok();
-                (result, auth_status, user_info)
+                // display name for the "Signed in as" line.
+                let user_info = gh_get_current_user(&gh_state).await;
+                (result, user_info, gh_state.token_scopes())
             })
             .await;
+            // Only a token that reports its scopes can be known to lack one.
             let scope_missing = result.as_ref().is_err_and(GhError::is_permission)
-                && matches!(
-                    &auth_status,
-                    Ok(Some(info)) if !info.scopes.iter().any(|scope| scope == "repo")
-                );
+                && scopes.is_some_and(|scopes| !scopes.iter().any(|scope| scope == "repo"));
             this.update_in(cx, |this, window, cx| {
                 this.repository_loading = false;
                 if this.account.is_current(account_load) {
                     match user_info {
-                        Some(user) => this.account.finish(Ok(
+                        Ok(user) => this.account.finish(Ok(
                             user.name.unwrap_or_else(|| user.login.clone()),
                         )),
-                        None => match auth_status {
-                            Ok(Some(info)) => this.account.finish(Ok(info.account)),
-                            Ok(None) => this.account.finish(Ok("Not signed in".into())),
-                            Err(error) => this.account.finish(Err(error)),
-                        },
+                        Err(GhError::Unauthorized { .. }) => {
+                            this.account.finish(Ok("Not signed in".into()))
+                        }
+                        Err(error) => this.account.finish(Err(error.to_string())),
                     }
                 }
                 match result {

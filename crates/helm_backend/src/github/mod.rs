@@ -2,7 +2,7 @@
 //!
 //! Split into single-purpose submodules:
 //! - `mod`: types, `GhState`, `gh_cmd` helper
-//! - `cli`: gh CLI auth (login/logout/token/status/scopes)
+//! - `oauth`: signing in with the OAuth device flow
 //! - `api`: REST API fetch helpers + endpoint functions
 //! - `requests`: what each endpoint asks for, as data (method, path, body)
 //! - `cache`: remembered answers (`ETag`s) and the rate limit
@@ -12,9 +12,9 @@
 
 mod api;
 mod cache;
-mod cli;
 mod clone;
 mod error;
+mod oauth;
 mod paging;
 pub mod requests;
 mod types;
@@ -38,15 +38,18 @@ pub use api::{
     gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
 };
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
-pub use cli::{gh_auth_status, gh_check_cli, gh_ensure_scope, gh_login, gh_logout};
 pub use clone::gh_clone_repo;
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
+pub use oauth::{
+    DeviceFlow, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, poll_for_token,
+    request_device_code,
+};
 pub use paging::{Page, PageLinks, interpret_page, interpret_page_under, last_page, parse_link};
 
 pub use types::{
     BlobData, BlobKind, Branch, CloneEvent, Collaborator, CombinedCommitStatus, Comment,
     CommitDetail, CommitFile, CommitSummary, CompareFile, CompareResult, Deployment,
-    FileClassification, GhAuthEvent, GhState, GitHubUser, GitHubUserDetail, Issue,
+    FileClassification, GhState, GitHubUser, GitHubUserDetail, Issue,
     MAX_CONCURRENT_REQUESTS, MAX_INLINE_IMAGE_BYTES, MAX_INLINE_TEXT_BYTES, OrgDetail,
     OrgInvitation, OrgMember, Package, PackageVersion, Pull, Readme, RefMovement, Release, Repo,
     RepoInvitation, RepoPermission, RepoPermissions, RepoRef, RepoTraffic, RepoTree, ResolvedRef,
@@ -56,7 +59,7 @@ pub use types::{
 };
 
 /// Returns a `gh` Command with CREATE_NO_WINDOW set on Windows so no external
-/// console flashes for GitHub CLI calls.
+/// console flashes. Only cloning still uses `gh`.
 pub fn gh_cmd() -> tokio::process::Command {
     #[cfg_attr(
         not(target_os = "windows"),

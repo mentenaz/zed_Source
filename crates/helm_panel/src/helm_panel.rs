@@ -1,11 +1,12 @@
-//! The "Helm" (GitHub) panel — Gate (CLI check) → Auth (login) → Menu, now
-//! backed by the real `helm_backend::github` module instead of a UI-only
-//! screen flip. Ported from `Forge_Old/panels/github/{gate,auth,menu}.rs`,
-//! using `helm_backend::on_tokio` to bridge `github`'s tokio-native
-//! `reqwest`/`gh` CLI calls onto GPUI's own `cx.spawn`, and
+//! The "Helm" (GitHub) panel — Auth (sign-in) → Menu, backed by the
+//! `helm_backend::github` module. Ported from
+//! `Forge_Old/panels/github/{gate,auth,menu}.rs`, using
+//! `helm_backend::on_tokio` to bridge `github`'s tokio-native calls onto
+//! GPUI's own `cx.spawn`, and
 //! `gpui_component` elements (`Button`, `list::ListItem`, `Icon`,
 //! `Spinner`) instead of the old `forge_ui` crate.
 
+mod accounts;
 mod activity;
 mod attach;
 mod auth;
@@ -30,7 +31,7 @@ mod state;
 mod workflow_run_tab;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     Action, App, AppContext, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
@@ -66,26 +67,28 @@ use attach::{CreateRepoAttach, DEFAULT_COMMIT_MESSAGE};
 use changes::*;
 use collaborators::*;
 use helm_backend::github::{
-    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, GhAuthEvent, GhError,
+    Branch, CloneEvent, Collaborator, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
     GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, OrgMember, Package,
     PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
     WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
-    gh_add_collaborator, gh_auth_status, gh_check_cli, gh_clone_repo, gh_create_pull,
+    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, gh_add_collaborator, gh_clone_repo,
+    gh_create_pull,
     gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
-    gh_ensure_scope, gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
+    gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
     gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
     gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_get_workflow_run,
     gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_issue_comments,
     gh_list_org_invitations, gh_list_package_versions, gh_list_packages,
-    gh_list_secret_scanning_alerts, gh_login, gh_logout, gh_remove_collaborator, gh_update_repo,
-    gh_update_topics, gh_update_user, peek_page, peek_page_under, requests,
+    gh_list_secret_scanning_alerts, gh_remove_collaborator, gh_update_repo, gh_update_topics,
+    gh_update_user, peek_page, peek_page_under, poll_for_token, request_device_code, requests,
     search_repositories_page,
 };
 use helm_backend::{EventRecvError, on_tokio};
-pub use helm_panel_settings::HelmPanelSettings;
+pub use helm_panel_settings::{HelmAccount, HelmPanelSettings};
 use helm_ui::*;
 use repository_modal::*;
 use settings::{DockSide, Settings as _};
+use accounts::{HelmAccountEvent, HelmAccounts};
 use state::*;
 use workflow_run_tab::*;
 use workspace::{
@@ -186,8 +189,8 @@ pub struct HelmPanel {
     gh_state: Arc<GhState>,
     screen: HelmScreen,
     /// Screens navigated away from via [`Self::navigate_to`], most recent
-    /// last. Internal state-machine transitions (Gate finishing, auth
-    /// succeeding, logging out) assign `self.screen`/call `set_screen`
+    /// last. Internal state-machine transitions (auth succeeding, signing
+    /// out) assign `self.screen`/call `set_screen`
     /// directly and don't touch this — you can't usefully "go back" to the
     /// login screen.
     back_stack: Vec<HelmScreen>,
@@ -198,10 +201,20 @@ pub struct HelmPanel {
     error_msg: String,
 
     // Auth
+    /// Whether the stored sign-in has been checked at least once.
     auth_initialized: bool,
-    login_started: bool,
+    /// The GitHub login this panel uses. Until a sign-in sets it, the
+    /// default account from settings.
+    active_login: Option<String>,
+    sign_in: SignIn,
+    sign_in_for: SignInFor,
+    /// The sign-in running for `sign_in`. Dropping it stops the polling.
+    sign_in_task: Option<Task<()>>,
+    /// The pasted-token field, and whether it is shown.
+    token_input: Entity<InputState>,
+    token_input_open: bool,
     /// Set when an action was bounced to the auth gate for a missing scope;
-    /// re-sent by `do_auth` once the scope is granted.
+    /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
     /// The Git panel's "Using Helm" local follow-up, parked when its Create
     /// dialog confirms and consumed by [`Self::attach_created_repo`] once
@@ -211,8 +224,6 @@ pub struct HelmPanel {
     /// The scope the auth gate's "Authorize" button requests. `repo` for
     /// the startup check; an action's own scope when it sent us there.
     scope_to_authorize: &'static str,
-    device_code: String,
-    device_url: String,
     /// True for 2s after the device code is copied, flips the copy icon to
     /// a checkmark.
     code_copied: bool,
@@ -402,21 +413,38 @@ impl HelmPanel {
             )
             .detach();
 
+            let token_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("ghp_… or github_pat_…")
+            });
+            let accounts = HelmAccounts::global(cx);
+            cx.subscribe(
+                &accounts,
+                |this: &mut Self, _, event: &HelmAccountEvent, cx| {
+                    this.handle_account_event(event, cx)
+                },
+            )
+            .detach();
+
             let mut this = Self {
                 focus_handle: cx.focus_handle(),
                 gh_state: Arc::new(GhState::new(cx.http_client())),
-                screen: HelmScreen::Gate,
+                screen: HelmScreen::Auth,
                 back_stack: Vec::new(),
                 forward_stack: Vec::new(),
                 load_state: LoadState::Idle,
                 error_msg: String::new(),
                 auth_initialized: false,
-                login_started: false,
+                active_login: None,
+                sign_in: SignIn::Idle,
+                sign_in_for: SignInFor::AnyAccount,
+                sign_in_task: None,
+                token_input,
+                token_input_open: false,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",
-                device_code: String::new(),
-                device_url: String::new(),
                 code_copied: false,
                 account: String::new(),
                 scopes: Vec::new(),
@@ -489,7 +517,7 @@ impl HelmPanel {
                 org_invitations: Vec::new(),
                 viewed_user: None,
             };
-            this.check_cli(cx);
+            this.start_session(cx);
             this
         })
     }
@@ -523,8 +551,7 @@ impl HelmPanel {
     /// "Using Helm" button uses: on success the new repository is wired to
     /// this workspace by [`Self::attach_created_repo`] instead of only
     /// navigating to its detail screen. Without a GitHub login it reports a
-    /// toast and sends the user to the Helm panel, where signing in (or
-    /// installing the missing `gh` CLI) happens.
+    /// toast and sends the user to the Helm panel, where signing in happens.
     pub fn open_create_repo_for_attach(
         &mut self,
         window: &mut Window,
@@ -645,7 +672,7 @@ impl Panel for HelmPanel {
 
 impl Render for HelmPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let show_nav = !matches!(self.screen, HelmScreen::Gate | HelmScreen::Auth);
+        let show_nav = !matches!(self.screen, HelmScreen::Auth);
         if self.screen == HelmScreen::RepoList {
             let query = self.repo_search.read(cx).value().to_string();
             let matching = repos::matching_repos(&self.repos.items, &query);
@@ -691,7 +718,6 @@ impl Render for HelmPanel {
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .child(match self.screen {
-                        HelmScreen::Gate => self.render_gate(cx).into_any_element(),
                         HelmScreen::Auth => self.render_auth(cx).into_any_element(),
                         HelmScreen::Menu => self.render_menu(cx).into_any_element(),
                         HelmScreen::Profile => self.render_profile(cx).into_any_element(),

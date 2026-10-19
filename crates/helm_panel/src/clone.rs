@@ -124,8 +124,8 @@ impl HelmPanel {
         let file_to_open = self.clone_file_to_open.clone();
         cx.notify();
 
-        // Subscribe before starting the clone so no early lines are missed
-        // — same reasoning as `handle_login`'s `auth_tx` subscription.
+        // Subscribe before starting the clone so no early lines are missed:
+        // a broadcast channel only delivers what is sent after subscribing.
         let mut rx = self.gh_state.clone_tx.subscribe();
         cx.spawn_in(window, async move |this, cx| {
             loop {

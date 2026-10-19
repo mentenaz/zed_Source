@@ -6,7 +6,6 @@ use super::*;
 /// Which screen the panel is currently showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HelmScreen {
-    Gate,
     Auth,
     Menu,
     Profile,
@@ -45,10 +44,12 @@ pub(super) enum HelmScreen {
     Security,
 }
 
-/// Result of re-checking `gh auth status`, mirroring the old TS store's
-/// `doAuth`.
+/// What checking the stored sign-in found.
 pub(super) enum AuthOutcome {
+    /// No token is stored for the account.
     NotLoggedIn,
+    /// GitHub no longer accepts the stored token (401). It has been deleted.
+    Revoked,
     MissingRepoScope {
         account: String,
         scopes: Vec<String>,
@@ -60,6 +61,54 @@ pub(super) enum AuthOutcome {
         user: GitHubUser,
     },
     Failed(String),
+}
+
+/// What a sign-in is for. It decides which scopes are asked for and which
+/// account the new token must belong to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SignInFor {
+    /// Any account. Whichever one signs in becomes this panel's.
+    AnyAccount,
+    /// Signing in again as this login, whose token is missing or revoked.
+    Account(String),
+    /// Adding `scope` to this login's token.
+    Scope { login: String, scope: &'static str },
+}
+
+impl SignInFor {
+    /// The login the new token must belong to, if any.
+    pub(super) fn expected_login(&self) -> Option<&str> {
+        match self {
+            SignInFor::AnyAccount => None,
+            SignInFor::Account(login) | SignInFor::Scope { login, .. } => Some(login),
+        }
+    }
+}
+
+/// A sign-in in progress on the auth screen.
+pub(super) enum SignIn {
+    Idle,
+    /// Asking GitHub for a one-time code.
+    Starting,
+    /// The code is on screen; GitHub is asked every few seconds whether the
+    /// user has entered it.
+    Waiting(DeviceFlow),
+    /// GitHub handed out a token: finding out whose it is, and storing it.
+    Finishing,
+    Failed(String),
+    /// The token belongs to `actual`, not to the `expected` account the
+    /// sign-in was for. Nothing has been stored.
+    WrongAccount {
+        expected: String,
+        actual: String,
+        token: String,
+    },
+}
+
+impl SignIn {
+    pub(super) fn is_idle(&self) -> bool {
+        matches!(self, SignIn::Idle)
+    }
 }
 
 /// One row in the main menu.

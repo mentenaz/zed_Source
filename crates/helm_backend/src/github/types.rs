@@ -38,12 +38,6 @@ impl RequestLimiter {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AuthInfo {
-    pub account: String,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Owner {
     pub login: String,
     pub id: u64,
@@ -925,22 +919,11 @@ pub struct WorkflowJob {
     pub steps: Vec<WorkflowStep>,
 }
 
-/// A line of `gh auth login`/`gh auth refresh` output, or its final result.
-/// Replaces the Tauri `gh-auth-line`/`gh-auth-done` window events: panels
-/// subscribe via `GhState::auth_tx.subscribe()` while a login is in flight.
-/// `Done` carries no payload — the success/error result is returned directly
-/// from `gh_login`/`gh_ensure_*_scope`'s own awaited call, which every
-/// consumer already reads; this event only marks "stop listening for lines".
-#[derive(Clone, Debug)]
-pub enum GhAuthEvent {
-    Line(String),
-    Done,
-}
-
 /// A line of `gh repo clone`/`npm install` output, the npm phase starting, or
 /// the whole clone's final result. Replaces the Tauri `gh-clone-line` window
 /// event: panels subscribe via `GhState::clone_tx.subscribe()` while a clone
-/// is in flight. `Done` carries no payload — see `GhAuthEvent::Done`.
+/// is in flight. `Done` carries no payload: the clone's result is returned
+/// by `gh_clone_repo` itself, and this event only marks "stop listening".
 #[derive(Clone, Debug)]
 pub enum CloneEvent {
     Line(String),
@@ -948,16 +931,21 @@ pub enum CloneEvent {
     Done,
 }
 
-/// What the API functions need: the host's HTTP client, the cached token,
-/// the API base URL, and the channels sign-in and clone report progress on.
-/// Shared via `Arc`.
+/// What the API functions need: the host's HTTP client, the signed-in
+/// account's token, the API base URL, and the channel clone reports progress
+/// on. Shared via `Arc`.
 pub struct GhState {
     /// The host application's HTTP client. Requests go through it so that
     /// they use the same proxy settings as the rest of the app.
     pub http: std::sync::Arc<dyn http_client::HttpClient>,
-    pub token: tokio::sync::RwLock<Option<String>>,
+    /// The access token, handed in by the host with [`Self::set_token`].
+    /// `None` until then, and after signing out.
+    token: tokio::sync::RwLock<Option<String>>,
+    /// The scopes GitHub last reported for the token (`X-OAuth-Scopes`).
+    /// `None` until an answer has carried that header, and for tokens that
+    /// do not report scopes, such as fine-grained personal access tokens.
+    scopes: std::sync::Mutex<Option<Vec<String>>>,
     pub base_url: tokio::sync::RwLock<String>,
-    pub auth_tx: tokio::sync::broadcast::Sender<GhAuthEvent>,
     pub clone_tx: tokio::sync::broadcast::Sender<CloneEvent>,
     /// Answers to earlier requests, by path, with their `ETag`s.
     cache: std::sync::Mutex<ResponseCache>,
@@ -969,18 +957,48 @@ pub struct GhState {
 
 impl GhState {
     pub fn new(http: std::sync::Arc<dyn http_client::HttpClient>) -> Self {
-        let (auth_tx, _) = tokio::sync::broadcast::channel(16);
         let (clone_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             http,
             token: tokio::sync::RwLock::new(None),
+            scopes: std::sync::Mutex::default(),
             base_url: tokio::sync::RwLock::new("https://api.github.com".to_string()),
-            auth_tx,
             clone_tx,
             cache: std::sync::Mutex::default(),
             rate: std::sync::Mutex::default(),
             request_limiter: RequestLimiter::default(),
         }
+    }
+
+    /// Uses `token` for every request from now on, or no token at all.
+    /// Answers, scopes and rate limits remembered under the previous token
+    /// are forgotten, since they belong to that sign-in.
+    pub async fn set_token(&self, token: Option<String>) {
+        *self.token.write().await = token;
+        self.forget_answers();
+        self.forget_rate_limits();
+        *self.scopes_lock() = None;
+    }
+
+    /// The token requests are sent with, if one has been set.
+    pub(crate) async fn token(&self) -> Option<String> {
+        self.token.read().await.clone()
+    }
+
+    /// The scopes GitHub last reported for the token. `None` when no answer
+    /// has reported them yet, or the token kind does not report scopes.
+    pub fn token_scopes(&self) -> Option<Vec<String>> {
+        self.scopes_lock().clone()
+    }
+
+    pub(crate) fn record_token_scopes(&self, scopes: Vec<String>) {
+        *self.scopes_lock() = Some(scopes);
+    }
+
+    fn scopes_lock(&self) -> std::sync::MutexGuard<'_, Option<Vec<String>>> {
+        self.scopes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The remembered answers. A lock poisoned by a panic elsewhere is

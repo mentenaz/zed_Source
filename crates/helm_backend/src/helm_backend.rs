@@ -1,16 +1,17 @@
-//! GitHub backend for the Helm panel: sign-in through the `gh` CLI, the
-//! REST API, and cloning.
+//! GitHub backend for the Helm panel: OAuth device-flow sign-in, the REST
+//! API, and cloning.
 //!
 //! No GPUI and no UI state. HTTP goes through the host's client, handed in
-//! as `GhState::http`. The functions are async and run on a tokio runtime,
-//! because the `gh` child processes need one; a GPUI host bridges to them
-//! with [`on_tokio`].
+//! as `GhState::http`; storing the token is the host's job, which hands it
+//! in with `GhState::set_token`. The functions are async and run on a tokio
+//! runtime, because the HTTP client and the clone's child process need one;
+//! a GPUI host bridges to them with [`on_tokio`].
 
 pub mod github;
 
 use std::future::Future;
 
-/// Why a wait on [`github::GhState`]'s sign-in or clone events ended without
+/// Why a wait on [`github::GhState`]'s clone events ended without
 /// one. Re-exported so a host can match on it without depending on tokio.
 pub use tokio::sync::broadcast::error::RecvError as EventRecvError;
 

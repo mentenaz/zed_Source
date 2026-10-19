@@ -217,10 +217,11 @@ impl HelmPanel {
     /// Sends `action` to GitHub and applies its result to the panel.
     ///
     /// When GitHub rejects it with a permission-shaped error and
-    /// `may_reauthorize` is set, `gh auth status` is consulted to tell a
-    /// token that lacks the action's scope apart from an account that simply
-    /// lacks the rights. Only the former is sent to the auth gate (with the
-    /// action parked in `pending_action` for `do_auth` to re-send) —
+    /// `may_reauthorize` is set, the token's scopes (as GitHub reports them)
+    /// tell a token that lacks the action's scope apart from an account that
+    /// simply lacks the rights. Only the former is sent to the auth gate
+    /// (with the action parked in `pending_action` for `start_session` to
+    /// re-send) —
     /// re-authorizing can't fix the latter, so that just reports the
     /// failure.
     pub(super) fn run_action(
@@ -241,16 +242,18 @@ impl HelmPanel {
             let (result, scope_check) = on_tokio(async move {
                 let result = performed.perform(repo, &gh_state).await;
                 let scope_check = match &result {
+                    Err(GhError::Unauthorized { .. }) if may_reauthorize => {
+                        TokenScopeCheck::NotLoggedIn
+                    }
                     Err(error) if may_reauthorize && error.is_permission() => {
-                        match gh_auth_status().await {
-                            Ok(Some(info)) if token_has_scope(&info.scopes, scope) => {
-                                TokenScopeCheck::HasScope
+                        match gh_state.token_scopes() {
+                            Some(scopes) if !token_has_scope(&scopes, scope) => {
+                                TokenScopeCheck::MissingScope
                             }
-                            Ok(Some(_)) => TokenScopeCheck::MissingScope,
-                            Ok(None) => TokenScopeCheck::NotLoggedIn,
-                            // Couldn't ask `gh`; fall through to reporting
-                            // the original failure rather than guessing.
-                            Err(_) => TokenScopeCheck::HasScope,
+                            // The scope is there, or the token does not
+                            // report scopes: report the original failure
+                            // rather than guessing.
+                            _ => TokenScopeCheck::HasScope,
                         }
                     }
                     _ => TokenScopeCheck::HasScope,
@@ -283,11 +286,11 @@ impl HelmPanel {
                         action,
                         resume_screen: this.screen,
                     });
-                    // The same state `do_auth` leaves behind for a token
-                    // without `repo`, so `render_auth` shows its "Authorize"
-                    // prompt — for this action's scope.
+                    // The same state `start_session` leaves behind for a
+                    // token without `repo`, so `render_auth` shows its
+                    // "Authorize" prompt — for this action's scope.
                     this.screen = HelmScreen::Auth;
-                    this.login_started = false;
+                    this.cancel_sign_in(cx);
                     this.load_state = LoadState::Idle;
                     this.scope_to_authorize = scope;
                     this.error_msg = missing_scope_message(scope);
@@ -303,10 +306,10 @@ impl HelmPanel {
                         action,
                         resume_screen: this.screen,
                     });
-                    this.login_started = false;
-                    // Re-runs the status check, which lands on the login
-                    // prompt.
-                    this.do_auth(cx);
+                    this.cancel_sign_in(cx);
+                    // Re-checks the stored sign-in, which lands on the
+                    // sign-in prompt.
+                    this.start_session(cx);
                 }
             })
             .ok();

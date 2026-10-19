@@ -9240,6 +9240,7 @@ dependencies = [
  "tokio",
  "ui",
  "workspace",
+ "zed_credentials_provider",
 ]
 
 [[package]]

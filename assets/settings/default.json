@@ -1082,6 +1082,13 @@
     "button": true,
     // Where to dock the Helm panel. Can be 'left' or 'right'.
     "dock": "left",
+    // The GitHub accounts signed in to from Helm, added when you sign in.
+    // Each entry is { "login": "...", "label": "..." }; the label is optional.
+    // Tokens are kept in the system credential store, never in this file.
+    "accounts": [],
+    // The login a workspace uses when it has not picked one. With exactly
+    // one account, that account is used.
+    "default_account": null,
   },
   "python_panel": {
     // Whether to show the Python panel button in the status bar.

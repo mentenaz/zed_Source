@@ -29,10 +29,10 @@ impl HelmPanel {
     }
 
     /// Updates the signed-in user's profile. GitHub's `/user` PATCH endpoint
-    /// needs the `user` OAuth scope, which `gh_login` requests up front
-    /// (`repo,read:org,user`, see cli.rs). A login made outside Helm may not
-    /// have it; in that case `run_action` sends this through the auth gate
-    /// for `user`, where the device code is shown, and re-sends it.
+    /// needs the `user` OAuth scope, which Helm's sign-in requests up front
+    /// (`HELM_OAUTH_SCOPES`). A pasted token may not have it; in that case
+    /// `run_action` sends this through the auth gate for `user`, where the
+    /// device code is shown, and re-sends it.
     pub(super) fn handle_update_profile(
         &mut self,
         name: String,

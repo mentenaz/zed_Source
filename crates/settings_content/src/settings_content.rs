@@ -204,7 +204,7 @@ pub struct SettingsContent {
     pub flows: Option<FlowsSettingsContent>,
 
     pub cockpit_panel: Option<SidePanelSettingsContent>,
-    pub helm_panel: Option<SidePanelSettingsContent>,
+    pub helm_panel: Option<HelmPanelSettingsContent>,
     pub python_panel: Option<SidePanelSettingsContent>,
     pub node_panel: Option<SidePanelSettingsContent>,
     pub dotnet_panel: Option<SidePanelSettingsContent>,

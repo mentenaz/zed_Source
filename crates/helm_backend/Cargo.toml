@@ -1,6 +1,6 @@
 [package]
 name = "helm_backend"
-description = "GitHub backend for the Helm panel — sign-in through the gh CLI, the REST API, and cloning. No UI."
+description = "GitHub backend for the Helm panel — OAuth device-flow sign-in, the REST API, and cloning. No UI."
 license = "Apache-2.0"
 edition.workspace = true
 version = "0.1.0"
