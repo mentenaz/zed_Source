@@ -26,7 +26,7 @@ The panel is a stack of collapsible sections:
 | Vulnerabilities | `npm audit` findings for the active project |
 | Scripts | The `scripts` from `package.json`; run, add, edit or delete them |
 | Processes | Running Node processes: what each is, this workspace's first, Stop |
-| SPFx | SharePoint Framework actions, shown for SPFx projects |
+| SPFx | SharePoint Framework actions, and the `.sppkg` packages in `sharepoint/solution` (re-read after a command the panel runs finishes, when the panel is shown again, and when the file watcher reports a change there), shown for SPFx projects |
 
 ### Node versions
 

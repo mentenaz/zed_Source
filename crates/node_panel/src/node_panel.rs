@@ -342,6 +342,16 @@ pub struct NodePanel {
     /// package data when its `package.json`/lockfile changes on disk.
     _data_reload_task: Option<gpui::Task<()>>,
 
+    /// Same debounce, for re-reading `sharepoint/solution` when a `.sppkg`
+    /// changes there (when the file watcher reports it at all: SPFx's own
+    /// `.gitignore` leaves that folder out, so it often does not).
+    _sppkg_rescan_task: Option<gpui::Task<()>>,
+
+    /// Watches the Script Runner after the panel started a command, to
+    /// re-read `sharepoint/solution` once it finishes (a
+    /// `gulp package-solution` builds a new `.sppkg`).
+    _sppkg_after_run: Option<gpui::Subscription>,
+
     /// Whether the dock is showing this panel (`Panel::set_active`).
     panel_active: bool,
 }
@@ -537,12 +547,16 @@ impl NodePanel {
                 if let project::Event::WorktreeUpdatedEntries(_, entries) = event {
                     let mut package_json_touched = false;
                     let mut selected_manifest_touched = false;
+                    let mut sppkg_touched = false;
                     for (path, _, _) in entries.iter() {
                         let Some(name) = path.file_name() else {
                             continue;
                         };
                         if name == "package.json" {
                             package_json_touched = true;
+                        }
+                        if name.to_lowercase().ends_with(".sppkg") {
+                            sppkg_touched = true;
                         }
                         if is_node_manifest_file(name)
                             && this.manifest_change_is_selected(path.as_unix_str())
@@ -560,6 +574,9 @@ impl NodePanel {
                     // network-bound audit for unrelated edits elsewhere).
                     if selected_manifest_touched {
                         this.schedule_data_reload(cx);
+                    }
+                    if sppkg_touched {
+                        this.schedule_sppkg_rescan(cx);
                     }
                 }
             })
@@ -638,6 +655,8 @@ impl NodePanel {
                 view_pkg: None,
                 _rescan_task: None,
                 _data_reload_task: None,
+                _sppkg_rescan_task: None,
+                _sppkg_after_run: None,
                 panel_active: false,
             };
 
@@ -906,6 +925,8 @@ impl NodePanel {
             .clone()
             .unwrap_or_else(|| self.cwd.clone());
         let command = command.to_string();
+        // A command can build a new `.sppkg` (`gulp package-solution`).
+        self.rescan_sppkg_after_run(&script_runner, cx);
         // The Script Runner puts the active Node.js first on the command's
         // `PATH` itself (`ide_env`), as it does for everything it runs, so
         // `node`, `npm` and anything they start resolve to it.
@@ -1025,6 +1046,56 @@ impl NodePanel {
                 });
             },
         ));
+    }
+
+    /// Re-reads the selected project's `sharepoint/solution` folder for
+    /// `.sppkg` packages, off the main thread. The result is kept only if the
+    /// same project is still selected.
+    fn rescan_sppkg(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project.clone() else {
+            return;
+        };
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let scanned = project.clone();
+            let files = cx
+                .background_spawn(async move { scan_sppkg(&scanned) })
+                .await;
+            this.update(cx, |panel, cx| {
+                if panel.selected_project.as_deref() == Some(project.as_str())
+                    && panel.sppkg_files != files
+                {
+                    panel.sppkg_files = files;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::rescan_sppkg`], once a burst of file events has gone quiet.
+    fn schedule_sppkg_rescan(&mut self, cx: &mut Context<Self>) {
+        self._sppkg_rescan_task = Some(cx.spawn(
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                this.update(cx, |panel, cx| panel.rescan_sppkg(cx)).ok();
+            },
+        ));
+    }
+
+    /// Re-reads `sharepoint/solution` once the Script Runner finishes the
+    /// command the panel just started: it reports running, then not.
+    fn rescan_sppkg_after_run(&mut self, runner: &Entity<ScriptRunnerPanel>, cx: &mut Context<Self>) {
+        let mut saw_running = runner.read(cx).is_running();
+        self._sppkg_after_run = Some(cx.observe(runner, move |this, runner, cx| {
+            if runner.read(cx).is_running() {
+                saw_running = true;
+            } else if std::mem::take(&mut saw_running) {
+                this.rescan_sppkg(cx);
+            }
+        }));
     }
 
     fn load_scripts(&mut self, cx: &mut Context<Self>) {
@@ -2218,6 +2289,10 @@ impl Panel for NodePanel {
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.panel_active = active;
         self.update_procs_poll(cx);
+        // A package may have been built elsewhere (a terminal) meanwhile.
+        if active {
+            self.rescan_sppkg(cx);
+        }
     }
 
     fn panel_key() -> &'static str {
