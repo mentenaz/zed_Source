@@ -7884,6 +7884,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "git_credential"
+version = "0.1.0"
+dependencies = [
+ "ide_env",
+ "log",
+ "net",
+ "tempfile",
+]
+
+[[package]]
 name = "git_hosting_providers"
 version = "0.1.0"
 dependencies = [
@@ -25031,6 +25041,7 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "git",
+ "git_credential",
  "git_hosting_providers",
  "git_ui",
  "git_ui_core",

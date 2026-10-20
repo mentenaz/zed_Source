@@ -253,6 +253,12 @@ impl HelmPanel {
                 }
                 let entries = token.as_deref().map(git_auth_config).unwrap_or_default();
                 ide_env::set_git_remote_config(&dir, entries);
+                // Git in a terminal asks Forge's credential helper, which
+                // answers from this (section 11, item 4).
+                ide_env::set_git_credential(
+                    &dir,
+                    token.map(|token| ("x-access-token".to_string(), token)),
+                );
                 this.account_loading = false;
                 cx.notify();
             })
@@ -273,6 +279,7 @@ impl HelmPanel {
     pub(super) fn unregister_git_credentials(&mut self) {
         if let Some(dir) = self.git_credentials_dir.take() {
             ide_env::set_git_remote_config(&dir, Vec::new());
+            ide_env::set_git_credential(&dir, None);
         }
     }
 

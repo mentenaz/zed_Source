@@ -1,0 +1,18 @@
+[package]
+name = "git_credential"
+description = "Forge's own git credential helper: answers github.com credentials for git run in Forge's terminals, from the account the workspace uses."
+# GPL, like `net` and `askpass`, whose socket it uses.
+license = "GPL-3.0-or-later"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/git_credential.rs"
+doctest = false
+
+[dependencies]
+ide_env.workspace = true
+log.workspace = true
+net.workspace = true
+tempfile.workspace = true

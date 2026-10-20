@@ -32,17 +32,27 @@ pub struct Terminals {
 /// Puts the IDE's own runtimes (`ide_env`: the built-in Node.js, …) first on
 /// the `PATH` of a local terminal opened in `directory`. They are folders on
 /// this machine, so this is not for a remote terminal's environment.
+///
+/// Fork: also points the terminal's git at Forge's own credential helper
+/// for github.com, so `git push` there logs in as the workspace's Helm
+/// account (`ide_env::git_credential_terminal_env`).
 async fn add_ide_runtimes(
     env: &mut HashMap<String, String>,
     directory: Option<Arc<Path>>,
     cx: &AsyncApp,
 ) {
     // Finding them reads the disk (a version store, the project's version
-    // file), which must stay off the main thread.
-    let dirs = cx
-        .background_spawn(async move { ide_env::bin_dirs(directory.as_deref()) })
+    // file, `git config`), which must stay off the main thread.
+    let (dirs, git_credential) = cx
+        .background_spawn(async move {
+            (
+                ide_env::bin_dirs(directory.as_deref()),
+                ide_env::git_credential_terminal_env(directory.as_deref()),
+            )
+        })
         .await;
     ide_env::apply_to(env, &dirs);
+    ide_env::apply_git_credential_env(env, git_credential);
 }
 
 impl Project {

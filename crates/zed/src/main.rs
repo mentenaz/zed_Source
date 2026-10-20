@@ -308,6 +308,14 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
+    // Fork: `<forge> --git-credential <operation>` is git asking Forge's own
+    // credential helper, from a Forge terminal. Handled before argument
+    // parsing, since git appends the operation (`get`) as an argument.
+    let mut raw_args = std::env::args().skip(1);
+    if raw_args.next().as_deref() == Some(git_credential::HELPER_ARG) {
+        process::exit(git_credential::run_helper(raw_args.next().as_deref()));
+    }
+
     let args = Args::parse();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
@@ -479,6 +487,17 @@ fn main() {
     if failed_single_instance_check {
         println!("zed is already running");
         return;
+    }
+
+    // Fork: answer github.com credentials for git run in this process's
+    // terminals, as the workspace's Helm account.
+    match std::env::current_exe() {
+        Ok(program) => {
+            if let Err(error) = git_credential::start_server(&program) {
+                log::error!("could not start the git credential helper: {error}");
+            }
+        }
+        Err(error) => log::error!("could not start the git credential helper: {error}"),
     }
 
     let should_install_crash_handler =
