@@ -1926,7 +1926,7 @@ impl Render for FlowGraph {
                 }
             })
             // Scroll to zoom / pan
-            .on_scroll_wheel({
+            .on_scroll({
                 move |event, _window, cx| {
                     let delta = event.delta.pixel_delta(px(20.0));
                     let mouse_pos = event.position;

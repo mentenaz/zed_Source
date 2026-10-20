@@ -8,8 +8,8 @@ use std::{
 use gpui::{
     App, AppContext as _, Bounds, Context, Element, ElementId, Entity, EntityId, EventEmitter,
     Global, GlobalElementId, Half, Hitbox, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
-    Style, Subscription, TextLayout, WeakEntity, Window,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, SharedString, Style,
+    Subscription, TextLayout, WeakEntity, Window,
 };
 
 use crate::text_boundary::{line_range_at, word_range_at};
@@ -1852,7 +1852,7 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
     });
 
     let scroll_state = state.downgrade();
-    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, cx| {
+    window.on_mouse_event(move |_: &ScrollEvent, phase, window, cx| {
         if phase.bubble()
             && let Some(state) = scroll_state.upgrade()
         {

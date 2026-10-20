@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{
     App, Axis, BorderStyle, Bounds, ContentMask, Edges, Element, ElementId, GlobalElementId,
     Hitbox, Hsla, InteractiveElement as _, IntoElement, IsZero as _, LayoutId, OngoingScroll,
-    PaintQuad, ParentElement as _, Point, Position, ScrollHandle, ScrollWheelEvent,
+    PaintQuad, ParentElement as _, Point, Position, ScrollEvent, ScrollHandle,
     StatefulInteractiveElement as _, Style, StyleRefinement, Styled as _, Window, div, px,
     relative,
 };
@@ -208,7 +208,7 @@ impl Element for ScrollableMask {
                 let hitbox_id = hitbox.id;
                 let ongoing_scroll = ongoing_scroll.clone();
 
-                move |event: &ScrollWheelEvent, phase, window, cx| {
+                move |event: &ScrollEvent, phase, window, cx| {
                     // Handle in the capture phase: ancestor scrollers such as
                     // `gpui::list` register their wheel listeners after their
                     // children paint, so in the bubble phase (reverse
@@ -289,7 +289,7 @@ impl Element for ScrollableMask {
 mod tests {
     use super::*;
     use gpui::{
-        Context, IntoElement, ListAlignment, ListState, Render, ScrollDelta, ScrollWheelEvent,
+        Context, IntoElement, ListAlignment, ListState, Render, ScrollDelta, ScrollEvent,
         TestAppContext, VisualTestContext, Window, div, list, point, px,
     };
 
@@ -323,7 +323,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
@@ -400,7 +400,7 @@ mod tests {
 
         // A trackpad swipe is rarely axis-pure: horizontal dominant with a
         // small vertical component.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -419,7 +419,7 @@ mod tests {
         let list_state = ListState::new(10, ListAlignment::Top, px(0.));
         let cx = setup_list_test(cx, &scroll_handle, &list_state, false);
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-10.), px(-40.))),
             ..Default::default()
@@ -445,7 +445,7 @@ mod tests {
 
         // Swipe over the right side of the viewport. The mask must still
         // cover it — it must not slide away with the scrolled content.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(90.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -468,7 +468,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -486,7 +486,7 @@ mod tests {
         let list_state = ListState::new(10, ListAlignment::Top, px(0.));
         let cx = setup_list_test(cx, &scroll_handle, &list_state, true);
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -512,7 +512,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(0.))),
             ..Default::default()
@@ -544,7 +544,7 @@ mod tests {
         let scroll_handle = ScrollHandle::new();
         let cx = setup_horizontal_area_test(cx, &scroll_handle);
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -554,7 +554,7 @@ mod tests {
         // Same gesture, now leaning vertical but under the unlock ratio: the
         // lock holds and the horizontal offset keeps moving. Comparing this
         // event alone would zero `delta.x` and stall the scroller at -40.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-10.), px(-15.))),
             ..Default::default()
@@ -567,7 +567,7 @@ mod tests {
         let scroll_handle = ScrollHandle::new();
         let cx = setup_horizontal_area_test(cx, &scroll_handle);
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-40.), px(-10.))),
             ..Default::default()
@@ -576,7 +576,7 @@ mod tests {
 
         // Past the unlock ratio the gesture is no longer horizontal, so the
         // event stops driving this scroller.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(-10.), px(-25.))),
             ..Default::default()
@@ -647,7 +647,7 @@ mod tests {
         let inner_handle = ScrollHandle::new();
         let cx = setup_nested_vertical_test(cx, &outer_handle, &inner_handle, px(300.));
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
@@ -670,7 +670,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
@@ -692,7 +692,7 @@ mod tests {
         // Inner content (40) fits its 60px viewport: nothing to scroll.
         let cx = setup_nested_vertical_test(cx, &outer_handle, &inner_handle, px(40.));
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
@@ -720,7 +720,7 @@ mod tests {
         // one leaves the inner offset beyond the edge unclamped, which must
         // not read as "room to scroll" and swallow the second event.
         for _ in 0..2 {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: point(px(10.), px(10.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
                 ..Default::default()
@@ -789,7 +789,7 @@ mod tests {
             _ = window.draw(cx);
         });
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.), px(10.)),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()

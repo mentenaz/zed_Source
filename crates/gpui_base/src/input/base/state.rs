@@ -7,9 +7,9 @@ use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _, IntoElement,
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    Styled as _, Subscription, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _,
-    px,
+    ParentElement as _, Pixels, Point, Render, ScrollEvent, ScrollHandle, SharedString,
+    Styled as _, Subscription, UTF16Selection, Window, actions, div, point,
+    prelude::FluentBuilder as _, px,
 };
 use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
@@ -1757,7 +1757,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2063,7 +2063,10 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// `element.rs` rendering path, which treats "no highlighter" as
     /// unstyled text rather than an error) — callers should fall back to
     /// rendering `range` with a single default style in that case.
-    pub fn highlighted_runs(&self, range: Range<usize>) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
+    pub fn highlighted_runs(
+        &self,
+        range: Range<usize>,
+    ) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
         let highlighter = self.mode.highlighter()?;
         let highlighter = highlighter.borrow();
         let highlighter = highlighter.as_deref()?;
@@ -3086,7 +3089,7 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
                 window.listener_for(&entity, InputBaseState::on_mouse_up),
             )
             .on_mouse_move(window.listener_for(&entity, InputBaseState::on_mouse_move))
-            .on_scroll_wheel(window.listener_for(&entity, InputBaseState::on_scroll_wheel))
+            .on_scroll(window.listener_for(&entity, InputBaseState::on_scroll_wheel))
             .when(!self.disabled, |this| this.cursor_text())
             .flex_1()
             .when(self.is_multi_line(), |this| this.h_full())
