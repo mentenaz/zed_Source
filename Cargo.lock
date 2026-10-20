@@ -9235,6 +9235,7 @@ dependencies = [
  "helm_backend",
  "helm_ui",
  "helm_workspace",
+ "ide_env",
  "log",
  "project",
  "serde",

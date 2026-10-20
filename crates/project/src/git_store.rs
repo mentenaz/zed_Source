@@ -8826,6 +8826,10 @@ impl Repository {
             });
 
         let this = cx.weak_entity();
+        // Fork: settings registered for this repository's remote commands
+        // (the Helm account's token for github.com) go along; see
+        // `ide_env::set_git_remote_config`.
+        let work_dir = self.work_directory_abs_path.clone();
         self.send_job(
             "fetch",
             Some("git fetch".into()),
@@ -8836,6 +8840,7 @@ impl Repository {
                         environment,
                         ..
                     }) => {
+                        let environment = ide_env::with_git_remote_config(&work_dir, environment);
                         let result = backend
                             .fetch(fetch_options, askpass, environment, cx.clone())
                             .await;
@@ -8898,6 +8903,10 @@ impl Repository {
             });
 
         let this = cx.weak_entity();
+        // Fork: settings registered for this repository's remote commands
+        // (the Helm account's token for github.com) go along; see
+        // `ide_env::set_git_remote_config`.
+        let work_dir = self.work_directory_abs_path.clone();
         self.send_job(
             "push",
             Some(format!("git push {} {} {}:{}", args, remote, branch, remote_branch).into()),
@@ -8915,7 +8924,7 @@ impl Repository {
                                 remote.to_string(),
                                 options,
                                 askpass,
-                                environment.clone(),
+                                ide_env::with_git_remote_config(&work_dir, environment.clone()),
                                 cx.clone(),
                             )
                             .await;
@@ -8977,6 +8986,10 @@ impl Repository {
             status.push_str(&format!(" {}", b));
         }
 
+        // Fork: settings registered for this repository's remote commands
+        // (the Helm account's token for github.com) go along; see
+        // `ide_env::set_git_remote_config`.
+        let work_dir = self.work_directory_abs_path.clone();
         self.send_job(
             "pull",
             Some(status.into()),
@@ -8993,7 +9006,7 @@ impl Repository {
                                 remote.to_string(),
                                 rebase,
                                 askpass,
-                                environment.clone(),
+                                ide_env::with_git_remote_config(&work_dir, environment.clone()),
                                 cx,
                             )
                             .await

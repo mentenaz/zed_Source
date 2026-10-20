@@ -42,7 +42,9 @@ pub use api::{
     gh_remove_collaborator, gh_update_repo, gh_update_topics, gh_update_user,
 };
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
-pub use clone::{CloneCancelSignal, CloneCanceller, CloneFailure, clone_canceller, clone_repo};
+pub use clone::{
+    CloneCancelSignal, CloneCanceller, CloneFailure, clone_canceller, clone_repo, git_auth_config,
+};
 pub use error::{GhError, RawResponse, interpret, interpret_empty, rate_limit_message};
 pub use gh_cli::{
     GhCliAccount, GhCliSignInCancelSignal, GhCliSignInCanceller, GhCliSignInFailure, GhCliSignedIn,

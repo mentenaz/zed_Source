@@ -129,7 +129,7 @@ impl HelmPanel {
     }
 
     /// The folder of the workspace's active git repository.
-    fn workspace_repository_dir(&self, cx: &App) -> Option<PathBuf> {
+    pub(super) fn workspace_repository_dir(&self, cx: &App) -> Option<PathBuf> {
         let workspace = self.workspace.upgrade()?;
         let project = workspace.read(cx).project().read(cx);
         let repository = project.git_store().read(cx).active_repository()?;

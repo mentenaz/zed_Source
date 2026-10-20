@@ -20,6 +20,7 @@ gpui_flow.workspace = true
 helm_backend.workspace = true
 helm_workspace.workspace = true
 helm_ui.workspace = true
+ide_env.workspace = true
 log.workspace = true
 project.workspace = true
 serde.workspace = true

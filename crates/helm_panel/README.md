@@ -64,6 +64,15 @@ uses that account, and asks first if the repository already names someone
 else. The global git config is never changed. If the global git email is
 already one of the account's verified addresses, it is used without asking.
 
+Pushing, pulling and fetching from the git panel log in to github.com as
+the workspace's account: Helm hands git the account's token for those
+commands (as an `Authorization` header in `GIT_CONFIG_*` environment
+variables, through `ide_env`), so `gh auth switch` is not needed and two
+windows can push as two accounts. Other hosts, SSH remotes and the
+integrated terminal keep git's own login. When Helm knows the account
+cannot do it, the git panel's Push / Pull / Fetch button is disabled and the
+command is refused with the account that can.
+
 When the workspace is a git repository on github.com, Helm checks whether
 the workspace's account can push to it. If it cannot, Helm asks your other
 signed-in accounts in the background (switching nothing), and when one of

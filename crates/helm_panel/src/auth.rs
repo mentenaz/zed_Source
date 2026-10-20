@@ -78,6 +78,7 @@ impl HelmPanel {
             return;
         };
         self.active_login = Some(login.clone());
+        self.account_loading = true;
 
         let gh_state = self.gh_state.clone();
         let started = gh_state.clone();
@@ -118,6 +119,11 @@ impl HelmPanel {
     fn apply_auth_outcome(&mut self, login: String, outcome: AuthOutcome, cx: &mut Context<Self>) {
         self.auth_initialized = true;
         self.load_state = LoadState::Idle;
+        // Signed in: loading ends once the token is registered for the
+        // repository (`register_git_credentials`). Otherwise it ends here.
+        if !matches!(outcome, AuthOutcome::Ready { .. }) {
+            self.account_loading = false;
+        }
         match outcome {
             AuthOutcome::Ready {
                 account,

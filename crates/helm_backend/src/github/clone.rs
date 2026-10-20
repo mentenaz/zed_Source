@@ -143,22 +143,35 @@ async fn clone_inner(
     Err(CloneFailure::Cancelled)
 }
 
+/// The git settings that make git log in to github.com with `token`: the
+/// token as an `Authorization` header (git sends it only to
+/// `https://github.com/` addresses), and the credential helpers for
+/// github.com cleared, so `gh auth git-credential` and Git Credential
+/// Manager are not asked. For `GIT_CONFIG_*` environment variables.
+pub fn git_auth_config(token: &str) -> Vec<(String, String)> {
+    let basic = BASE64_STANDARD.encode(format!("x-access-token:{token}"));
+    vec![
+        // An empty value clears the helpers configured so far.
+        ("credential.https://github.com.helper".to_string(), String::new()),
+        (
+            "http.https://github.com/.extraHeader".to_string(),
+            format!("Authorization: Basic {basic}"),
+        ),
+    ]
+}
+
 /// `git clone --progress https://github.com/<full_name>.git <target>`, with
 /// the token (if any) as an `Authorization` header in environment config,
 /// and no credential helpers or prompts.
 fn git_clone_command(full_name: &str, target: &Path, token: Option<&str>) -> tokio::process::Command {
-    let mut config: Vec<(&str, String)> = vec![
+    let mut config: Vec<(String, String)> = vec![
         // An empty value clears the helpers configured so far, including
         // `gh auth git-credential` and Git Credential Manager.
-        ("credential.helper", String::new()),
-        ("credential.https://github.com.helper", String::new()),
+        ("credential.helper".to_string(), String::new()),
     ];
-    if let Some(token) = token {
-        let basic = BASE64_STANDARD.encode(format!("x-access-token:{token}"));
-        config.push((
-            "http.https://github.com/.extraHeader",
-            format!("Authorization: Basic {basic}"),
-        ));
+    match token {
+        Some(token) => config.extend(git_auth_config(token)),
+        None => config.push(("credential.https://github.com.helper".to_string(), String::new())),
     }
 
     let mut command = tokio::process::Command::new("git");

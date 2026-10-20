@@ -983,7 +983,7 @@ impl GhState {
     }
 
     /// The token requests are sent with, if one has been set.
-    pub(crate) async fn token(&self) -> Option<String> {
+    pub async fn token(&self) -> Option<String> {
         self.token.read().await.clone()
     }
 

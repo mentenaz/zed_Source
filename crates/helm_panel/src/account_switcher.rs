@@ -106,6 +106,10 @@ impl HelmPanel {
         self.repo_access_key = None;
         self.commit_identity = CommitIdentity::Unknown;
         self.commit_identity_key = None;
+        // The previous account's token no longer goes along with pushes;
+        // pushes wait until the new one is loaded (`start_session`).
+        self.unregister_git_credentials();
+        self.account_loading = false;
 
         self.account.clear();
         self.scopes.clear();

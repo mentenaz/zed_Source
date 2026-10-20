@@ -13,12 +13,19 @@
 //! It has no dependencies, so the headless crates can use it too. A provider
 //! may read the disk (a version store, a project's version file), so call
 //! [`bin_dirs`] and [`path_env`] from a background thread.
+//!
+//! It also carries git settings for the git commands that talk to a remote
+//! (push, pull, fetch), per repository folder: whatever knows which account
+//! a repository uses (the Helm panel) sets them with
+//! [`set_git_remote_config`], and the code that starts those commands adds
+//! them with [`with_git_remote_config`]. They go to git as `GIT_CONFIG_*`
+//! environment variables, never on the command line.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Answers with the folders a process started in `directory` should have
 /// first on its `PATH` for one runtime: usually one folder, or none when the
@@ -97,6 +104,73 @@ pub fn apply_to<S: BuildHasher>(env: &mut HashMap<String, String, S>, dirs: &[Pa
     }
 }
 
+/// Git settings (`key`, `value`) for the remote commands of the repository
+/// in each folder.
+static GIT_REMOTE_CONFIG: RwLock<Vec<(PathBuf, Vec<(String, String)>)>> = RwLock::new(Vec::new());
+
+/// Sets the git settings push, pull and fetch get in the repository at
+/// `repository`, replacing any set before. Empty `entries` removes them.
+pub fn set_git_remote_config(repository: &Path, entries: Vec<(String, String)>) {
+    let Ok(mut config) = GIT_REMOTE_CONFIG.write() else {
+        return;
+    };
+    config.retain(|(folder, _)| folder != repository);
+    if !entries.is_empty() {
+        config.push((repository.to_path_buf(), entries));
+    }
+}
+
+/// The git settings set for the repository at `repository`.
+pub fn git_remote_config(repository: &Path) -> Vec<(String, String)> {
+    GIT_REMOTE_CONFIG
+        .read()
+        .ok()
+        .and_then(|config| {
+            config
+                .iter()
+                .find(|(folder, _)| folder == repository)
+                .map(|(_, entries)| entries.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// `env` with the git settings set for the repository at `repository`
+/// added as `GIT_CONFIG_*` variables, after any `env` already has. `env`
+/// itself when none are set.
+pub fn with_git_remote_config<S: BuildHasher + Clone>(
+    repository: &Path,
+    env: Arc<HashMap<String, String, S>>,
+) -> Arc<HashMap<String, String, S>> {
+    let entries = git_remote_config(repository);
+    if entries.is_empty() {
+        return env;
+    }
+    let mut env = (*env).clone();
+    append_git_config(&mut env, &entries);
+    Arc::new(env)
+}
+
+/// Adds `entries` to the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /
+/// `GIT_CONFIG_VALUE_<n>` settings in `env`, numbering on from those already
+/// there.
+pub fn append_git_config<S: BuildHasher>(
+    env: &mut HashMap<String, String, S>,
+    entries: &[(String, String)],
+) {
+    let start = env
+        .get("GIT_CONFIG_COUNT")
+        .and_then(|count| count.parse::<usize>().ok())
+        .unwrap_or(0);
+    for (offset, (key, value)) in entries.iter().enumerate() {
+        env.insert(format!("GIT_CONFIG_KEY_{}", start + offset), key.clone());
+        env.insert(format!("GIT_CONFIG_VALUE_{}", start + offset), value.clone());
+    }
+    env.insert(
+        "GIT_CONFIG_COUNT".to_string(),
+        (start + entries.len()).to_string(),
+    );
+}
+
 /// Whether `name` is the `PATH` variable. Windows spells it `Path` as often
 /// as `PATH`, and treats the two as one.
 pub fn is_path_variable(name: &str) -> bool {
@@ -117,6 +191,40 @@ mod tests {
 
     fn entries(path: &OsStr) -> Vec<PathBuf> {
         std::env::split_paths(path).collect()
+    }
+
+    #[test]
+    fn git_config_entries_are_numbered_after_existing_ones() {
+        let mut env = HashMap::new();
+        env.insert("GIT_CONFIG_COUNT".to_string(), "1".to_string());
+        env.insert("GIT_CONFIG_KEY_0".to_string(), "gpg.program".to_string());
+        env.insert("GIT_CONFIG_VALUE_0".to_string(), "wrapper".to_string());
+        append_git_config(
+            &mut env,
+            &[("credential.helper".to_string(), String::new())],
+        );
+        assert_eq!(env["GIT_CONFIG_COUNT"], "2");
+        assert_eq!(env["GIT_CONFIG_KEY_0"], "gpg.program");
+        assert_eq!(env["GIT_CONFIG_KEY_1"], "credential.helper");
+        assert_eq!(env["GIT_CONFIG_VALUE_1"], "");
+    }
+
+    #[test]
+    fn git_remote_config_is_per_repository_and_can_be_removed() {
+        let repository = PathBuf::from("ide-env-test-repository");
+        let other = PathBuf::from("ide-env-test-other");
+        set_git_remote_config(&repository, vec![("a".to_string(), "1".to_string())]);
+
+        let env = with_git_remote_config(&repository, Arc::new(HashMap::new()));
+        assert_eq!(env["GIT_CONFIG_KEY_0"], "a");
+        let untouched = Arc::new(HashMap::new());
+        assert!(Arc::ptr_eq(
+            &with_git_remote_config(&other, untouched.clone()),
+            &untouched
+        ));
+
+        set_git_remote_config(&repository, Vec::new());
+        assert!(git_remote_config(&repository).is_empty());
     }
 
     #[test]

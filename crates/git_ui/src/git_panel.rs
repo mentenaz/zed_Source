@@ -1236,6 +1236,8 @@ pub struct GitPanel {
     /// Re-renders when the Helm panel's account or repository access changes
     /// (`github_account.rs`).
     _helm_observation: Option<Subscription>,
+    /// The workspace's Helm panel, found once (`github_account.rs`).
+    helm_panel: Option<WeakEntity<helm_panel::HelmPanel>>,
     _settings_subscription: Subscription,
     git_access: Option<GitAccess>,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1575,6 +1577,7 @@ impl GitPanel {
                 _commit_message_buffer_subscription: None,
                 _repo_subscriptions: Vec::new(),
                 _helm_observation: None,
+                helm_panel: None,
                 _settings_subscription,
                 git_access: None,
                 commit_menu_handle: PopoverMenuHandle::default(),
@@ -4555,6 +4558,10 @@ impl GitPanel {
         if !self.can_push_and_pull(cx) {
             return;
         }
+        // Fork: refused when the workspace's GitHub account cannot do it.
+        if self.refuse_github_remote_command(github_account::GitHubNeed::Read, cx) {
+            return;
+        }
 
         let Some(repo) = self.active_repository.clone() else {
             return;
@@ -4727,6 +4734,10 @@ impl GitPanel {
         if !self.can_push_and_pull(cx) {
             return;
         }
+        // Fork: refused when the workspace's GitHub account cannot do it.
+        if self.refuse_github_remote_command(github_account::GitHubNeed::Read, cx) {
+            return;
+        }
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
@@ -4795,6 +4806,10 @@ impl GitPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.can_push_and_pull(cx) {
+            return;
+        }
+        // Fork: refused when the workspace's GitHub account cannot do it.
+        if self.refuse_github_remote_command(github_account::GitHubNeed::Push, cx) {
             return;
         }
         let Some(repo) = self.active_repository.clone() else {
@@ -6814,6 +6829,13 @@ impl GitPanel {
         let branch = self.active_repository.as_ref()?.read(cx).branch.clone();
         if !self.can_push_and_pull(cx) {
             return None;
+        }
+        // Fork: drawn disabled when the workspace's GitHub account cannot run
+        // the command it would.
+        if let Some(branch) = branch.as_ref()
+            && let Some(refused) = self.render_refused_remote_button(branch, cx)
+        {
+            return Some(refused);
         }
         Some(
             h_flex()

@@ -6,15 +6,162 @@
 //! commits are authored with (item 2), with its one-time choice and a
 //! question when the repository already names someone else. Over HTTPS it
 //! also warns when Helm has found that the account cannot push, with a
-//! button to switch to an account that can. Nothing is disabled yet: until
-//! the git panel pushes with the Helm account, pushes still go through
-//! git's own login.
+//! button to switch to an account that can.
+//!
+//! Push, pull and fetch log in as that account (Helm hands git its token,
+//! section 11 item 3), so when Helm knows the account cannot do one of them,
+//! the remote button is shown disabled and the action is refused with the
+//! same explanation, instead of running git into an error that does not say
+//! the account is the problem.
 
 use super::*;
 use helm_panel::{CommitIdentity, HelmPanel, HelmPanelSettings};
 use settings::Settings as _;
 
+/// What a remote command needs from the account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GitHubNeed {
+    /// Fetch and pull: seeing the repository.
+    Read,
+    /// Push, publish and republish: writing to it.
+    Push,
+}
+
+/// The toast refusing a remote command.
+struct GitHubRefusal;
+
 impl GitPanel {
+    /// Why the workspace's GitHub account cannot do what `need` asks, when
+    /// Helm knows it cannot, with the account that can (login, name). `None`
+    /// when it can, or when nothing is known: not a github.com HTTPS
+    /// remote, not signed in to Helm, or not checked yet.
+    fn github_refusal(
+        &self,
+        need: GitHubNeed,
+        cx: &App,
+    ) -> Option<(String, Option<(String, String)>)> {
+        let helm = self.helm_panel()?;
+        let helm = helm.read(cx);
+        let access = helm.repo_access()?;
+        let login = helm.signed_in_login()?;
+        if !access.remote.https || !access.login.eq_ignore_ascii_case(login) {
+            return None;
+        }
+        let blocked = match need {
+            GitHubNeed::Read => !access.can_read,
+            GitHubNeed::Push => access.can_push == Some(false),
+        };
+        if !blocked {
+            return None;
+        }
+        let settings = HelmPanelSettings::get_global(cx);
+        let name_of = |login: &str| {
+            settings
+                .account(login)
+                .map_or_else(|| login.to_string(), |account| account.display_name().to_string())
+        };
+        let name = name_of(login);
+        let repository = access.remote.full_name();
+        let reason = match need {
+            GitHubNeed::Read => format!("{name} can't see {repository}."),
+            GitHubNeed::Push => format!("{name} can't push to {repository}."),
+        };
+        let suggested = access
+            .suggested_login
+            .as_deref()
+            .map(|suggested| (suggested.to_string(), name_of(suggested)));
+        Some((reason, suggested))
+    }
+
+    /// Refuses a remote command the workspace's account cannot do, with a
+    /// toast saying why and offering the account that can. Returns whether
+    /// it refused.
+    pub(super) fn refuse_github_remote_command(
+        &mut self,
+        need: GitHubNeed,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Right after an account switch (or at startup) the account's token
+        // is not registered yet; git would log in with its own login.
+        let loading = self
+            .helm_panel()
+            .is_some_and(|helm| helm.read(cx).is_loading_github_account());
+        if loading {
+            let toast = workspace::Toast::new(
+                NotificationId::unique::<GitHubRefusal>(),
+                "Helm is still loading the GitHub account for this workspace. Try again in a \
+                 moment.",
+            );
+            let workspace = self.workspace.clone();
+            cx.defer(move |cx| {
+                workspace
+                    .update(cx, |workspace, cx| workspace.show_toast(toast, cx))
+                    .ok();
+            });
+            return true;
+        }
+        let Some((reason, suggested)) = self.github_refusal(need, cx) else {
+            return false;
+        };
+        let mut toast = workspace::Toast::new(NotificationId::unique::<GitHubRefusal>(), reason);
+        if let (Some((login, name)), Some(helm)) = (suggested, self.helm_panel.clone()) {
+            toast = toast.on_click(format!("Switch to {name}"), move |_, cx| {
+                helm.update(cx, |helm, cx| helm.switch_account(login.clone(), cx))
+                    .ok();
+            });
+        }
+        // A command can arrive while the workspace is being updated (an
+        // action), so the toast is shown once that update has finished.
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| workspace.show_toast(toast, cx))
+                .ok();
+        });
+        true
+    }
+
+    /// The remote button drawn disabled, when the command it would run is
+    /// one the workspace's account cannot do. `None` otherwise, and the
+    /// usual button is drawn.
+    pub(super) fn render_refused_remote_button(
+        &self,
+        branch: &Branch,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let (label, need) = match branch.upstream.as_ref() {
+            Some(Upstream {
+                tracking: UpstreamTracking::Tracked(UpstreamTrackingStatus { ahead, behind }),
+                ..
+            }) => match (*ahead, *behind) {
+                (0, 0) => ("Fetch", GitHubNeed::Read),
+                (_, 0) => ("Push", GitHubNeed::Push),
+                _ => ("Pull", GitHubNeed::Read),
+            },
+            Some(Upstream {
+                tracking: UpstreamTracking::Gone,
+                ..
+            }) => ("Republish", GitHubNeed::Push),
+            None => ("Publish", GitHubNeed::Push),
+        };
+        let (reason, suggested) = self.github_refusal(need, cx)?;
+        let tooltip = match suggested {
+            Some((_, name)) => format!("{reason} Switch to {name} to {}.", label.to_lowercase()),
+            None => format!("{reason} None of your signed-in accounts can."),
+        };
+        Some(
+            div()
+                .id("remote-button-refused")
+                .tooltip(Tooltip::text(tooltip))
+                .child(
+                    Button::new("remote-button-refused-button", label)
+                        .label_size(LabelSize::Small)
+                        .disabled(true),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Re-renders the git panel when the Helm panel changes (its account,
     /// or what the account may do). Started once the Helm panel exists.
     pub(super) fn observe_helm_panel(&mut self, cx: &mut Context<Self>) {
@@ -27,7 +174,16 @@ impl GitPanel {
         let Some(helm) = workspace.read(cx).panel::<HelmPanel>(cx) else {
             return;
         };
+        self.helm_panel = Some(helm.downgrade());
         self._helm_observation = Some(cx.observe(&helm, |_, _, cx| cx.notify()));
+    }
+
+    /// The workspace's Helm panel, once [`Self::observe_helm_panel`] has
+    /// found it. Read through this rather than the workspace: push, pull and
+    /// fetch run while the workspace is being updated, where reading it
+    /// would panic.
+    fn helm_panel(&self) -> Option<Entity<HelmPanel>> {
+        self.helm_panel.as_ref()?.upgrade()
     }
 
     /// The account row, the commit-email lines, and the warning when the
@@ -35,8 +191,7 @@ impl GitPanel {
     /// repository. The push warning is for HTTPS remotes only: over SSH the
     /// SSH key, not the account, decides access.
     pub(super) fn render_github_account(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let workspace = self.workspace.upgrade()?;
-        let helm = workspace.read(cx).panel::<HelmPanel>(cx)?;
+        let helm = self.helm_panel()?;
         let (access, login, identity) = {
             let helm = helm.read(cx);
             (

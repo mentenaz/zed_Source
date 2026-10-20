@@ -4197,13 +4197,18 @@ async fn run_git_command(
             .env("SSH_ASKPASS", ask_pass.script_path())
             .env("SSH_ASKPASS_REQUIRE", "force");
 
-        if !env.contains_key("GIT_CONFIG_COUNT")
-            && let Some(gpg_wrapper) = ask_pass.gpg_wrapper_path()
-        {
+        // Fork: settings already in `env` (per-repository ones from
+        // `ide_env::with_git_remote_config`) are kept; the wrapper goes after
+        // them instead of being left out.
+        if let Some(gpg_wrapper) = ask_pass.gpg_wrapper_path() {
+            let index = env
+                .get("GIT_CONFIG_COUNT")
+                .and_then(|count| count.parse::<usize>().ok())
+                .unwrap_or(0);
             command
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "gpg.program")
-                .env("GIT_CONFIG_VALUE_0", gpg_wrapper);
+                .env("GIT_CONFIG_COUNT", (index + 1).to_string())
+                .env(format!("GIT_CONFIG_KEY_{index}"), "gpg.program")
+                .env(format!("GIT_CONFIG_VALUE_{index}"), gpg_wrapper);
         }
 
         #[cfg(target_os = "windows")]

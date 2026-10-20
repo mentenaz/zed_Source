@@ -11,7 +11,9 @@
 
 use std::collections::HashSet;
 
-use helm_backend::github::{GitHubRemote, RepoPermission, gh_get_repo, parse_github_remote};
+use helm_backend::github::{
+    GitHubRemote, RepoPermission, gh_get_repo, git_auth_config, parse_github_remote,
+};
 use project::git_store::{GitStore, GitStoreEvent};
 
 use super::accounts::read_token;
@@ -116,8 +118,10 @@ impl HelmPanel {
     /// repository, unless that was already checked for this account and
     /// repository (`force` checks again, after a failure).
     pub(super) fn check_repo_access(&mut self, force: bool, cx: &mut Context<Self>) {
-        // The commit identity follows the same account and repository.
+        // The commit identity and the push credentials follow the same
+        // account and repository.
         self.refresh_commit_identity(false, cx);
+        self.register_git_credentials(cx);
         let Some(remote) = self.workspace_github_remote(cx) else {
             if self.repo_access.take().is_some() {
                 cx.notify();
@@ -202,6 +206,74 @@ impl HelmPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Makes the git panel's push, pull and fetch in the workspace's
+    /// repository log in to github.com as the workspace's account (section
+    /// 11, item 3): its token goes to git as an `Authorization` header in
+    /// `GIT_CONFIG_*` environment variables, through `ide_env`. Removed when
+    /// the workspace has no GitHub HTTPS repository or is signed out, so
+    /// git's own login applies again.
+    pub(super) fn register_git_credentials(&mut self, cx: &mut Context<Self>) {
+        let dir = self.workspace_repository_dir(cx);
+        self.workspace_remote_https = self
+            .workspace_github_remote(cx)
+            .is_some_and(|remote| remote.https);
+        let signed_in = self.signed_in_login().is_some();
+        let applies = signed_in && self.workspace_remote_https;
+        // Already given for this repository and account: repository updates
+        // (any file change) come through here often.
+        if applies && dir.is_some() && self.git_credentials_dir == dir {
+            if self.account_loading {
+                self.account_loading = false;
+                cx.notify();
+            }
+            return;
+        }
+        self.unregister_git_credentials();
+        let Some(dir) = dir.filter(|_| applies) else {
+            // Nothing to give: no GitHub HTTPS repository. (Not signed in
+            // yet while loading keeps `account_loading` as it is.)
+            if signed_in && self.account_loading {
+                self.account_loading = false;
+                cx.notify();
+            }
+            return;
+        };
+        self.git_credentials_dir = Some(dir.clone());
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let token = gh_state.token().await;
+            this.update(cx, |this, cx| {
+                // Switched account or repository meanwhile.
+                if !this.is_current_state(&gh_state)
+                    || this.git_credentials_dir.as_ref() != Some(&dir)
+                {
+                    return;
+                }
+                let entries = token.as_deref().map(git_auth_config).unwrap_or_default();
+                ide_env::set_git_remote_config(&dir, entries);
+                this.account_loading = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the git panel should hold a push, pull or fetch back: the
+    /// workspace's GitHub account is still loading for a github.com HTTPS
+    /// repository, so git would otherwise log in with its own login.
+    pub fn is_loading_github_account(&self) -> bool {
+        self.account_loading && self.workspace_remote_https
+    }
+
+    /// Stops git panel pushes in the workspace's repository from using the
+    /// account's token (signed out, account switched or removed).
+    pub(super) fn unregister_git_credentials(&mut self) {
+        if let Some(dir) = self.git_credentials_dir.take() {
+            ide_env::set_git_remote_config(&dir, Vec::new());
+        }
     }
 
     /// Shows the "switch to the account that can push" toast, once per

@@ -241,6 +241,18 @@ pub struct HelmPanel {
     /// and which account and repository that was worked out for.
     commit_identity: CommitIdentity,
     commit_identity_key: Option<String>,
+    /// The repository folder whose git push, pull and fetch were given this
+    /// account's token (`repo_access.rs`), to take it back.
+    git_credentials_dir: Option<std::path::PathBuf>,
+    /// Set from the moment an account starts loading (startup, a switch)
+    /// until its token is registered for the repository, or the load ends
+    /// without a session. The git panel holds pushes back meanwhile, so they
+    /// do not go out with git's own login.
+    account_loading: bool,
+    /// Whether the workspace's repository has a github.com HTTPS remote, as
+    /// of the last check. Kept so the git panel can ask without reading the
+    /// workspace, which it may not do while a push is being started.
+    workspace_remote_https: bool,
     /// Set when an action was bounced to the auth gate for a missing scope;
     /// re-sent by `start_session` once the scope is granted.
     pending_action: Option<PendingAction>,
@@ -485,6 +497,9 @@ impl HelmPanel {
                 _git_store_subscription: None,
                 commit_identity: CommitIdentity::Unknown,
                 commit_identity_key: None,
+                git_credentials_dir: None,
+                account_loading: false,
+                workspace_remote_https: false,
                 pending_action: None,
                 pending_attach: None,
                 scope_to_authorize: "repo",

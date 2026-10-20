@@ -1,6 +1,6 @@
 [package]
 name = "ide_env"
-description = "The IDE's own runtimes (built-in Node.js, …) as folders to put first on the PATH of anything it starts: terminals, the Script Runner, workflow actions."
+description = "The IDE's own runtimes (built-in Node.js, …) as folders to put first on the PATH of anything it starts: terminals, the Script Runner, workflow actions; and per-repository git settings for push, pull and fetch."
 # Apache, and free of any runtime manager's own code, so the Apache crates
 # that start processes (`workflow_engine`, `script_runner_panel`) can use it.
 license = "Apache-2.0"
