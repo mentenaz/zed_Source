@@ -92,7 +92,10 @@ impl LspSnapshot {
             || self.code_action.open
             || self.hover.is_some()
             || self.diagnostic.is_some()
-            || self.diagnostics_all.as_ref().is_some_and(|set| !set.is_empty())
+            || self
+                .diagnostics_all
+                .as_ref()
+                .is_some_and(|set| !set.is_empty())
     }
 }
 
@@ -372,7 +375,10 @@ impl<M: OverlayMode> InputOverlayHost<M> {
         // screen space as one of those would just be clutter, and clicking
         // it re-triggers the exact same fetch those already can.
         if snapshot.as_ref().is_some_and(|s| !s.has_overlay())
-            && state.read(cx).context_menu_capabilities().has_code_actions()
+            && state
+                .read(cx)
+                .context_menu_capabilities()
+                .has_code_actions()
         {
             if let Some(lightbulb) = render_code_action_lightbulb(state, cx) {
                 floating.push(lightbulb);
@@ -405,9 +411,14 @@ fn render_inline_diagnostics<M: InputModeKind>(
     let mut elements = Vec::with_capacity(by_line.len());
     for (row, entries) in by_line {
         let line_end = text.line_end_offset(row);
-        let Some(bounds) = editor.range_to_bounds(&(line_end..line_end)) else { continue };
+        let Some(bounds) = editor.range_to_bounds(&(line_end..line_end)) else {
+            continue;
+        };
 
-        let mut row_el = h_flex().id(format!("diag-inline-{row}")).gap_1().items_center();
+        let mut row_el = h_flex()
+            .id(format!("diag-inline-{row}"))
+            .gap_1()
+            .items_center();
         for entry in entries {
             let fg = diagnostic_foreground(entry.severity, cx);
             let bg = diagnostic_background(entry.severity, cx);
@@ -486,7 +497,13 @@ fn render_code_action_lightbulb<M: InputModeKind>(
                         .w(px(14.))
                         .h(px(14.))
                         .cursor_pointer()
-                        .child(svg().path("icons/Lightbulb.svg").w(px(14.)).h(px(14.)).text_color(fg))
+                        .child(
+                            svg()
+                                .path("icons/Lightbulb.svg")
+                                .w(px(14.))
+                                .h(px(14.))
+                                .text_color(fg),
+                        )
                         .on_mouse_down(MouseButton::Left, |_e, window, cx| {
                             window.dispatch_action(Box::new(ToggleCodeActions), cx);
                         }),

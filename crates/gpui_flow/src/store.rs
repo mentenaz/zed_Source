@@ -1139,7 +1139,8 @@ mod tests {
         // A single small node fits comfortably within the default min/max
         // zoom range, so fit_view must not perturb `min_zoom` at all — the
         // widening only ever kicks in when it's actually needed.
-        let mut state = FlowState::new(vec![FlowNode::new("a", 0.0, 0.0).size(100.0, 60.0)], vec![]);
+        let mut state =
+            FlowState::new(vec![FlowNode::new("a", 0.0, 0.0).size(100.0, 60.0)], vec![]);
         state.fit_view(60.0, 900.0, 600.0);
 
         assert_eq!(
@@ -1217,6 +1218,10 @@ mod tests {
     }
 
     fn selected_id(state: &FlowState) -> Option<&str> {
-        state.nodes.iter().find(|n| n.selected).map(|n| n.id.as_ref())
+        state
+            .nodes
+            .iter()
+            .find(|n| n.selected)
+            .map(|n| n.id.as_ref())
     }
 }

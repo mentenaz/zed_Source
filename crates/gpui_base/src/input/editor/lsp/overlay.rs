@@ -196,7 +196,12 @@ impl InputBaseState<EditorMode> {
         } else if let Some(insert_text) = item.insert_text.as_ref() {
             new_text.clone_from(insert_text);
         }
-        eprintln!("[compl-debug] resolved byte range={:?} new_text={:?} doc_len={}", range, new_text, self.text.len());
+        eprintln!(
+            "[compl-debug] resolved byte range={:?} new_text={:?} doc_len={}",
+            range,
+            new_text,
+            self.text.len()
+        );
         self.completion_inserting = true;
         let range = self.range_to_utf16(&range);
         eprintln!("[compl-debug] utf16 range={:?}", range);

@@ -210,7 +210,13 @@ fn decode_semantic_tokens(
     // length, tokenType, tokenModifiers. A trailing partial group (malformed
     // server data) is dropped rather than indexed out of bounds.
     for token in tokens.data.chunks_exact(5) {
-        let &[delta_line, delta_start, length, token_type, _token_modifiers_bitset] = token
+        let &[
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            _token_modifiers_bitset,
+        ] = token
         else {
             continue;
         };

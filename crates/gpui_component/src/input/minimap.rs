@@ -156,11 +156,17 @@ impl MinimapScale {
 
     /// Mini-space y offset -> the real source line it falls on.
     fn mini_y_to_real_line(&self, mini_y: f32) -> f32 {
-        ((mini_y / MINI_LINE_HEIGHT.as_f32()) * self.stride as f32).clamp(0.0, self.total_lines as f32)
+        ((mini_y / MINI_LINE_HEIGHT.as_f32()) * self.stride as f32)
+            .clamp(0.0, self.total_lines as f32)
     }
 }
 
-fn paint_minimap(bounds: &Bounds<Pixels>, state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+fn paint_minimap(
+    bounds: &Bounds<Pixels>,
+    state: &Entity<EditorState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // `state.read(cx)` ties its returned reference to `cx`'s lifetime, but
     // painting below needs `cx` mutably (for `shaped.paint`) — so each piece
     // of data is pulled out into an owned local in its own short-lived
@@ -222,13 +228,22 @@ fn paint_minimap(bounds: &Bounds<Pixels>, state: &Entity<EditorState>, window: &
             // edge on top of it keeps a crisp anchor point, same as an
             // overview-ruler mark.
             let tint = diagnostic_foreground(severity, cx).opacity(0.28);
-            let row_fill = Bounds::new(point(px(bx), px(y)), Size { width: bounds.size.width, height: MINI_LINE_HEIGHT });
+            let row_fill = Bounds::new(
+                point(px(bx), px(y)),
+                Size {
+                    width: bounds.size.width,
+                    height: MINI_LINE_HEIGHT,
+                },
+            );
             window.paint_quad(fill(row_fill, tint));
 
             let edge_color = diagnostic_foreground(severity, cx);
             let marker = Bounds::new(
                 point(px(bx + bounds.size.width.as_f32() - 4.0), px(y)),
-                Size { width: px(4.0), height: MINI_LINE_HEIGHT },
+                Size {
+                    width: px(4.0),
+                    height: MINI_LINE_HEIGHT,
+                },
             );
             window.paint_quad(fill(marker, edge_color));
         }
@@ -247,13 +262,29 @@ fn paint_minimap(bounds: &Bounds<Pixels>, state: &Entity<EditorState>, window: &
 
         let byte_start = rope.line_start_offset(real_line);
         let byte_end = byte_start + line_text.len();
-        let runs = build_runs(state.read(cx), byte_start..byte_end, &line_text, &base_font, base_color);
+        let runs = build_runs(
+            state.read(cx),
+            byte_start..byte_end,
+            &line_text,
+            &base_font,
+            base_color,
+        );
 
-        let shaped = window
-            .text_system()
-            .shape_line(SharedString::from(line_text), MINI_FONT_SIZE, &runs, None);
+        let shaped = window.text_system().shape_line(
+            SharedString::from(line_text),
+            MINI_FONT_SIZE,
+            &runs,
+            None,
+        );
 
-        let _ = shaped.paint(point(px(bx + 4.0), px(y)), MINI_LINE_HEIGHT, TextAlign::Left, None, window, cx);
+        let _ = shaped.paint(
+            point(px(bx + 4.0), px(y)),
+            MINI_LINE_HEIGHT,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 
     // Viewport indicator, same visual language as `gpui-flow`'s minimap.
@@ -280,10 +311,22 @@ fn paint_minimap(bounds: &Bounds<Pixels>, state: &Entity<EditorState>, window: &
     );
     window.paint_quad(fill(vp_bounds, gpui::rgba(0x3b82f622)));
     let border: Background = gpui::rgba(0x3b82f688).into();
-    let top = Bounds::new(point(px(bx), px(vy)), Size { width: bounds.size.width, height: px(1.0) });
+    let top = Bounds::new(
+        point(px(bx), px(vy)),
+        Size {
+            width: bounds.size.width,
+            height: px(1.0),
+        },
+    );
     window.paint_quad(fill(top, border.clone()));
     let bottom_y = vy + vh;
-    let bottom = Bounds::new(point(px(bx), px(bottom_y)), Size { width: bounds.size.width, height: px(1.0) });
+    let bottom = Bounds::new(
+        point(px(bx), px(bottom_y)),
+        Size {
+            width: bounds.size.width,
+            height: px(1.0),
+        },
+    );
     window.paint_quad(fill(bottom, border));
 }
 
@@ -316,7 +359,10 @@ fn build_runs(
     let mut runs = Vec::with_capacity(styles.len());
     for (range, style) in styles {
         let start = range.start.max(byte_range.start) - byte_range.start;
-        let end = range.end.min(byte_range.end).saturating_sub(byte_range.start);
+        let end = range
+            .end
+            .min(byte_range.end)
+            .saturating_sub(byte_range.start);
         if end <= start || start >= line_text.len() {
             continue;
         }
@@ -349,7 +395,12 @@ fn build_runs(
     runs
 }
 
-fn scroll_to_minimap_point(state: &Entity<EditorState>, my: f32, minimap_height: Pixels, cx: &mut App) {
+fn scroll_to_minimap_point(
+    state: &Entity<EditorState>,
+    my: f32,
+    minimap_height: Pixels,
+    cx: &mut App,
+) {
     state.update(cx, |state, cx| {
         let total_lines = state.text().lines_len().max(1);
         let Some(real_line_height) = state.line_height() else {
@@ -363,7 +414,8 @@ fn scroll_to_minimap_point(state: &Entity<EditorState>, my: f32, minimap_height:
 
         let scale = MinimapScale::compute(total_lines, minimap_height);
         let target_line = scale.mini_y_to_real_line(my);
-        let target_top = (real_line_height * target_line - viewport_height * 0.5).clamp(Pixels::ZERO, max_scroll);
+        let target_top = (real_line_height * target_line - viewport_height * 0.5)
+            .clamp(Pixels::ZERO, max_scroll);
 
         let x = state.scroll_offset().x;
         state.set_scroll_offset(point(x, -target_top), cx);

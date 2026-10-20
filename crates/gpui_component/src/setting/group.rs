@@ -99,10 +99,11 @@ impl SettingGroup {
             .gap_4()
             .children(self.items.iter().enumerate().filter_map(|(item_ix, item)| {
                 if item.is_match(&query, cx) {
-                    Some(
-                        item.clone()
-                            .render_item(&options.clone().with_item_ix(item_ix), window, cx),
-                    )
+                    Some(item.clone().render_item(
+                        &options.clone().with_item_ix(item_ix),
+                        window,
+                        cx,
+                    ))
                 } else {
                     None
                 }

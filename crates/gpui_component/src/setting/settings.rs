@@ -445,11 +445,14 @@ impl RenderOnce for Settings {
             )
             .child(
                 resizable_panel().child(container_query(move |size, window, cx| {
-                    let options = options.clone().with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
-                        Axis::Vertical
-                    } else {
-                        Axis::Horizontal
-                    });
+                    let options =
+                        options
+                            .clone()
+                            .with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
+                                Axis::Vertical
+                            } else {
+                                Axis::Horizontal
+                            });
                     self.render_active_page(&state, &filtered_pages, &options, window, cx)
                 })),
             )

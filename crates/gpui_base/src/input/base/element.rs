@@ -1451,7 +1451,9 @@ impl<M: InputModeKind> TextElement<M> {
                 text.line_end_offset(end_line)
             };
             let range_styles = match (skip, highlighter.as_deref()) {
-                (true, _) | (false, None) => vec![(byte_start..byte_end, HighlightStyle::default())],
+                (true, _) | (false, None) => {
+                    vec![(byte_start..byte_end, HighlightStyle::default())]
+                }
                 (false, Some(highlighter)) => highlighter.styles(
                     &(byte_start..byte_end),
                     state.editor_style.highlight_styles.as_ref(),

@@ -303,16 +303,18 @@ impl SettingItem {
                                     )
                                 }),
                         )
-                        .child(div().id("field").child(Self::render_field(
-                            field,
-                            options
-                                .clone()
-                                .with_layout(layout)
-                                .with_disabled(disabled)
-                                .with_item_key(item_key),
-                            window,
-                            cx,
-                        )))
+                        .child(
+                            div().id("field").child(Self::render_field(
+                                field,
+                                options
+                                    .clone()
+                                    .with_layout(layout)
+                                    .with_disabled(disabled)
+                                    .with_item_key(item_key),
+                                window,
+                                cx,
+                            )),
+                        )
                         .into_any_element()
                 }
                 SettingItem::Element {
@@ -320,7 +322,11 @@ impl SettingItem {
                 } => div()
                     .w_full()
                     .when(disabled, |this| this.opacity(0.5))
-                    .child((render)(&options.clone().with_disabled(disabled), window, cx))
+                    .child((render)(
+                        &options.clone().with_disabled(disabled),
+                        window,
+                        cx,
+                    ))
                     .into_any_element(),
             })
     }

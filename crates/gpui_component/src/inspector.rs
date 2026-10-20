@@ -8,7 +8,8 @@ use gpui::{
     inspector_reflection::FunctionReflection, prelude::FluentBuilder, px,
 };
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticMessage, DiagnosticSeverity, Position, TextEdit,
+    CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Diagnostic,
+    DiagnosticMessage, DiagnosticSeverity, Position, TextEdit,
 };
 use ropey::Rope;
 
@@ -385,7 +386,7 @@ fn rust_to_style(mut style: StyleRefinement, source: &str) -> (StyleRefinement, 
         match style_methods.map.get(method.as_str()) {
             Some(method_reflection) => style = method_reflection.invoke(style),
             None => {
-                let message= format!("unknown method `{}`", method);
+                let message = format!("unknown method `{}`", method);
                 let start = rope.offset_to_position(offset.saturating_sub(method.len()));
                 let end = rope.offset_to_position(offset);
                 let diagnostic = lsp_types::Diagnostic {

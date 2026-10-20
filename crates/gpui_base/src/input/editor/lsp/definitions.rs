@@ -107,7 +107,9 @@ impl InputBaseState<EditorMode> {
         if self.extras.hover_definition.is_pending(offset) {
             return;
         }
-        self.extras.hover_definition.set_pending(symbol_range.clone());
+        self.extras
+            .hover_definition
+            .set_pending(symbol_range.clone());
 
         let task = provider.definitions(&self.text, offset, window, cx);
         let editor = cx.entity();
