@@ -83,6 +83,15 @@ Open on GitHub.
 - **Pull requests, Issues and the context of a branch are unfinished.** They
   list open items only, with no Open / Closed / All switch and no context
   pane. That is phase W7 of the plan, which is on hold.
+- **The branch and tag dropdown is basic for now.** It lists the first 100
+  branches and the first 100 tags only (one page each), and its search only
+  filters those, so a repository with more (Zed, vite) does not offer the
+  rest. The list is loaded once when the tab opens; a branch created later
+  appears after reopening the tab. It changes what the tab shows from
+  GitHub, not the local checkout (that stays with the git panel's branch
+  picker). A refined branch selection (every page, searched on GitHub,
+  refreshed with the tab) is planned for a later stage; see
+  `crates/helm_panel/Helm_Future_Developments.md`.
 
 ## How it is wired
 

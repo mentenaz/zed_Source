@@ -275,7 +275,10 @@ This is the point where Helm becomes deeply integrated with Forge rather than si
 Build:
 
 - repository tree
-- branch selector
+- branch selector (a basic one exists: first 100 branches and tags, loaded
+  once; the refined version, planned for later, loads every page, searches
+  branches and tags on GitHub as you type, refreshes with the tab, and can
+  check the chosen branch out locally)
 - file browser
 - file viewer
 - commit history
