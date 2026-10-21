@@ -1,12 +1,12 @@
-//! Forge's own git credential helper (section 11, item 4 of
+//! Zed's own git credential helper (section 11, item 4 of
 //! `helm_backend/octocrab-helm-coverage.md`).
 //!
-//! Git run in one of Forge's terminals asks this helper first for
+//! Git run in one of Zed's terminals asks this helper first for
 //! `https://github.com` (the terminal's `GIT_CONFIG_*` settings, from
 //! `ide_env::git_credential_terminal_env`). Git starts it as
-//! `<forge> --git-credential get` and writes the request on its stdin; the
+//! `<zed> --git-credential get` and writes the request on its stdin; the
 //! helper passes the request, with the folder git runs in, to a socket the
-//! running Forge serves ([`start_server`]), and prints the answer. Forge
+//! running Zed serves ([`start_server`]), and prints the answer. Zed
 //! answers with the credential set for the repository that folder belongs
 //! to (`ide_env::git_credential_for`), looked up when git asks, so an open
 //! terminal follows an account switch. When there is nothing to answer, the
@@ -19,7 +19,7 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-/// The argument that makes the Forge binary run as the helper.
+/// The argument that makes the Zed binary run as the helper.
 pub const HELPER_ARG: &str = "--git-credential";
 
 /// What separates the request from the end of what the helper sends.
@@ -28,7 +28,7 @@ const END: u8 = 0;
 /// Requests larger than this are refused (git's are a few lines).
 const MAX_REQUEST: usize = 64 * 1024;
 
-/// A git credential request: the fields Forge looks at.
+/// A git credential request: the fields Zed looks at.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Request {
     pub protocol: Option<String>,
@@ -56,7 +56,7 @@ pub fn parse_request(text: &str) -> Request {
 }
 
 /// What to send to git for `request`, given the credential `lookup` finds
-/// for a folder. Empty when Forge has nothing to say: not https, not
+/// for a folder. Empty when Zed has nothing to say: not https, not
 /// github.com, or no credential for the folder.
 pub fn answer(request: &Request, lookup: impl Fn(&Path) -> Option<(String, String)>) -> String {
     let is_github = request.protocol.as_deref() == Some("https")
@@ -81,7 +81,7 @@ pub fn helper_command(program: &Path) -> String {
     format!("!'{program}' {HELPER_ARG}")
 }
 
-/// Runs as git's credential helper, for `<forge> --git-credential
+/// Runs as git's credential helper, for `<zed> --git-credential
 /// <operation>`. Returns the exit code; any failure is silent (exit 0, no
 /// output), so git simply asks the next helper.
 pub fn run_helper(operation: Option<&str>) -> i32 {

@@ -68,8 +68,8 @@ Pushing, pulling and fetching from the git panel log in to github.com as
 the workspace's account: Helm hands git the account's token for those
 commands (as an `Authorization` header in `GIT_CONFIG_*` environment
 variables, through `ide_env`), so `gh auth switch` is not needed and two
-windows can push as two accounts. Git in Forge's terminals does the same
-through Forge's own credential helper (`crates/git_credential`), which is
+windows can push as two accounts. Git in Zed's terminals does the same
+through Zed's own credential helper (`crates/git_credential`), which is
 asked first for github.com and answers from the workspace's account when
 git asks; outside a Helm-known repository it answers nothing and your own
 helpers (`gh`, Git Credential Manager) answer as before. Other hosts and

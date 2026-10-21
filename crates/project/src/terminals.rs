@@ -33,7 +33,7 @@ pub struct Terminals {
 /// the `PATH` of a local terminal opened in `directory`. They are folders on
 /// this machine, so this is not for a remote terminal's environment.
 ///
-/// Fork: also points the terminal's git at Forge's own credential helper
+/// Fork: also points the terminal's git at Zed's own credential helper
 /// for github.com, so `git push` there logs in as the workspace's Helm
 /// account (`ide_env::git_credential_terminal_env`).
 async fn add_ide_runtimes(

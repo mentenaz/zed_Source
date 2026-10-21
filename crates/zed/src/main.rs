@@ -308,8 +308,8 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
-    // Fork: `<forge> --git-credential <operation>` is git asking Forge's own
-    // credential helper, from a Forge terminal. Handled before argument
+    // Fork: `<zed> --git-credential <operation>` is git asking Zed's own
+    // credential helper, from a Zed terminal. Handled before argument
     // parsing, since git appends the operation (`get`) as an argument.
     let mut raw_args = std::env::args().skip(1);
     if raw_args.next().as_deref() == Some(git_credential::HELPER_ARG) {

@@ -22,7 +22,7 @@
 //! environment variables, never on the command line.
 //!
 //! For git run in a terminal, the token is not put in the environment at
-//! all. Instead the terminal's git asks Forge's own credential helper
+//! all. Instead the terminal's git asks Zed's own credential helper
 //! ([`git_credential_terminal_env`]), which looks the account up when git
 //! asks ([`git_credential_for`]), so an open terminal follows an account
 //! switch.
@@ -181,11 +181,11 @@ pub fn append_git_config<S: BuildHasher>(
 /// username, password).
 static GIT_CREDENTIALS: RwLock<Vec<(PathBuf, String, String)>> = RwLock::new(Vec::new());
 
-/// Forge's own git credential helper, once it is answering: the helper
+/// Zed's own git credential helper, once it is answering: the helper
 /// command for git's config, and the socket it talks to.
 static GIT_CREDENTIAL_HELPER: RwLock<Option<(String, PathBuf)>> = RwLock::new(None);
 
-/// The environment variable telling Forge's credential helper which socket
+/// The environment variable telling Zed's credential helper which socket
 /// to ask.
 pub const GIT_CREDENTIAL_SOCKET_VAR: &str = "ZED_GIT_CREDENTIAL_SOCKET";
 
@@ -235,7 +235,7 @@ pub fn git_credential_for(directory: &Path) -> Option<(String, String)> {
         .map(|(_, username, password)| (username.clone(), password.clone()))
 }
 
-/// Records that Forge's credential helper is answering: `command` is the
+/// Records that Zed's credential helper is answering: `command` is the
 /// helper as written in git's config (`!'<program>' --git-credential`),
 /// `socket` the socket it asks.
 pub fn set_git_credential_helper(command: String, socket: PathBuf) {
@@ -245,7 +245,7 @@ pub fn set_git_credential_helper(command: String, socket: PathBuf) {
 }
 
 /// The settings that make git run in a terminal opened in `directory` ask
-/// Forge's credential helper first for github.com, then the user's own
+/// Zed's credential helper first for github.com, then the user's own
 /// helpers in their usual order: `GIT_CONFIG_*` entries, and the socket
 /// variable. Empty when the helper is not answering. Runs `git config`, so
 /// call it from a background thread.
@@ -262,7 +262,7 @@ pub fn git_credential_terminal_env(
     const KEY: &str = "credential.https://github.com.helper";
     let mut config = vec![
         // An empty value clears the helpers configured so far; they are put
-        // back after Forge's own.
+        // back after Zed's own.
         (KEY.to_string(), String::new()),
         (KEY.to_string(), command),
     ];

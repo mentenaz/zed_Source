@@ -253,7 +253,7 @@ impl HelmPanel {
                 }
                 let entries = token.as_deref().map(git_auth_config).unwrap_or_default();
                 ide_env::set_git_remote_config(&dir, entries);
-                // Git in a terminal asks Forge's credential helper, which
+                // Git in a terminal asks Zed's credential helper, which
                 // answers from this (section 11, item 4).
                 ide_env::set_git_credential(
                     &dir,
