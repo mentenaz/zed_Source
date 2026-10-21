@@ -136,6 +136,21 @@ impl WorkflowRunItem {
 
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
+                // Below 2% of the allowance, refreshing pauses until the
+                // reset, so what is left goes to what the user asks for.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                if let Some(rate) = gh_state.rate_limit()
+                    && rate.is_critical()
+                    && now < rate.reset_at
+                {
+                    let wait = (rate.reset_at - now).clamp(1, 60);
+                    cx.background_executor()
+                        .timer(Duration::from_secs(wait))
+                        .await;
+                    continue;
+                }
                 let (owner, name, gh_state) = (owner.clone(), name.clone(), gh_state.clone());
                 let (run_result, jobs_result) = on_tokio(async move {
                     let run =

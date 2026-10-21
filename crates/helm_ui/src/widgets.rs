@@ -6,11 +6,58 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, button::Button, h_flex, spinner::Spinner, tag::Tag as Pill,
-    v_flex,
+    ActiveTheme as _, Sizable as _, Size, button::Button, h_flex, progress::Progress,
+    spinner::Spinner, tag::Tag as Pill, v_flex,
 };
 
-use helm_backend::github::Repo;
+use helm_backend::github::{RateLimit, Repo};
+
+/// How much of GitHub's hourly allowance is left, drawn like the cockpit's
+/// disk rows: an "API" label, a bar that empties as requests are used, and
+/// `4,985 / 5,000 · resets in 9 min`. Green, amber below a tenth, red below
+/// a fiftieth. `None` before the first answer and after the reset time,
+/// when the count on record is the old window's.
+pub fn rate_limit_bar(
+    id: &'static str,
+    rate: Option<RateLimit>,
+    cx: &App,
+) -> Option<gpui::AnyElement> {
+    let rate = rate?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if now >= rate.reset_at {
+        return None;
+    }
+    let theme = cx.theme();
+    let color = if rate.is_critical() {
+        theme.danger
+    } else if rate.is_low() {
+        theme.warning
+    } else {
+        theme.success
+    };
+    Some(
+        h_flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .font_family("Cascadia Mono")
+            .text_color(theme.muted_foreground)
+            .child(div().flex_shrink_0().child("API"))
+            .child(
+                Progress::new(id)
+                    .value(rate.fraction_left() * 100.0)
+                    .color(color)
+                    .with_size(Size::XSmall)
+                    .flex_1(),
+            )
+            .child(div().flex_shrink_0().child(rate.readout(now)))
+            .into_any_element(),
+    )
+}
 
 /// A spinner beside a line of text, in the middle of the space a screen has.
 /// What a screen shows while the one thing it is about is being fetched.

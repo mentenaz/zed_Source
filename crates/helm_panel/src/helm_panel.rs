@@ -817,32 +817,15 @@ impl Render for HelmPanel {
 }
 
 impl HelmPanel {
-    /// The line at the foot of the panel saying how much of GitHub's hourly
-    /// allowance is left. Nothing until the first answer has come back.
+    /// The rate-limit bar at the foot of the panel (`rate_limit_bar`).
     fn render_rate_limit(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let rate = self.gh_state.rate_limit()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        // After the reset the count on record is the old window's.
-        if now >= rate.reset_at {
-            return None;
-        }
-        let color = if rate.is_low() {
-            cx.theme().warning
-        } else {
-            cx.theme().muted_foreground
-        };
+        let bar = rate_limit_bar("helm-rate-limit", self.gh_state.rate_limit(), cx)?;
         Some(
             div()
                 .flex_none()
-                .px_3()
-                .py_1()
                 .border_t_1()
                 .border_color(cx.theme().border)
-                .text_xs()
-                .text_color(color)
-                .child(rate.summary(now)),
+                .child(bar),
         )
     }
 }

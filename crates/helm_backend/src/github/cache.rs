@@ -186,10 +186,35 @@ impl RateLimit {
         self.remaining.saturating_mul(10) < self.limit
     }
 
+    /// Whether less than a fiftieth (2%) is left, or nothing. Background
+    /// refreshes pause here, so what is left goes to what the user asks for.
+    pub fn is_critical(&self) -> bool {
+        self.remaining.saturating_mul(50) < self.limit || self.remaining == 0
+    }
+
     /// Whether nothing is left and the reset has not come yet. A request
     /// sent now would be refused.
     pub fn is_used_up(&self, now: u64) -> bool {
         self.remaining == 0 && now < self.reset_at
+    }
+
+    /// The share of the allowance still left, from 0 to 1.
+    pub fn fraction_left(&self) -> f32 {
+        if self.limit == 0 {
+            return 0.0;
+        }
+        (self.remaining as f32 / self.limit as f32).clamp(0.0, 1.0)
+    }
+
+    /// `4,985 / 5,000 · resets in 9 min`: the count beside a bar that
+    /// already shows what it is.
+    pub fn readout(&self, now: u64) -> String {
+        format!(
+            "{} / {} · resets in {} min",
+            thousands(self.remaining),
+            thousands(self.limit),
+            self.minutes_to_reset(now)
+        )
     }
 
     /// Minutes until the allowance resets, rounded up. Zero once it has.
@@ -461,6 +486,8 @@ mod tests {
             "4,812 of 5,000 requests left · resets in 23 min"
         );
         assert!(!limit.is_low());
+        assert_eq!(limit.readout(now), "4,812 / 5,000 · resets in 23 min");
+        assert_eq!(limit.fraction_left(), 4812.0 / 5000.0);
 
         let nearly_out = RateLimit {
             limit: 5000,
@@ -468,6 +495,13 @@ mod tests {
             reset_at: now + 61,
         };
         assert!(nearly_out.is_low());
+        assert!(!nearly_out.is_critical());
+        let almost_none = RateLimit {
+            limit: 5000,
+            remaining: 99,
+            reset_at: now + 61,
+        };
+        assert!(almost_none.is_critical());
         assert_eq!(nearly_out.minutes_to_reset(now), 2);
         // A reset time already past is zero minutes, not a negative wait.
         assert_eq!(nearly_out.minutes_to_reset(now + 3_600), 0);
@@ -480,6 +514,12 @@ mod tests {
             .summary(now),
             "0 of 60 requests left · resets in 0 min"
         );
+        let none_allowed = RateLimit {
+            limit: 0,
+            remaining: 0,
+            reset_at: now,
+        };
+        assert_eq!(none_allowed.fraction_left(), 0.0);
     }
 
     #[test]

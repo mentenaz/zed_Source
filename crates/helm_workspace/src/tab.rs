@@ -2480,19 +2480,8 @@ impl Render for WorkspaceTab {
             WorkspaceSection::Issues => self.render_workspace_issues(cx).into_any_element(),
             WorkspaceSection::Actions => self.render_workspace_actions(cx).into_any_element(),
         };
-        let rate_line = self.gh_state.rate_limit().map(|rate| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_secs());
-            gpui_component::h_flex()
-                .justify_end()
-                .px_3()
-                .py_1()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(rate.summary(now))
-                .into_any_element()
-        });
+        let rate_line =
+            helm_ui::rate_limit_bar("helm-workspace-rate-limit", self.gh_state.rate_limit(), cx);
 
         v_flex()
             .size_full()
