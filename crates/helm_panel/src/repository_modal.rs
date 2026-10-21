@@ -2,8 +2,10 @@
 //! repository, create pull request and release, edit profile, collaborators,
 //! and the clone dialog.
 
+use gpui_component::IndexPath;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 
+use super::auth::app_settings_url;
 use super::*;
 
 #[derive(Clone)]
@@ -53,9 +55,13 @@ pub(super) struct HelmRepositoryModal {
     pub(super) homepage: Entity<InputState>,
     pub(super) topics: Entity<InputState>,
     pub(super) organization: Entity<InputState>,
-    /// Dropdown over `parent`'s already-loaded org logins, shown in the
-    /// CreateRepo form's "Owner" field. Keeps `organization` in sync on
-    /// confirm so `handle_create_repo` reads a plain string either way.
+    /// The signed-in account, listed first as the Owner and named in the
+    /// "Creating as" line.
+    pub(super) account_login: Option<String>,
+    /// The CreateRepo form's "Owner" dropdown: the signed-in account first,
+    /// then `parent`'s already-loaded organisations. Keeps `organization` in
+    /// sync on confirm (blank for the account itself), so
+    /// `handle_create_repo` reads a plain string either way.
     pub(super) organization_select: Entity<SelectState<Vec<String>>>,
     pub(super) _organization_sub: Subscription,
     pub(super) username: Entity<InputState>,
@@ -84,6 +90,7 @@ impl HelmRepositoryModal {
     pub(super) fn new(
         kind: HelmModalKind,
         parent: Entity<HelmPanel>,
+        account_login: Option<String>,
         // Read by `open_workspace_modal` while the panel's lease is held —
         // the build closure that calls this runs inside an update on
         // `HelmPanel`, so `parent.read(cx)` here would panic.
@@ -139,26 +146,44 @@ impl HelmRepositoryModal {
         let clone_progress_sub = matches!(kind, HelmModalKind::CloneRepo)
             .then(|| cx.observe(&parent, |_, _, cx| cx.notify()));
 
-        // The Owner dropdown lists the orgs already fetched at login
-        // (`HelmPanel::org_logins`), so no extra network work happens here.
-        // The backing `organization` InputState stays the source of truth —
-        // `handle_create_repo` reads its value unchanged.
-        let organization = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Organization (blank = your account)")
-        });
+        // The Owner dropdown lists the signed-in account first, then the
+        // orgs already fetched at login (`HelmPanel::org_logins`), so no
+        // extra network work happens here. The backing `organization`
+        // InputState stays the source of truth: blank means the account
+        // itself, which is what `handle_create_repo` expects.
+        let organization = cx.new(|cx| InputState::new(window, cx));
+        let owners: Vec<String> = account_login
+            .iter()
+            .cloned()
+            .chain(org_logins.into_iter().filter(|org| {
+                !account_login
+                    .as_deref()
+                    .is_some_and(|login| login.eq_ignore_ascii_case(org))
+            }))
+            .collect();
+        let selected = account_login.is_some().then(|| IndexPath::new(0));
         let organization_select =
-            cx.new(|cx| SelectState::new(org_logins, None, window, cx).searchable(true));
+            cx.new(|cx| SelectState::new(owners, selected, window, cx).searchable(true));
         let organization_for_sub = organization.clone();
+        let account_for_sub = account_login.clone();
         let organization_sub = cx.subscribe_in(
             &organization_select,
             window,
             move |_, _, event: &SelectEvent<Vec<String>>, window, cx| {
-                // `Confirm(None)` (clean button) clears back to blank, which
-                // `handle_create_repo` maps to "your own account".
                 let SelectEvent::Confirm(choice) = event;
+                // The account itself is a blank organisation.
+                let organization = choice
+                    .clone()
+                    .filter(|owner| {
+                        !account_for_sub
+                            .as_deref()
+                            .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+                    })
+                    .unwrap_or_default();
                 organization_for_sub.update(cx, |input, cx| {
-                    input.set_value(choice.clone().unwrap_or_default(), window, cx);
+                    input.set_value(organization, window, cx);
                 });
+                cx.notify();
             },
         );
 
@@ -177,6 +202,7 @@ impl HelmRepositoryModal {
                     .placeholder("comma, separated, topics")
             }),
             organization,
+            account_login,
             organization_select,
             username: cx.new(|cx| InputState::new(window, cx).placeholder("GitHub username")),
             tag_name: cx.new(|cx| InputState::new(window, cx).placeholder("v1.0.0")),
@@ -242,11 +268,35 @@ impl Render for HelmRepositoryModal {
                 .child(
                     field().label("Owner").child(
                         Select::new(&self.organization_select)
-                            .placeholder("Organization (blank = your account)")
-                            .search_placeholder("Search…")
-                            .cleanable(true),
+                            .placeholder("Choose an owner")
+                            .search_placeholder("Search…"),
                     ),
                 )
+                .children(self.account_login.clone().map(|login| {
+                    let organization = self.organization.read(cx).value().trim().to_string();
+                    let line = if organization.is_empty() {
+                        format!("Creating as @{login}, in your own account.")
+                    } else {
+                        format!("Creating as @{login}, in the {organization} organization.")
+                    };
+                    field().child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_xs().text_color(muted).child(line))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("An organization missing? It may not have approved Helm:")
+                                    .child(
+                                        Link::new("helm-owner-org-access")
+                                            .href(app_settings_url())
+                                            .child("request access"),
+                                    ),
+                            ),
+                    )
+                }))
                 .child(
                     field().child(
                         Switch::new("helm-modal-private")

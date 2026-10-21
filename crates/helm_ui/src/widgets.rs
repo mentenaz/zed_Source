@@ -6,11 +6,44 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, Size, button::Button, h_flex, progress::Progress,
-    spinner::Spinner, tag::Tag as Pill, v_flex,
+    ActiveTheme as _, Sizable as _, Size, avatar::Avatar, button::Button, h_flex,
+    progress::Progress, spinner::Spinner, tag::Tag as Pill, v_flex,
 };
 
 use helm_backend::github::{RateLimit, Repo};
+
+/// The size of an avatar in a list row (members, collaborators, the
+/// account menu).
+pub const AVATAR_SIZE: f32 = 24.0;
+/// The size of the avatar heading a profile.
+pub const PROFILE_AVATAR_SIZE: f32 = 40.0;
+
+/// `url` asking GitHub for an image just big enough for `size` pixels on a
+/// 2x screen (`s=`), instead of the full-size original. Empty stays empty.
+pub fn sized_avatar_url(url: &str, size: f32) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    let pixels = (size * 2.0).ceil() as u32;
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}s={pixels}")
+}
+
+/// A GitHub account's avatar as Helm draws it everywhere: `size` pixels,
+/// the image fetched at that size, and the login's initials while it loads
+/// or when there is none. Put the name beside it; the avatar alone does
+/// not say who it is.
+pub fn github_avatar(url: &str, login: &str, size: f32) -> Avatar {
+    let avatar = Avatar::new()
+        .name(login.to_string())
+        .with_size(gpui::px(size));
+    let url = sized_avatar_url(url, size);
+    if url.is_empty() {
+        avatar
+    } else {
+        avatar.src(url)
+    }
+}
 
 /// How much of GitHub's hourly allowance is left, drawn like the cockpit's
 /// disk rows: an "API" label, a bar that empties as requests are used, and
@@ -167,4 +200,22 @@ pub fn short_date(iso: &str) -> String {
     iso.get(..10)
         .map(|s| s.to_string())
         .unwrap_or_else(|| iso.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatars_are_fetched_at_the_size_they_are_drawn() {
+        assert_eq!(
+            sized_avatar_url("https://avatars.githubusercontent.com/u/1?v=4", 24.0),
+            "https://avatars.githubusercontent.com/u/1?v=4&s=48"
+        );
+        assert_eq!(
+            sized_avatar_url("https://avatars.githubusercontent.com/u/1", 40.0),
+            "https://avatars.githubusercontent.com/u/1?s=80"
+        );
+        assert_eq!(sized_avatar_url("", 24.0), "");
+    }
 }

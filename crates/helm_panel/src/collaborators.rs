@@ -140,12 +140,7 @@ pub(super) fn collaborator_row(
             h_flex()
                 .items_center()
                 .gap_2()
-                .child(
-                    Avatar::new()
-                        .src(collab.avatar_url.clone())
-                        .name(login.clone())
-                        .with_size(px(48.)),
-                )
+                .child(github_avatar(&collab.avatar_url, &login, AVATAR_SIZE))
                 .child(div().text_color(foreground).child(login.clone())),
         )
         .suffix(move |_, _| {

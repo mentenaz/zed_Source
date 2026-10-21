@@ -202,12 +202,7 @@ impl HelmPanel {
                         .items_center()
                         .px_3()
                         .py_2()
-                        .child(
-                            Avatar::new()
-                                .src(avatar_url)
-                                .name(name.clone())
-                                .with_size(px(40.)),
-                        )
+                        .child(github_avatar(&avatar_url, &login, PROFILE_AVATAR_SIZE))
                         .child(
                             v_flex()
                                 .gap_0()
@@ -327,12 +322,7 @@ impl HelmPanel {
                     .gap_3()
                     .px_3()
                     .py_2()
-                    .child(
-                        Avatar::new()
-                            .src(user.avatar_url.clone())
-                            .name(user.login.clone())
-                            .with_size(px(40.)),
-                    )
+                    .child(github_avatar(&user.avatar_url, &user.login, PROFILE_AVATAR_SIZE))
                     .child(
                         v_flex()
                             .gap_0()

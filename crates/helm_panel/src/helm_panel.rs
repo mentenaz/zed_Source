@@ -46,7 +46,6 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Selectable as _, Sizable as _, StyledExt,
     alert::Alert,
-    avatar::Avatar,
     button::{Button, ButtonGroup, ButtonVariants as _},
     description_list::{DescriptionItem, DescriptionList},
     form::{field, v_form},
@@ -609,9 +608,10 @@ impl HelmPanel {
         // closure runs synchronously inside `toggle_modal`, where `parent`
         // cannot be read (it would double-lease the panel and panic).
         let org_logins = self.org_logins.items.clone();
+        let login = self.signed_in_login().map(str::to_string);
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, move |window, cx| {
-                HelmRepositoryModal::new(kind, parent, org_logins, window, cx)
+                HelmRepositoryModal::new(kind, parent, login, org_logins, window, cx)
             });
         });
     }

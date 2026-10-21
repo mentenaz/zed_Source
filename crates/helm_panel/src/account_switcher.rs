@@ -209,9 +209,18 @@ impl HelmPanel {
             None => "No account".to_string(),
         };
         let panel = cx.entity().downgrade();
+        // The active account's face beside its name, the same avatar Helm
+        // shows for it everywhere; initials until it has loaded.
+        let avatar = active.as_deref().map(|login| {
+            let url = self
+                .user
+                .as_ref()
+                .filter(|user| user.login.eq_ignore_ascii_case(login))
+                .map_or("", |user| user.avatar_url.as_str());
+            github_avatar(url, login, AVATAR_SIZE)
+        });
 
-        Some(
-            Button::new("helm-account-menu")
+        let button = Button::new("helm-account-menu")
                 .ghost()
                 .xsmall()
                 .label(label)
@@ -314,7 +323,13 @@ impl HelmPanel {
                         );
                     }
                     menu
-                })
+                });
+        Some(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .children(avatar)
+                .child(button)
                 .into_any_element(),
         )
     }

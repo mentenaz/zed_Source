@@ -8,7 +8,7 @@ use super::accounts::{delete_token, read_token, remember_account, write_token};
 
 /// Where a user asks an organisation to approve Helm's OAuth App, or
 /// revokes Helm's access.
-fn app_settings_url() -> String {
+pub(super) fn app_settings_url() -> String {
     format!("https://github.com/settings/connections/applications/{HELM_OAUTH_CLIENT_ID}")
 }
 

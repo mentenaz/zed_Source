@@ -262,12 +262,7 @@ pub(super) fn org_member_row(ix: usize, member: &OrgMember, cx: &App) -> ListIte
             h_flex()
                 .items_center()
                 .gap_2()
-                .child(
-                    Avatar::new()
-                        .src(member.avatar_url.clone())
-                        .name(member.login.clone())
-                        .with_size(px(24.)),
-                )
+                .child(github_avatar(&member.avatar_url, &member.login, AVATAR_SIZE))
                 .child(div().text_color(foreground).child(member.login.clone())),
         )
         .suffix(move |_, _| {
