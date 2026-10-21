@@ -10,7 +10,9 @@
 //! answers with the credential set for the repository that folder belongs
 //! to (`ide_env::git_credential_for`), looked up when git asks, so an open
 //! terminal follows an account switch. When there is nothing to answer, the
-//! helper prints nothing and git asks the user's own helpers next.
+//! helper prints nothing and git asks the user's own helpers next. When the
+//! repository's account is signed out, it answers `quit=1`, so git does not
+//! go on to another helper and log in as a different account.
 //!
 //! Only `get` is answered: git's `store` and `erase` are ignored, so the
 //! token is never copied elsewhere. The token is never in the terminal's
@@ -18,6 +20,8 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+use ide_env::GitCredential;
 
 /// The argument that makes the Zed binary run as the helper.
 pub const HELPER_ARG: &str = "--git-credential";
@@ -57,8 +61,9 @@ pub fn parse_request(text: &str) -> Request {
 
 /// What to send to git for `request`, given the credential `lookup` finds
 /// for a folder. Empty when Zed has nothing to say: not https, not
-/// github.com, or no credential for the folder.
-pub fn answer(request: &Request, lookup: impl Fn(&Path) -> Option<(String, String)>) -> String {
+/// github.com, or no credential for the folder. `quit=1` when the folder's
+/// account is signed out, which stops git asking further helpers.
+pub fn answer(request: &Request, lookup: impl Fn(&Path) -> Option<GitCredential>) -> String {
     let is_github = request.protocol.as_deref() == Some("https")
         && request
             .host
@@ -67,10 +72,13 @@ pub fn answer(request: &Request, lookup: impl Fn(&Path) -> Option<(String, Strin
     if !is_github {
         return String::new();
     }
-    let Some((username, password)) = request.cwd.as_deref().and_then(lookup) else {
-        return String::new();
-    };
-    format!("username={username}\npassword={password}\n")
+    match request.cwd.as_deref().and_then(lookup) {
+        Some(GitCredential::Login { username, password }) => {
+            format!("username={username}\npassword={password}\n")
+        }
+        Some(GitCredential::Refuse) => "quit=1\n".to_string(),
+        None => String::new(),
+    }
 }
 
 /// The helper as written in git's config: `!'<program>' --git-credential`.
@@ -194,7 +202,10 @@ mod tests {
     #[test]
     fn only_https_github_with_a_known_folder_is_answered() {
         let known = |path: &Path| {
-            (path == Path::new("E:\\repo")).then(|| ("x-access-token".into(), "secret".into()))
+            (path == Path::new("E:\\repo")).then(|| GitCredential::Login {
+                username: "x-access-token".into(),
+                password: "secret".into(),
+            })
         };
         assert_eq!(
             answer(&request("https", "GitHub.com", "E:\\repo"), known),
@@ -204,6 +215,15 @@ mod tests {
         assert_eq!(answer(&request("https", "dev.azure.com", "E:\\repo"), known), "");
         assert_eq!(answer(&request("http", "github.com", "E:\\repo"), known), "");
         assert_eq!(answer(&Request::default(), known), "");
+    }
+
+    #[test]
+    fn a_signed_out_account_stops_git_asking_other_helpers() {
+        let refused = |_: &Path| Some(GitCredential::Refuse);
+        assert_eq!(
+            answer(&request("https", "github.com", "E:\\repo"), refused),
+            "quit=1\n"
+        );
     }
 
     #[test]
@@ -223,7 +243,10 @@ mod tests {
         let repository = std::env::temp_dir().join("git-credential-test-repository");
         ide_env::set_git_credential(
             &repository,
-            Some(("x-access-token".to_string(), "secret".to_string())),
+            Some(GitCredential::Login {
+                username: "x-access-token".to_string(),
+                password: "secret".to_string(),
+            }),
         );
         let folder = tempfile::tempdir().unwrap();
         let socket = folder.path().join("test.sock");

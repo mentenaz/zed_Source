@@ -79,6 +79,7 @@ impl HelmPanel {
         };
         self.active_login = Some(login.clone());
         self.account_loading = true;
+        self.signed_out = false;
 
         let gh_state = self.gh_state.clone();
         let started = gh_state.clone();
@@ -124,6 +125,8 @@ impl HelmPanel {
         if !matches!(outcome, AuthOutcome::Ready { .. }) {
             self.account_loading = false;
         }
+        // A failure to reach GitHub says nothing about the sign-in.
+        self.signed_out = matches!(outcome, AuthOutcome::NotLoggedIn | AuthOutcome::Revoked);
         match outcome {
             AuthOutcome::Ready {
                 account,
@@ -155,7 +158,12 @@ impl HelmPanel {
                 self.scope_to_authorize = "repo";
                 self.error_msg = missing_scope_message("repo");
             }
-            AuthOutcome::NotLoggedIn => self.check_gh_cli(false, cx),
+            AuthOutcome::NotLoggedIn => {
+                self.check_gh_cli(false, cx);
+                // Git in this repository must not log in as anyone else
+                // meanwhile.
+                self.register_git_credentials(cx);
+            }
             AuthOutcome::Revoked => {
                 self.check_gh_cli(false, cx);
                 self.error_msg = format!(

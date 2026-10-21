@@ -30,6 +30,22 @@ pub(super) enum GitHubNeed {
 /// The toast refusing a remote command.
 struct GitHubRefusal;
 
+/// How long after choosing "Sign in again" from a refused push the push
+/// still runs by itself once the account is back. Long enough for a
+/// browser sign-in, short enough that a sign-in much later does not push
+/// unexpectedly.
+const PUSH_AFTER_SIGN_IN_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The toast explaining a push GitHub refused for a private email.
+struct PrivateEmailRejection;
+
+/// Whether a failed push was GitHub refusing it because a commit carries an
+/// email address the account keeps private ("GH007: Your push would
+/// publish a private email address").
+pub(super) fn is_private_email_rejection(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("GH007")
+}
+
 impl GitPanel {
     /// Why the workspace's GitHub account cannot do what `need` asks, when
     /// Helm knows it cannot, with the account that can (login, name). `None`
@@ -81,6 +97,11 @@ impl GitPanel {
         need: GitHubNeed,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The account is signed out: git would log in as whoever its own
+        // helpers know, which may be another account.
+        if self.refuse_while_signed_out(need, cx) {
+            return true;
+        }
         // Right after an account switch (or at startup) the account's token
         // is not registered yet; git would log in with its own login.
         let loading = self
@@ -119,6 +140,156 @@ impl GitPanel {
                 .ok();
         });
         true
+    }
+
+    /// Refuses a remote command while the workspace's account is signed
+    /// out, with a toast offering to sign it in again. A refused push runs
+    /// by itself once the account is back. Returns whether it refused.
+    fn refuse_while_signed_out(&mut self, need: GitHubNeed, cx: &mut Context<Self>) -> bool {
+        let Some(helm) = self.helm_panel() else {
+            return false;
+        };
+        let (login, from_gh_cli) = {
+            let helm = helm.read(cx);
+            let Some(login) = helm.signed_out_login() else {
+                return false;
+            };
+            (login.to_string(), helm.signed_out_from_gh_cli(cx))
+        };
+        let name = HelmPanelSettings::get_global(cx)
+            .account(&login)
+            .map_or_else(|| login.clone(), |account| account.display_name().to_string());
+        let message = format!(
+            "{name} is signed out of Helm, so git would log in as someone else. Sign in again \
+             to continue."
+        );
+        let label = if from_gh_cli {
+            "Re-import from gh"
+        } else {
+            "Sign in again"
+        };
+        let panel = cx.weak_entity();
+        let helm = helm.downgrade();
+        let retry_push = need == GitHubNeed::Push;
+        let toast = workspace::Toast::new(NotificationId::unique::<GitHubRefusal>(), message)
+            .on_click(label, move |window, cx| {
+                if retry_push {
+                    panel
+                        .update(cx, |panel, _| {
+                            panel.push_after_sign_in = Some(std::time::Instant::now())
+                        })
+                        .ok();
+                }
+                helm.update(cx, |helm, cx| helm.sign_in_again(window, cx))
+                    .ok();
+            });
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| workspace.show_toast(toast, cx))
+                .ok();
+        });
+        true
+    }
+
+    /// The banner shown while the workspace's account is signed out:
+    /// "<name> is signed out", with the button that signs it in again (or
+    /// re-imports it from the GitHub CLI). Commits still work; push, pull and
+    /// fetch wait for it.
+    pub(super) fn render_signed_out_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let helm = self.helm_panel()?;
+        let (login, from_gh_cli) = {
+            let helm = helm.read(cx);
+            (
+                helm.signed_out_login()?.to_string(),
+                helm.signed_out_from_gh_cli(cx),
+            )
+        };
+        let name = HelmPanelSettings::get_global(cx)
+            .account(&login)
+            .map_or_else(|| login.clone(), |account| account.display_name().to_string());
+        let label = if from_gh_cli {
+            "Re-import from gh"
+        } else {
+            "Sign in again"
+        };
+        let helm = helm.downgrade();
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .flex_wrap()
+                .border_t_1()
+                .border_color(cx.theme().status().warning_border)
+                .bg(cx.theme().status().warning_background.opacity(0.5))
+                .child(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::XSmall)
+                        .color(Color::Warning),
+                )
+                .child(
+                    Label::new(format!("{name} (@{login}) is signed out"))
+                        .size(LabelSize::Small),
+                )
+                .child(
+                    Button::new("github-sign-in-again", label)
+                        .style(ButtonStyle::Filled)
+                        .label_size(LabelSize::Small)
+                        .on_click(move |_, window, cx| {
+                            helm.update(cx, |helm, cx| helm.sign_in_again(window, cx))
+                                .ok();
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Runs the push that was refused while the account was signed out, now
+    /// that it is back, unless the sign-in took too long to still expect it.
+    fn push_once_signed_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(asked_at) = self.push_after_sign_in else {
+            return;
+        };
+        if asked_at.elapsed() > PUSH_AFTER_SIGN_IN_WINDOW {
+            self.push_after_sign_in = None;
+            return;
+        }
+        let ready = self.helm_panel().is_some_and(|helm| {
+            let helm = helm.read(cx);
+            helm.signed_in_login().is_some() && !helm.is_loading_github_account()
+        });
+        if ready {
+            self.push_after_sign_in = None;
+            self.push(false, false, window, cx);
+        }
+    }
+
+    /// Explains a push GitHub refused because a commit uses an email the
+    /// account keeps private (GH007), instead of git's bare rejection, and
+    /// offers to commit with the account's noreply address from now on.
+    pub(super) fn show_private_email_rejection(&self, cx: &mut Context<Self>) {
+        let message = "GitHub refused the push: a commit uses an email address you keep \
+                       private (GH007). Commit with your GitHub noreply address instead, then \
+                       re-author the commits that are not pushed yet (for the last one: \
+                       git commit --amend --reset-author).";
+        let mut toast =
+            workspace::Toast::new(NotificationId::unique::<PrivateEmailRejection>(), message);
+        let signed_in = self
+            .helm_panel()
+            .is_some_and(|helm| helm.read(cx).signed_in_login().is_some());
+        if signed_in && let Some(helm) = self.helm_panel.clone() {
+            toast = toast.on_click("Use noreply address", move |_, cx| {
+                helm.update(cx, |helm, cx| helm.use_noreply_commit_email(cx))
+                    .ok();
+            });
+        }
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| workspace.show_toast(toast, cx))
+                .ok();
+        });
     }
 
     /// The remote button drawn disabled, when the command it would run is
@@ -164,7 +335,7 @@ impl GitPanel {
 
     /// Re-renders the git panel when the Helm panel changes (its account,
     /// or what the account may do). Started once the Helm panel exists.
-    pub(super) fn observe_helm_panel(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn observe_helm_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self._helm_observation.is_some() {
             return;
         }
@@ -175,7 +346,10 @@ impl GitPanel {
             return;
         };
         self.helm_panel = Some(helm.downgrade());
-        self._helm_observation = Some(cx.observe(&helm, |_, _, cx| cx.notify()));
+        self._helm_observation = Some(cx.observe_in(&helm, window, |this, _, window, cx| {
+            this.push_once_signed_in(window, cx);
+            cx.notify();
+        }));
     }
 
     /// The workspace's Helm panel, once [`Self::observe_helm_panel`] has

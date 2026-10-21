@@ -244,6 +244,13 @@ pub struct HelmPanel {
     /// The repository folder whose git push, pull and fetch were given this
     /// account's token (`repo_access.rs`), to take it back.
     git_credentials_dir: Option<std::path::PathBuf>,
+    /// Whether what `git_credentials_dir` was given is a refusal (the
+    /// account is signed out) rather than the account's token.
+    git_credentials_refused: bool,
+    /// Whether the workspace's account is signed out: GitHub no longer
+    /// accepts its token, or there is none on this machine. Not set when
+    /// GitHub could not be reached, which says nothing about the sign-in.
+    signed_out: bool,
     /// Set from the moment an account starts loading (startup, a switch)
     /// until its token is registered for the repository, or the load ends
     /// without a session. The git panel holds pushes back meanwhile, so they
@@ -498,6 +505,8 @@ impl HelmPanel {
                 commit_identity: CommitIdentity::Unknown,
                 commit_identity_key: None,
                 git_credentials_dir: None,
+                git_credentials_refused: false,
+                signed_out: false,
                 account_loading: false,
                 workspace_remote_https: false,
                 pending_action: None,

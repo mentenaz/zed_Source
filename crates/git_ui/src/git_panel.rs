@@ -1238,6 +1238,10 @@ pub struct GitPanel {
     _helm_observation: Option<Subscription>,
     /// The workspace's Helm panel, found once (`github_account.rs`).
     helm_panel: Option<WeakEntity<helm_panel::HelmPanel>>,
+    /// When a push was refused because the workspace's account is signed
+    /// out and the user chose to sign in again: the push runs once the
+    /// account is back, if that is soon (`github_account.rs`).
+    push_after_sign_in: Option<std::time::Instant>,
     _settings_subscription: Subscription,
     git_access: Option<GitAccess>,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1578,6 +1582,7 @@ impl GitPanel {
                 _repo_subscriptions: Vec::new(),
                 _helm_observation: None,
                 helm_panel: None,
+                push_after_sign_in: None,
                 _settings_subscription,
                 git_access: None,
                 commit_menu_handle: PopoverMenuHandle::default(),
@@ -4893,7 +4898,11 @@ impl GitPanel {
                 Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
                 Err(e) => {
                     log::error!("Error while pushing {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+                    if github_account::is_private_email_rejection(&e) {
+                        this.show_private_email_rejection(cx);
+                    } else {
+                        this.show_error_toast(action.name(), e, cx)
+                    }
                 }
             })?;
 
@@ -6975,6 +6984,7 @@ impl GitPanel {
                 head_commit,
                 Some(git_panel),
             ))
+            .children(self.render_signed_out_banner(cx))
             .children(self.render_github_account(cx))
             .when(title_exceeds_limit, |this| {
                 this.child(
@@ -9677,7 +9687,7 @@ impl GitPanel {
 
 impl Render for GitPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.observe_helm_panel(cx);
+        self.observe_helm_panel(window, cx);
         let project = self.project.read(cx);
         let has_entries = !self.entries.is_empty();
         let has_write_access = self.has_write_access(cx);

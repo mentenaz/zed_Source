@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use helm_backend::github::{
     GitHubRemote, RepoPermission, gh_get_repo, git_auth_config, parse_github_remote,
 };
+use ide_env::GitCredential;
 use project::git_store::{GitStore, GitStoreEvent};
 
 use super::accounts::read_token;
@@ -221,16 +222,35 @@ impl HelmPanel {
             .is_some_and(|remote| remote.https);
         let signed_in = self.signed_in_login().is_some();
         let applies = signed_in && self.workspace_remote_https;
+        // Signed out: git must not fall back to its own login, which may be
+        // another account. Its helpers for github.com are cleared, and Zed's
+        // terminal helper answers with a refusal.
+        let refused = !signed_in && self.signed_out && self.workspace_remote_https;
         // Already given for this repository and account: repository updates
         // (any file change) come through here often.
-        if applies && dir.is_some() && self.git_credentials_dir == dir {
+        let already = dir.is_some() && self.git_credentials_dir == dir;
+        if applies && already && !self.git_credentials_refused {
             if self.account_loading {
                 self.account_loading = false;
                 cx.notify();
             }
             return;
         }
+        if refused && already && self.git_credentials_refused {
+            return;
+        }
         self.unregister_git_credentials();
+        if refused && let Some(dir) = dir {
+            ide_env::set_git_remote_config(
+                &dir,
+                vec![("credential.https://github.com.helper".to_string(), String::new())],
+            );
+            ide_env::set_git_credential(&dir, Some(GitCredential::Refuse));
+            self.git_credentials_dir = Some(dir);
+            self.git_credentials_refused = true;
+            cx.notify();
+            return;
+        }
         let Some(dir) = dir.filter(|_| applies) else {
             // Nothing to give: no GitHub HTTPS repository. (Not signed in
             // yet while loading keeps `account_loading` as it is.)
@@ -257,7 +277,10 @@ impl HelmPanel {
                 // answers from this (section 11, item 4).
                 ide_env::set_git_credential(
                     &dir,
-                    token.map(|token| ("x-access-token".to_string(), token)),
+                    token.map(|token| GitCredential::Login {
+                        username: "x-access-token".to_string(),
+                        password: token,
+                    }),
                 );
                 this.account_loading = false;
                 cx.notify();
@@ -265,6 +288,47 @@ impl HelmPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// The workspace's account, when it is signed out (GitHub no longer
+    /// accepts its token, or there is none on this machine) and the
+    /// workspace's repository is on github.com over HTTPS, where git would
+    /// otherwise need that account's login. Not for a network failure.
+    pub fn signed_out_login(&self) -> Option<&str> {
+        if !self.signed_out || !self.workspace_remote_https || self.signed_in_login().is_some() {
+            return None;
+        }
+        self.active_login.as_deref()
+    }
+
+    /// Whether the signed-out account was copied from the GitHub CLI, so
+    /// signing in again means re-importing it from there.
+    pub fn signed_out_from_gh_cli(&self, cx: &App) -> bool {
+        self.signed_out_login().is_some_and(|login| {
+            HelmPanelSettings::get_global(cx)
+                .account(login)
+                .is_some_and(|account| account.source == HelmAccountSource::GhCli)
+        })
+    }
+
+    /// Signs the workspace's signed-out account in again, for the same
+    /// login: re-imported from the GitHub CLI when it came from there,
+    /// otherwise Helm's own sign-in, which checks the account that signs in
+    /// is the expected one. Shows the Helm panel, where it happens.
+    pub fn sign_in_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(login) = self.signed_out_login().map(str::to_string) else {
+            return;
+        };
+        if self.signed_out_from_gh_cli(cx) {
+            self.import_from_gh_cli(login, cx);
+        } else {
+            self.start_sign_in(SignInFor::Account(login), cx);
+        }
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.focus_panel::<HelmPanel>(window, cx);
+            });
+        }
     }
 
     /// Whether the git panel should hold a push, pull or fetch back: the
@@ -277,6 +341,7 @@ impl HelmPanel {
     /// Stops git panel pushes in the workspace's repository from using the
     /// account's token (signed out, account switched or removed).
     pub(super) fn unregister_git_credentials(&mut self) {
+        self.git_credentials_refused = false;
         if let Some(dir) = self.git_credentials_dir.take() {
             ide_env::set_git_remote_config(&dir, Vec::new());
             ide_env::set_git_credential(&dir, None);

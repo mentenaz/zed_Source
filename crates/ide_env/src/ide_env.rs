@@ -177,9 +177,19 @@ pub fn append_git_config<S: BuildHasher>(
     );
 }
 
-/// The github.com credential for the repository in each folder: (folder,
-/// username, password).
-static GIT_CREDENTIALS: RwLock<Vec<(PathBuf, String, String)>> = RwLock::new(Vec::new());
+/// What git run in a repository is given when it asks to log in to
+/// github.com.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitCredential {
+    /// Log in with this username and password (a token).
+    Login { username: String, password: String },
+    /// The account the repository uses is signed out: git must not go on to
+    /// another helper and log in as someone else.
+    Refuse,
+}
+
+/// The github.com credential for the repository in each folder.
+static GIT_CREDENTIALS: RwLock<Vec<(PathBuf, GitCredential)>> = RwLock::new(Vec::new());
 
 /// Zed's own git credential helper, once it is answering: the helper
 /// command for git's config, and the socket it talks to.
@@ -204,35 +214,35 @@ fn path_key(path: &Path) -> String {
 
 /// Sets, or with `None` removes, the github.com credential git run in the
 /// repository at `repository` (or a folder below it) is given.
-pub fn set_git_credential(repository: &Path, credential: Option<(String, String)>) {
+pub fn set_git_credential(repository: &Path, credential: Option<GitCredential>) {
     let Ok(mut credentials) = GIT_CREDENTIALS.write() else {
         return;
     };
     let key = path_key(repository);
-    credentials.retain(|(folder, _, _)| path_key(folder) != key);
-    if let Some((username, password)) = credential {
-        credentials.push((repository.to_path_buf(), username, password));
+    credentials.retain(|(folder, _)| path_key(folder) != key);
+    if let Some(credential) = credential {
+        credentials.push((repository.to_path_buf(), credential));
     }
 }
 
 /// The github.com credential for git run in `directory`: the one set for the
 /// nearest repository folder that contains it.
-pub fn git_credential_for(directory: &Path) -> Option<(String, String)> {
+pub fn git_credential_for(directory: &Path) -> Option<GitCredential> {
     let directory = path_key(directory);
     let separator = if cfg!(windows) { '\\' } else { '/' };
     let credentials = GIT_CREDENTIALS.read().ok()?;
     credentials
         .iter()
-        .filter_map(|(folder, username, password)| {
+        .filter_map(|(folder, credential)| {
             let folder = path_key(folder);
             let contains = directory == folder
                 || directory
                     .strip_prefix(&folder)
                     .is_some_and(|rest| rest.starts_with(separator));
-            contains.then_some((folder.len(), username, password))
+            contains.then_some((folder.len(), credential))
         })
-        .max_by_key(|(length, _, _)| *length)
-        .map(|(_, username, password)| (username.clone(), password.clone()))
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, credential)| credential.clone())
 }
 
 /// Records that Zed's credential helper is answering: `command` is the
@@ -388,16 +398,26 @@ mod tests {
     fn a_credential_is_found_from_the_nearest_repository_folder() {
         let outer = PathBuf::from("ide-env-cred-test").join("outer");
         let inner = outer.join("inner");
-        set_git_credential(&outer, Some(("a".to_string(), "1".to_string())));
-        set_git_credential(&inner, Some(("b".to_string(), "2".to_string())));
+        let login = |username: &str| GitCredential::Login {
+            username: username.to_string(),
+            password: "secret".to_string(),
+        };
+        set_git_credential(&outer, Some(login("a")));
+        set_git_credential(&inner, Some(login("b")));
 
-        let found = |path: &Path| git_credential_for(path).map(|(user, _)| user);
+        let found = |path: &Path| match git_credential_for(path) {
+            Some(GitCredential::Login { username, .. }) => Some(username),
+            Some(GitCredential::Refuse) => Some("refused".to_string()),
+            None => None,
+        };
         assert_eq!(found(&outer), Some("a".to_string()));
         assert_eq!(found(&outer.join("src")), Some("a".to_string()));
         assert_eq!(found(&inner.join("deep")), Some("b".to_string()));
         // A sibling whose name merely starts the same is not inside.
         assert_eq!(found(&PathBuf::from("ide-env-cred-test").join("outer2")), None);
 
+        set_git_credential(&inner, Some(GitCredential::Refuse));
+        assert_eq!(found(&inner.join("deep")), Some("refused".to_string()));
         set_git_credential(&inner, None);
         assert_eq!(found(&inner), Some("a".to_string()));
         set_git_credential(&outer, None);

@@ -314,6 +314,34 @@ impl HelmPanel {
         }
     }
 
+    /// GitHub's private noreply address for the workspace's account, once
+    /// it is signed in.
+    pub fn noreply_email(&self) -> Option<String> {
+        let user = self.user.as_ref()?;
+        Some(format!("{}+{}@users.noreply.github.com", user.id, user.login))
+    }
+
+    /// Makes the workspace's account commit with its noreply address, after
+    /// GitHub refused a push for publishing a private email (GH007). The
+    /// repository's own email is replaced whatever it was.
+    pub fn use_noreply_commit_email(&mut self, cx: &mut Context<Self>) {
+        let (Some(login), Some(email)) = (
+            self.signed_in_login().map(str::to_string),
+            self.noreply_email(),
+        ) else {
+            return;
+        };
+        let name = HelmPanelSettings::get_global(cx)
+            .account(&login)
+            .and_then(|account| account.git_name.clone())
+            .or_else(|| self.user.as_ref().and_then(|user| user.name.clone()))
+            .unwrap_or_else(|| login.clone());
+        set_commit_identity(&login, &name, &email, cx);
+        if let Some(dir) = self.workspace_repository_dir(cx) {
+            self.write_commit_identity(dir, name, email, true, cx);
+        }
+    }
+
     /// Resolves a conflict: writes the account's identity over the
     /// repository's own.
     pub fn use_account_identity(&mut self, cx: &mut Context<Self>) {

@@ -227,7 +227,7 @@ impl HelmPanel {
                     local_repo: true,
                     message,
                 }) => this.notify_push_failed(
-                    format!("{message} — the local repository was kept."),
+                    format!("{} — the local repository was kept.", explain_push_error(message)),
                     retry_root,
                     cx,
                 ),
@@ -279,11 +279,26 @@ impl HelmPanel {
             };
             this.update(cx, |this, cx| match result {
                 Ok(()) => this.notify("Pushed this workspace to GitHub", cx),
-                Err(message) => this.notify_push_failed(message, root, cx),
+                Err(message) => this.notify_push_failed(explain_push_error(message), root, cx),
             })
             .ok();
         })
         .detach();
+    }
+}
+
+/// A failed push's message, with GitHub's private-email rejection (GH007)
+/// explained, since git only passes on GitHub's terse line.
+fn explain_push_error(message: String) -> String {
+    if message.contains("GH007") {
+        format!(
+            "GitHub refused the push because the commit uses an email address the account \
+             keeps private (GH007). Set the account's commit email to its GitHub noreply \
+             address in Helm, re-author the commit (git commit --amend --reset-author), then \
+             retry. ({message})"
+        )
+    } else {
+        message
     }
 }
 
