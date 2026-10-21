@@ -4,9 +4,26 @@
 //! commit would make pushing the workspace's existing files fail — so it
 //! runs here, after GitHub confirms the repository: README/.gitignore,
 //! `git init`, the initial commit, the remote, and the first push.
+//!
+//! All of it runs as the account the repository was created with, not as
+//! whatever the global git config and credential helpers say: the
+//! workspace has no repository yet, so the usual per-repository wiring
+//! (`commit_identity.rs`, `repo_access.rs`) has nothing to attach to. The
+//! account's commit identity is written into the new repository before the
+//! initial commit, and the push gets the account's token the way a clone
+//! does, with credential helpers and prompts turned off, so no sign-in
+//! window can appear.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
+use gpui::AsyncApp;
+use helm_backend::github::{
+    gh_get_current_user, gh_get_repo, gh_get_verified_emails, git_auth_config,
+};
+
+use super::accounts::set_commit_identity;
+use super::commit_identity::git_config;
 use super::*;
 
 /// The commit used when the dialog's message field was left blank.
@@ -34,6 +51,40 @@ pub(super) struct CreateRepoAttach {
 struct AttachFailure {
     local_repo: bool,
     message: String,
+}
+
+/// Who the initial commit is authored as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Identity {
+    name: String,
+    email: String,
+}
+
+/// The identity for an account with no commit email saved, by the same
+/// rule as `commit_identity.rs`: the global identity when its email is one
+/// of the account's verified addresses, otherwise the account's GitHub name
+/// with GitHub's private noreply address. Never another account's email.
+fn identity_for(
+    login: &str,
+    id: u64,
+    github_name: Option<&str>,
+    verified_emails: &[String],
+    global_name: Option<String>,
+    global_email: Option<String>,
+) -> Identity {
+    let github_name = github_name.unwrap_or(login).to_string();
+    match global_email {
+        Some(email) if verified_emails.iter().any(|own| own.eq_ignore_ascii_case(&email)) => {
+            Identity {
+                name: global_name.unwrap_or(github_name),
+                email,
+            }
+        }
+        _ => Identity {
+            name: github_name,
+            email: format!("{id}+{login}@users.noreply.github.com"),
+        },
+    }
 }
 
 impl HelmPanel {
@@ -72,7 +123,34 @@ impl HelmPanel {
             return;
         };
 
+        let Some(login) = self.signed_in_login().map(str::to_string) else {
+            self.notify(
+                format!(
+                    "Created {} on GitHub, but Helm is no longer signed in to push this \
+                     workspace to it.",
+                    repo.name
+                ),
+                cx,
+            );
+            return;
+        };
+        // The account's saved commit identity, if it has one.
+        let saved = HelmPanelSettings::get_global(cx)
+            .account(&login)
+            .and_then(|account| {
+                let email = account.git_email.clone()?;
+                let name = account
+                    .git_name
+                    .clone()
+                    .unwrap_or_else(|| account.display_name().to_string());
+                Some(Identity { name, email })
+            });
+
+        self.notify(format!("Publishing {} to GitHub…", repo.name), cx);
         let fs = <dyn fs::Fs>::global(cx);
+        let gh_state = self.gh_state.clone();
+        let owner = repo.owner.login;
+        let retry_root = root.clone();
         let name = repo.name;
         let url = repo.clone_url;
         let description = repo.description.unwrap_or_default();
@@ -80,10 +158,64 @@ impl HelmPanel {
         // after the future has consumed the originals.
         let created = name.clone();
         cx.spawn(async move |this, cx| {
-            let result = on_tokio(async move {
-                attach_workspace(&*fs, &root, &name, &description, &url, &attach).await
-            })
-            .await;
+            let token = gh_state.token().await;
+            let identity = match saved {
+                Some(identity) => Ok(identity),
+                None => {
+                    let gh_state = gh_state.clone();
+                    let root = root.clone();
+                    // Off the main thread: two API calls and two `git`s.
+                    let identity = on_tokio(async move {
+                        let user = gh_get_current_user(&gh_state).await?;
+                        // A token without the `user` scope cannot read them.
+                        let emails = gh_get_verified_emails(&gh_state).await.unwrap_or_default();
+                        Ok::<_, GhError>(identity_for(
+                            &user.login,
+                            user.id,
+                            user.name.as_deref(),
+                            &emails,
+                            git_config(&root, "--global", "user.name"),
+                            git_config(&root, "--global", "user.email"),
+                        ))
+                    })
+                    .await;
+                    // Remembered for the account, so the repository's later
+                    // wiring finds the identity it was committed with.
+                    if let Ok(identity) = &identity {
+                        let (login, identity) = (login.clone(), identity.clone());
+                        cx.update(|cx| {
+                            set_commit_identity(&login, &identity.name, &identity.email, cx)
+                        });
+                    }
+                    identity
+                }
+            };
+            let result = match identity {
+                Ok(identity) => {
+                    wait_until_pushable(&gh_state, &owner, &name, cx).await;
+                    on_tokio(async move {
+                        attach_workspace(
+                            &*fs,
+                            &root,
+                            &name,
+                            &description,
+                            &url,
+                            &attach,
+                            &identity,
+                            token.as_deref(),
+                        )
+                        .await
+                    })
+                    .await
+                }
+                Err(error) => Err(AttachFailure {
+                    local_repo: false,
+                    message: format!(
+                        "Created {created} on GitHub, but could not read the account's \
+                         commit identity: {error}"
+                    ),
+                }),
+            };
             this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     this.notify(
@@ -92,16 +224,62 @@ impl HelmPanel {
                     );
                 }
                 Err(AttachFailure {
-                    local_repo,
+                    local_repo: true,
                     message,
-                }) => {
-                    let kept = if local_repo {
-                        " — the local repository was kept; push it from the Git panel to finish."
-                    } else {
-                        ""
-                    };
-                    this.notify(format!("{message}{kept}"), cx);
-                }
+                }) => this.notify_push_failed(
+                    format!("{message} — the local repository was kept."),
+                    retry_root,
+                    cx,
+                ),
+                Err(AttachFailure {
+                    local_repo: false,
+                    message,
+                }) => this.notify(message, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The failure toast for a publish that got as far as a local
+    /// repository, with a "Retry push" that pushes it again.
+    fn notify_push_failed(&self, message: String, root: PathBuf, cx: &mut Context<Self>) {
+        let panel = cx.entity().downgrade();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(NotificationId::unique::<HelmPanel>(), message).on_click(
+                        "Retry push",
+                        move |_, cx| {
+                            panel
+                                .update(cx, |this, cx| this.retry_push(root.clone(), cx))
+                                .ok();
+                        },
+                    ),
+                    cx,
+                );
+            })
+            .ok();
+    }
+
+    /// Pushes the repository at `root` again, as the panel's account, the
+    /// same way the first push did.
+    fn retry_push(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.notify("Pushing this workspace to GitHub…", cx);
+        let gh_state = self.gh_state.clone();
+        cx.spawn(async move |this, cx| {
+            let token = gh_state.token().await;
+            let result = {
+                let root = root.clone();
+                on_tokio(async move {
+                    git_as_account(&["push", "-u", "origin", "HEAD"], &root, token.as_deref())
+                        .await
+                })
+                .await
+            };
+            this.update(cx, |this, cx| match result {
+                Ok(()) => this.notify("Pushed this workspace to GitHub", cx),
+                Err(message) => this.notify_push_failed(message, root, cx),
             })
             .ok();
         })
@@ -109,8 +287,32 @@ impl HelmPanel {
     }
 }
 
+/// How many times, a second apart, to ask GitHub for a repository it has
+/// just created before pushing to it anyway.
+const PUSHABLE_ATTEMPTS: u32 = 10;
+
+/// Waits until the API can see `owner/name`. Straight after creating a
+/// repository GitHub can still answer "Repository not found" for a few
+/// seconds, which made the first push fail. Gives up after about ten
+/// seconds, or on any answer other than "not found", and lets the push
+/// report whatever is wrong.
+async fn wait_until_pushable(gh_state: &Arc<GhState>, owner: &str, name: &str, cx: &AsyncApp) {
+    for attempt in 1..=PUSHABLE_ATTEMPTS {
+        let (owner, name, state) = (owner.to_string(), name.to_string(), gh_state.clone());
+        match on_tokio(async move { gh_get_repo(owner, name, &state).await }).await {
+            Err(GhError::NotFound { .. }) if attempt < PUSHABLE_ATTEMPTS => {
+                cx.background_executor()
+                    .timer(Duration::from_secs(1))
+                    .await;
+            }
+            _ => return,
+        }
+    }
+}
+
 /// Runs every local step, in order, stopping at the first failure. The
-/// caller words the outcome based on [`AttachFailure::local_repo`].
+/// caller words the outcome based on [`AttachFailure::local_repo`]. Commits
+/// are authored as `identity`, and the push logs in with `token`.
 async fn attach_workspace(
     fs: &dyn fs::Fs,
     root: &Path,
@@ -118,6 +320,8 @@ async fn attach_workspace(
     description: &str,
     url: &str,
     attach: &CreateRepoAttach,
+    identity: &Identity,
+    token: Option<&str>,
 ) -> Result<(), AttachFailure> {
     // An explicit `main` so the GitHub default branch matches what Zed's
     // own `git init` produces; gits too old to know `--initial-branch`
@@ -131,6 +335,18 @@ async fn attach_workspace(
                 local_repo: false,
                 message,
             })?;
+    }
+
+    // In the repository's own config, as Helm does for every repository of
+    // the account, so the initial commit (and later ones from any tool) is
+    // not authored as the global identity.
+    for (key, value) in [
+        ("user.name", identity.name.as_str()),
+        ("user.email", identity.email.as_str()),
+    ] {
+        git(&["config", "--local", key, value], root)
+            .await
+            .map_err(local_failure)?;
     }
 
     if attach.readme {
@@ -173,7 +389,7 @@ async fn attach_workspace(
             .await
             .map_err(local_failure)?;
     }
-    git(&["push", "-u", "origin", "HEAD"], root)
+    git_as_account(&["push", "-u", "origin", "HEAD"], root, token)
         .await
         .map_err(local_failure)
 }
@@ -237,15 +453,48 @@ venv/
 .env.local
 ";
 
-/// Runs `git <args>` in `cwd`, folding git's own stderr into the error, so
-/// a failed step's toast carries git's actual explanation (missing author
-/// identity, rejected push, …). Stdin is null — inherited from `output()` —
-/// so a step can never hang waiting for input; credential helpers like the
-/// Git Credential Manager run out-of-process regardless.
+/// Runs `git <args>` in `cwd` with no environment config of its own.
 async fn git(args: &[&str], cwd: &Path) -> Result<(), String> {
-    let output = tokio::process::Command::new("git")
+    run_git(args, cwd, Vec::new()).await
+}
+
+/// Runs `git <args>` in `cwd` logged in to github.com as the account whose
+/// `token` it is, the way a clone does (`git_auth_config`). Every credential
+/// helper is turned off, so neither `gh`'s active account nor Git Credential
+/// Manager is asked, and no sign-in window or prompt can appear: without a
+/// token the step fails with git's own message instead.
+async fn git_as_account(args: &[&str], cwd: &Path, token: Option<&str>) -> Result<(), String> {
+    // An empty value clears the helpers configured so far.
+    let mut config = vec![("credential.helper".to_string(), String::new())];
+    config.extend(token.map(git_auth_config).unwrap_or_default());
+    run_git(args, cwd, config).await
+}
+
+/// Runs `git <args>` in `cwd` with `config` as `GIT_CONFIG_*` environment
+/// config, folding git's own stderr into the error, so a failed step's
+/// toast carries git's actual explanation (missing author identity,
+/// rejected push, …). Stdin is null, terminal prompts and Git Credential
+/// Manager's windows are turned off, and on Windows no console window is
+/// opened, so a step can never hang waiting for input or pop anything up.
+async fn run_git(args: &[&str], cwd: &Path, config: Vec<(String, String)>) -> Result<(), String> {
+    let mut command = tokio::process::Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .env("GIT_CONFIG_COUNT", config.len().to_string())
+        .stdin(Stdio::null());
+    for (index, (key, value)) in config.into_iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x0800_0000);
+    let output = command
         .output()
         .await
         .map_err(|error| format!("Running `git {}` failed: {error}", args[0]))?;
@@ -275,6 +524,51 @@ mod tests {
         assert_eq!(commit_message(""), DEFAULT_COMMIT_MESSAGE);
         assert_eq!(commit_message("   \t"), DEFAULT_COMMIT_MESSAGE);
         assert_eq!(commit_message(" first pass "), "first pass");
+    }
+
+    #[test]
+    fn the_global_identity_is_used_only_when_its_email_is_the_accounts() {
+        let sencorp = ("FrancoisHuyzers-Sencorp", 42, Some("Francois H"));
+        let verified = vec!["francoish@sencorpdigital.com".to_string()];
+
+        // The global email belongs to another account: GitHub's private
+        // address for this one, never the other account's email.
+        assert_eq!(
+            identity_for(
+                sencorp.0,
+                sencorp.1,
+                sencorp.2,
+                &verified,
+                Some("Mentenaz-Server (Francois)".into()),
+                Some("mentenaz@outlook.de".into()),
+            ),
+            Identity {
+                name: "Francois H".into(),
+                email: "42+FrancoisHuyzers-Sencorp@users.noreply.github.com".into(),
+            }
+        );
+
+        // The global email is one of this account's: use the global identity.
+        assert_eq!(
+            identity_for(
+                sencorp.0,
+                sencorp.1,
+                sencorp.2,
+                &verified,
+                Some("Francois".into()),
+                Some("FrancoisH@SencorpDigital.com".into()),
+            ),
+            Identity {
+                name: "Francois".into(),
+                email: "FrancoisH@SencorpDigital.com".into(),
+            }
+        );
+
+        // No name on GitHub: the login.
+        assert_eq!(
+            identity_for("someone", 7, None, &[], None, None).name,
+            "someone"
+        );
     }
 
     #[test]

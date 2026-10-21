@@ -307,7 +307,7 @@ impl GitPanel {
             )
             .tooltip(Tooltip::text(
                 "The GitHub account this workspace uses in Helm, and the email commits are \
-                 authored with. Pushes from the git panel still use git's own login for now.",
+                 authored with. Push, pull and fetch from the git panel log in as this account.",
             ));
 
         let mut column = v_flex().child(account_row);

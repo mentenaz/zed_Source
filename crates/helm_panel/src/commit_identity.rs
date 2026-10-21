@@ -73,7 +73,7 @@ fn git(dir: &Path, args: &[&str]) -> std::io::Result<Output> {
 }
 
 /// A `git config` value, if it is set.
-fn git_config(dir: &Path, scope: &str, key: &str) -> Option<String> {
+pub(super) fn git_config(dir: &Path, scope: &str, key: &str) -> Option<String> {
     let output = git(dir, &["config", scope, "--get", key]).ok()?;
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (output.status.success() && !value.is_empty()).then_some(value)
