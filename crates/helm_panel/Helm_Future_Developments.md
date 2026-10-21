@@ -809,6 +809,103 @@ The goal is to make Helm the **GitHub control layer that connects naturally to t
 
 ---
 
+# Later — Azure DevOps Provider
+
+### Goal
+
+Work with Azure DevOps repositories the way Helm works with GitHub: sign in
+inside Zed, let git use the workspace's account, and later browse pull
+requests, pipelines and work items.
+
+Status: **parked** (2026-10-21). Nothing is built yet. The findings below are
+from a session of checks, so the work can pick up from here.
+
+### What already works without Zed changes
+
+Azure Repos is plain git. Clone, pull, push and fetch from Zed's git panel
+already work through Git Credential Manager (shipped with Git for Windows):
+
+- `git config --global credential.azreposCredentialType oauth` makes it use
+  Microsoft Entra tokens instead of personal access tokens (Microsoft's
+  recommended default).
+- `git config --global credential.msauthFlow system` signs in in the normal
+  browser. Git Credential Manager's built-in window could not show GitHub's
+  sign-in page (a personal Microsoft account signed in "with GitHub").
+- `git credential-manager azure-repos list` shows which account each
+  organisation uses; `unbind <org>` forgets it, `bind <org> <account>` pins
+  one. Entra tokens are kept in its own cache, not in Windows Credential
+  Manager, so `cmdkey` shows nothing.
+
+### Test setup (where it was left)
+
+- Organisation `dev.azure.com/mentenaz` (project and repository
+  `TestProject`), owned by the personal account mentenaz@outlook.de.
+- Microsoft Entra directory `2da0e3d4-cce9-4d77-b00b-9b56f44cc530`, domains
+  `mentenaz-server.com` (default) and `mentenazoutlook.onmicrosoft.com`. The
+  work account francois@mentenaz-server.com lives there; the personal account
+  is in it as an external member (it created the directory).
+- The organisation was moved from "no directory" to that directory
+  (Organization settings → Microsoft Entra → Connect directory). Azure DevOps
+  now reports `X-VSS-ResourceTenant: 2da0e3d4-…`.
+- Its Azure subscription is disabled. That does not matter: Azure DevOps and
+  Entra app registrations need no subscription. Do not use the "Almost done…
+  name your organization" page that appears in the personal-account view; it
+  creates a new organisation.
+
+**Next when picking this up:**
+
+1. Open `dev.azure.com/mentenaz` through **Switch directory → Default
+   Directory**, or sign in as francois@mentenaz-server.com (Work or school).
+2. Under Organization settings → Users, make sure the work account is a
+   member, and remove the personal-account duplicate of that email (inviting
+   it before the move created one).
+3. Check from the terminal:
+   `az login --tenant 2da0e3d4-cce9-4d77-b00b-9b56f44cc530 --allow-no-subscriptions`,
+   then list projects with a token for resource
+   `499b84ac-1321-427f-aa17-267ca6975798` (Azure DevOps), and
+   `git -c http.extraheader="AUTHORIZATION: bearer <token>" ls-remote https://dev.azure.com/mentenaz/TestProject/_git/TestProject`.
+   Before the move the work account's token was refused (401) and the
+   personal account's directory token got 403.
+
+### How sign-in differs from GitHub
+
+- **Microsoft Entra ID, not an OAuth App.** Azure DevOps' own OAuth apps are
+  deprecated. Zed would register a public client app in the directory above
+  (the counterpart of "Helm for Forge" on GitHub) with Azure DevOps'
+  `user_impersonation` permission, and sign in with the device code flow
+  (code entered at `microsoft.com/devicelogin`).
+- **Tokens expire after about an hour.** Store a refresh token and renew
+  quietly. Refresh tokens are long; a Credential Manager entry holds at most
+  2,560 bytes, so it may need splitting.
+- **Personal accounts are the open question.** Git Credential Manager signs
+  in as Visual Studio's app, which works for personal accounts. Whether an app
+  Zed registers can get Azure DevOps tokens for a personal account is
+  untested; a work account is the well-supported path.
+- **Companies can block it:** an admin may need to consent to the app, and
+  the organisation policy "Third-party application access via OAuth" must be
+  on (otherwise `TF400813`).
+
+### Phases
+
+1. **Provider-neutral accounts.** Give each account a `provider` (`github`,
+   `azure_devops`); key credential names, the account list, the switcher and
+   the per-workspace account by provider. Small while there is one provider.
+2. **Entra sign-in, and git follows the account.** Device code sign-in with
+   refresh. Reuse section 11 of `helm_backend/octocrab-helm-coverage.md`: the
+   token goes to git as a `bearer` `Authorization` header through `ide_env`,
+   and Zed's credential helper (`crates/git_credential`, which today answers
+   only `github.com`) also answers `dev.azure.com`. Needs an Azure DevOps
+   remote parser next to `parse_github_remote`
+   (`https://dev.azure.com/<org>/<project>/_git/<repo>`,
+   `<org>.visualstudio.com`, `git@ssh.dev.azure.com:v3/<org>/<project>/<repo>`).
+   First task: register the app and get one token with the device code flow,
+   for both the work and the personal account.
+3. **Azure DevOps panel.** A sibling of Helm with its own REST client
+   (`dev.azure.com/{org}/{project}/_apis/...`): repositories and pull requests
+   first, then Pipelines and Boards work items.
+
+---
+
 # 5. Recommended Priority
 
 The phases should not necessarily be treated as rigid releases. They represent an order of **technical dependency and product maturity**.
