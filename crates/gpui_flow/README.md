@@ -30,8 +30,15 @@
 > yet, call `FlowState::request_fit(padding)`: it fits right away when the
 > size is known, otherwise as soon as it is.
 >
-> **Known gap.** SVG icons and images inside nodes are rasterised at their
-> unscaled size, so they look blurry when zoomed out.
+> **Less detail when zoomed out.** Zoomed out, text is only a few pixels
+> tall and smears, so `DetailLevel::for_zoom` (or `FlowState::detail_level()`)
+> tells renderers how much to draw: `Full` from zoom 0.6 up, `Compact` (the
+> title only, at least `DetailLevel::MIN_TITLE_SIZE` pixels tall) down to
+> 0.35, and `Minimal` (a bar in place of the title) below that. Renderers are
+> only given the node, so a renderer that follows it captures the
+> `Entity<FlowState>` and reads the zoom; the Designer's do. The graph itself
+> hides edge labels below `Full`, and fades the background grid out instead
+> of letting its dots shrink below a pixel.
 >
 > The rest of this file is the upstream README.
 
@@ -183,6 +190,7 @@ FlowGraph::new(state, cx)
 let state = FlowState::new(nodes, edges);
 
 // Viewport
+state.detail_level();                      // Full, Compact or Minimal at this zoom (fork)
 state.request_fit(40.0);                   // fit into the canvas as drawn (fork)
 state.canvas_size();                       // Some((w, h)) once laid out (fork)
 state.fit_view(40.0, width, height);

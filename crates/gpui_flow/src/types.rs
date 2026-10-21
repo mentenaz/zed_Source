@@ -373,6 +373,39 @@ impl FlowImport {
     }
 }
 
+/// How much text is worth drawing at a zoom. Zoomed out, text is only a few
+/// pixels tall and smears instead of reading, so renderers draw less of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailLevel {
+    /// Everything: the node's full content and the edge labels.
+    Full,
+    /// The title only, at a size that stays readable; edge labels hidden.
+    Compact,
+    /// A bar where the title would be; edge labels hidden.
+    Minimal,
+}
+
+impl DetailLevel {
+    /// Below this zoom, [`DetailLevel::Compact`].
+    pub const COMPACT_BELOW: f32 = 0.6;
+    /// Below this zoom, [`DetailLevel::Minimal`].
+    pub const MINIMAL_BELOW: f32 = 0.35;
+    /// The smallest a title is drawn on screen, in pixels, in
+    /// [`DetailLevel::Compact`]. Divide by the zoom for the size in flow
+    /// units.
+    pub const MIN_TITLE_SIZE: f32 = 8.0;
+
+    pub fn for_zoom(zoom: f32) -> Self {
+        if zoom < Self::MINIMAL_BELOW {
+            Self::Minimal
+        } else if zoom < Self::COMPACT_BELOW {
+            Self::Compact
+        } else {
+            Self::Full
+        }
+    }
+}
+
 /// Viewport state: pan offset and zoom level.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {

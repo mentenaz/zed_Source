@@ -39,6 +39,17 @@ fn window_to_flow(
     (local_x / viewport.zoom, local_y / viewport.zoom)
 }
 
+/// Below this dot spacing, in pixels, the grid is hidden.
+const GRID_HIDDEN_BELOW: f32 = 8.0;
+/// From this dot spacing up, the grid is fully drawn.
+const GRID_FULL_FROM: f32 = 16.0;
+
+/// The grid's opacity at a dot spacing in pixels: zero below
+/// [`GRID_HIDDEN_BELOW`], fading in up to [`GRID_FULL_FROM`].
+fn grid_alpha(spacing: f32) -> f32 {
+    ((spacing - GRID_HIDDEN_BELOW) / (GRID_FULL_FROM - GRID_HIDDEN_BELOW)).clamp(0.0, 1.0)
+}
+
 /// The top-level flow graph component.
 ///
 /// Renders nodes as positioned divs and edges via a canvas paint layer.
@@ -928,6 +939,11 @@ impl FlowGraph {
     /// `window.paint_quad` does not apply `Style::scale` itself. Dot size
     /// keeps the original `min(1.0)` clamp so zooming in doesn't turn the
     /// background into heavy blobs.
+    ///
+    /// Zoomed out, the grid fades out instead of shrinking (see
+    /// [`grid_alpha`]), and its marks stay a whole number of device pixels:
+    /// a mark thinner than a pixel rounds to one pixel or to nothing
+    /// depending on where it falls, which speckles the background.
     fn paint_grid(
         bounds: &Bounds<Pixels>,
         grid_color: u32,
@@ -935,14 +951,19 @@ impl FlowGraph {
         viewport: Viewport,
         window: &mut Window,
     ) {
-        let color = gpui::rgb(grid_color);
         let element_scale = window.element_scale();
         let scale = element_scale * viewport.zoom;
         let spacing = 20.0 * scale;
 
-        if spacing < 5.0 {
+        let alpha = grid_alpha(spacing);
+        if alpha <= 0.0 {
             return;
         }
+        let mut color = gpui::rgb(grid_color);
+        color.a *= alpha;
+        let device_scale = window.scale_factor();
+        let whole_pixels =
+            |size: f32| px((size * device_scale).round().max(1.0) / device_scale);
 
         let bw = bounds.size.width.as_f32();
         let bh = bounds.size.height.as_f32();
@@ -953,7 +974,7 @@ impl FlowGraph {
 
         match pattern {
             BackgroundPattern::Dots => {
-                let dot_size = px(1.5 * scale.min(1.0));
+                let dot_size = whole_pixels(1.5 * scale.min(1.0));
                 let mut x = start_x;
                 while x < bw {
                     let mut y = start_y;
@@ -972,7 +993,7 @@ impl FlowGraph {
                 }
             }
             BackgroundPattern::Lines => {
-                let line_w = px(0.5 * scale);
+                let line_w = whole_pixels(0.5 * scale);
                 let mut x = start_x;
                 while x < bw {
                     let line = Bounds::new(
@@ -987,7 +1008,7 @@ impl FlowGraph {
                 }
             }
             BackgroundPattern::Cross => {
-                let line_w = px(0.5 * scale);
+                let line_w = whole_pixels(0.5 * scale);
                 // Vertical lines
                 let mut x = start_x;
                 while x < bw {
@@ -1272,10 +1293,11 @@ impl Render for FlowGraph {
                 })
                 .collect();
 
-            // Edge labels
+            // Edge labels, only while there is room to read them.
             let bg = self.bg_color;
             let mut edge_label_elements: Vec<AnyElement> = Vec::new();
-            for edge in &state.edges {
+            let show_edge_labels = state.detail_level() == DetailLevel::Full;
+            for edge in state.edges.iter().filter(|_| show_edge_labels) {
                 if let Some(ref label) = edge.label {
                     if let Some((lx, ly)) = edges::compute_edge_label_position(state, edge) {
                         let label_color = edge.color.unwrap_or(0xb1b1b7);
@@ -1997,5 +2019,19 @@ impl Render for FlowGraph {
                     cx.notify(entity_id);
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::grid_alpha;
+
+    #[test]
+    fn the_grid_fades_out_as_its_dots_close_up() {
+        assert_eq!(grid_alpha(20.0), 1.0);
+        assert_eq!(grid_alpha(16.0), 1.0);
+        assert_eq!(grid_alpha(12.0), 0.5);
+        assert_eq!(grid_alpha(8.0), 0.0);
+        assert_eq!(grid_alpha(5.0), 0.0);
     }
 }

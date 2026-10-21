@@ -59,11 +59,12 @@ use gpui_component::{
     spinner::Spinner,
     switch::Switch,
     tag::Tag,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_flow::{
-    Controls, FlowEdge, FlowGraph, FlowNode, FlowPoint, FlowState, HandleDef, HandlePosition,
-    Minimap, NodeId,
+    Controls, DetailLevel, FlowEdge, FlowGraph, FlowNode, FlowPoint, FlowState, HandleDef,
+    HandlePosition, Minimap, NodeId,
 };
 use notifications::status_toast::StatusToast;
 use project::Project;
@@ -366,24 +367,110 @@ fn accent_for_type(type_id: &str, cx: &App) -> gpui::Hsla {
     palette[(hash as usize) % palette.len()]
 }
 
+/// The zoom the canvas is drawn at, for the node renderers, which are only
+/// given the node.
+fn canvas_zoom(state: &Entity<FlowState>, cx: &App) -> f32 {
+    state.read(cx).viewport.zoom
+}
+
+/// A title drawn over a node zoomed out, in place of its normal text: at
+/// [`DetailLevel::Compact`] up to `lines` lines no smaller than
+/// [`DetailLevel::MIN_TITLE_SIZE`] on screen, wrapped at words and cut with
+/// "…" when it does not fit; at [`DetailLevel::Minimal`] a bar where the
+/// title would be, in `accent` when given (a leaf's type colour). Hovering
+/// shows the full title. Absolutely positioned, so the node keeps the size
+/// its normal text gives it: containers, edges and the minimap use that size.
+fn zoomed_out_title(
+    id: String,
+    title: String,
+    level: DetailLevel,
+    zoom: f32,
+    lines: usize,
+    accent: Option<gpui::Hsla>,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let text_color = cx.theme().popover_foreground;
+    let bar_color = accent.map_or(text_color.opacity(0.35), |accent| accent.opacity(0.75));
+    let font_size = (DetailLevel::MIN_TITLE_SIZE / zoom).max(14.0);
+    let tooltip = SharedString::from(title.clone());
+    div()
+        .id(SharedString::from(id))
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .map(|el| match level {
+            DetailLevel::Minimal => el.child(
+                div()
+                    .w(gpui::relative(0.8))
+                    .h(gpui::relative(0.4))
+                    .rounded_sm()
+                    .bg(bar_color),
+            ),
+            DetailLevel::Compact | DetailLevel::Full => el.child(
+                div()
+                    .w_full()
+                    .text_size(px(font_size))
+                    .line_height(px(font_size * 1.2))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(text_color)
+                    .when(lines == 1, |el| el.whitespace_nowrap())
+                    .line_clamp(lines)
+                    .text_ellipsis()
+                    .child(title),
+            ),
+        })
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
 fn render_container_header(
     node: &FlowNode,
     title: &str,
-    _w: &mut gpui::Window,
+    zoom: f32,
     cx: &mut App,
 ) -> gpui::AnyElement {
+    let text = format!("{title} \u{2014} {}", node_label(node));
+    let level = DetailLevel::for_zoom(zoom);
+    if level != DetailLevel::Full {
+        return div()
+            .relative()
+            .size_full()
+            .child(
+                zoomed_out_title(
+                    format!("flow-title-{}", node.id),
+                    text,
+                    level,
+                    zoom,
+                    1,
+                    None,
+                    cx,
+                )
+                .right_0(),
+            )
+            .into_any_element();
+    }
     div()
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(cx.theme().popover_foreground)
-        .child(format!("{title} \u{2014} {}", node_label(node)))
+        .child(text)
         .into_any_element()
 }
 
-fn render_leaf(node: &FlowNode, _w: &mut gpui::Window, cx: &mut App) -> gpui::AnyElement {
+fn render_leaf(node: &FlowNode, zoom: f32, cx: &mut App) -> gpui::AnyElement {
+    let level = DetailLevel::for_zoom(zoom);
     let type_label = node.node_type.clone().unwrap_or_else(|| "action".into());
     let accent = accent_for_type(&type_label, cx);
-    let text_color = cx.theme().popover_foreground;
+    // Zoomed out, the normal text still gives the node its size but is not
+    // drawn; `zoomed_out_title` draws over it.
+    let text_color = if level == DetailLevel::Full {
+        cx.theme().popover_foreground
+    } else {
+        gpui::transparent_black()
+    };
 
     // Left accent bar — the one place a node's `type_id` gets a stable,
     // distinct color; everything else is theme-neutral so different
@@ -417,7 +504,7 @@ fn render_leaf(node: &FlowNode, _w: &mut gpui::Window, cx: &mut App) -> gpui::An
     // Leaf nodes have no header/body split to hang a real strip off, so
     // this wraps just the text instead of reproducing the header's
     // viewport-relative full-bleed geometry (not available here anyway —
-    // this renderer never sees the canvas's `Viewport`/zoom).
+    // this renderer sees the zoom, but not the canvas's `Viewport`).
     let text_block = div()
         .flex()
         .flex_col()
@@ -427,7 +514,26 @@ fn render_leaf(node: &FlowNode, _w: &mut gpui::Window, cx: &mut App) -> gpui::An
         .py_0p5()
         .bg(gpui::rgba(0x00000008))
         .child(type_row)
-        .child(label_row);
+        .child(label_row)
+        .when(level != DetailLevel::Full, |el| {
+            // Over the node's padding, not just its text: out to its right
+            // edge, and its full height for a second line (the type line it
+            // replaces is not drawn).
+            el.relative().child(
+                zoomed_out_title(
+                    format!("flow-title-{}", node.id),
+                    node_label(node),
+                    level,
+                    zoom,
+                    2,
+                    Some(accent),
+                    cx,
+                )
+                .top(px(-6.0))
+                .bottom(px(-6.0))
+                .right(px(-12.0)),
+            )
+        });
 
     div()
         .flex()
@@ -1073,7 +1179,10 @@ impl DesignerPanel {
                 .node_bg_color(hex(cx.theme().popover))
                 .node_border_color(hex(cx.theme().border))
                 .accent_color(hex(cx.theme().primary))
-                .default_renderer(render_leaf);
+                .default_renderer({
+                    let state = state.clone();
+                    move |n, _, cx| render_leaf(n, canvas_zoom(&state, cx), cx)
+                });
             let context_target_for_graph = context_target.clone();
             graph = graph.on_canvas_context_menu(move |_, position, node_id, _, _| {
                 let mut target = context_target_for_graph.borrow_mut();
@@ -1095,12 +1204,14 @@ impl DesignerPanel {
                     .ok();
             });
             for (type_id, title) in CONTAINER_TYPES {
+                let body_state = state.clone();
+                let header_state = state.clone();
                 graph = graph
-                    .node_renderer(*type_id, move |n, w, cx| {
-                        render_container_header(n, title, w, cx)
+                    .node_renderer(*type_id, move |n, _, cx| {
+                        render_container_header(n, title, canvas_zoom(&body_state, cx), cx)
                     })
-                    .container_header(*type_id, move |n, w, cx| {
-                        render_container_header(n, title, w, cx)
+                    .container_header(*type_id, move |n, _, cx| {
+                        render_container_header(n, title, canvas_zoom(&header_state, cx), cx)
                     });
             }
             graph

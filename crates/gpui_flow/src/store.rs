@@ -112,6 +112,11 @@ impl FlowState {
         }
     }
 
+    /// How much text renderers should draw at the current zoom.
+    pub fn detail_level(&self) -> DetailLevel {
+        DetailLevel::for_zoom(self.viewport.zoom)
+    }
+
     /// The canvas's size on screen, in pixels, once `FlowGraph` has laid it
     /// out.
     pub fn canvas_size(&self) -> Option<(f32, f32)> {
@@ -926,6 +931,15 @@ mod canvas_size_tests {
         // The request ran once; the same size again changes nothing.
         assert!(!state.set_canvas_size(800.0, 400.0));
         assert_eq!(state.viewport.x, fitted.x);
+    }
+
+    #[test]
+    fn the_detail_level_follows_the_zoom() {
+        assert_eq!(DetailLevel::for_zoom(1.0), DetailLevel::Full);
+        assert_eq!(DetailLevel::for_zoom(0.6), DetailLevel::Full);
+        assert_eq!(DetailLevel::for_zoom(0.37), DetailLevel::Compact);
+        assert_eq!(DetailLevel::for_zoom(0.35), DetailLevel::Compact);
+        assert_eq!(DetailLevel::for_zoom(0.2), DetailLevel::Minimal);
     }
 
     #[test]
