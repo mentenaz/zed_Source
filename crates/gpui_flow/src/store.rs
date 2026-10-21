@@ -72,6 +72,13 @@ pub struct FlowState {
     pub snap_to_grid: bool,
     pub snap_grid: (f32, f32),
     pub connection_radius: f32,
+    /// The canvas's size on screen, in pixels, as `FlowGraph` last laid it
+    /// out. `None` until the first frame. The minimap, the controls and
+    /// [`Self::request_fit`] use it, so they match the pane the graph is
+    /// actually drawn in rather than an assumed size.
+    canvas_size: Option<(f32, f32)>,
+    /// A [`Self::fit_view`] padding waiting for the canvas size to be known.
+    pending_fit: Option<f32>,
 }
 
 impl FlowState {
@@ -100,6 +107,40 @@ impl FlowState {
             snap_to_grid: false,
             snap_grid: (20.0, 20.0),
             connection_radius: 20.0,
+            canvas_size: None,
+            pending_fit: None,
+        }
+    }
+
+    /// The canvas's size on screen, in pixels, once `FlowGraph` has laid it
+    /// out.
+    pub fn canvas_size(&self) -> Option<(f32, f32)> {
+        self.canvas_size
+    }
+
+    /// Records the canvas's size on screen (called by `FlowGraph` whenever
+    /// its box changes), and runs a [`Self::request_fit`] that was waiting
+    /// for it. Returns whether anything changed. An empty size is ignored.
+    pub fn set_canvas_size(&mut self, width: f32, height: f32) -> bool {
+        if width <= 0.0 || height <= 0.0 {
+            return false;
+        }
+        let changed = self.canvas_size != Some((width, height));
+        self.canvas_size = Some((width, height));
+        if let Some(padding) = self.pending_fit.take() {
+            self.fit_view(padding, width, height);
+            return true;
+        }
+        changed
+    }
+
+    /// [`Self::fit_view`] into the canvas as it is on screen: at once when
+    /// its size is known, otherwise as soon as `FlowGraph` lays it out (a
+    /// flow loaded before its pane has been drawn).
+    pub fn request_fit(&mut self, padding: f32) {
+        match self.canvas_size {
+            Some((width, height)) => self.fit_view(padding, width, height),
+            None => self.pending_fit = Some(padding),
         }
     }
 
@@ -859,6 +900,39 @@ impl FlowState {
             edge.target_handle = Some(th.clone());
         }
         self.edges.push(edge);
+    }
+}
+
+#[cfg(test)]
+mod canvas_size_tests {
+    use super::*;
+
+    fn one_node() -> FlowState {
+        FlowState::new(vec![FlowNode::new("a", 500.0, 300.0)], Vec::new())
+    }
+
+    #[test]
+    fn a_fit_requested_before_layout_runs_once_the_size_is_known() {
+        let mut state = one_node();
+        let before = state.viewport;
+        state.request_fit(60.0);
+        assert_eq!(state.viewport.x, before.x, "nothing to fit into yet");
+
+        assert!(state.set_canvas_size(800.0, 400.0));
+        assert_eq!(state.canvas_size(), Some((800.0, 400.0)));
+        let fitted = state.viewport;
+        assert_ne!((fitted.x, fitted.y), (before.x, before.y));
+
+        // The request ran once; the same size again changes nothing.
+        assert!(!state.set_canvas_size(800.0, 400.0));
+        assert_eq!(state.viewport.x, fitted.x);
+    }
+
+    #[test]
+    fn an_empty_size_is_ignored() {
+        let mut state = one_node();
+        assert!(!state.set_canvas_size(0.0, 300.0));
+        assert_eq!(state.canvas_size(), None);
     }
 }
 

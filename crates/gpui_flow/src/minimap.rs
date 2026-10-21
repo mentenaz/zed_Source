@@ -41,7 +41,9 @@ impl Minimap {
         }
     }
 
-    /// Set the container bounds (the main flow graph's size).
+    /// Set the size of the main flow graph's canvas to assume until the
+    /// graph has been laid out. After that the canvas's real size is used
+    /// (`FlowState::canvas_size`), so the viewport rectangle matches the pane.
     pub fn container_bounds(mut self, width: f32, height: f32) -> Self {
         self.container_bounds = Some((width, height));
         self
@@ -58,7 +60,10 @@ impl Render for Minimap {
         let state_for_canvas = self.state.clone();
         let state_for_mouse = self.state.clone();
         let entity_id = cx.entity_id();
-        let container = self.container_bounds.unwrap_or((900.0, 600.0));
+        // The size to assume until the graph has reported its real one.
+        let fallback = self.container_bounds.unwrap_or((900.0, 600.0));
+        let container_of =
+            move |state: &FlowState| state.canvas_size().unwrap_or(fallback);
         let bounds_for_layout = self.bounds.clone();
         let bounds_for_down = self.bounds.clone();
         let bounds_for_move = self.bounds.clone();
@@ -82,7 +87,7 @@ impl Render for Minimap {
                     },
                     move |bounds, _: (), window, cx| {
                         let state = state_for_canvas.read(cx);
-                        paint_minimap(&bounds, state, container, window);
+                        paint_minimap(&bounds, state, container_of(state), window);
                     },
                 )
                 .size_full(),
@@ -93,6 +98,7 @@ impl Render for Minimap {
                     let origin = bounds_for_down.get().origin;
                     let mx = event.position.x.as_f32() - origin.x.as_f32();
                     let my = event.position.y.as_f32() - origin.y.as_f32();
+                    let container = container_of(state.read(cx));
                     pan_to_minimap_point(&state, mx, my, container, cx);
                     cx.notify(entity_id);
                 }
@@ -104,6 +110,7 @@ impl Render for Minimap {
                         let origin = bounds_for_move.get().origin;
                         let mx = event.position.x.as_f32() - origin.x.as_f32();
                         let my = event.position.y.as_f32() - origin.y.as_f32();
+                        let container = container_of(state.read(cx));
                         pan_to_minimap_point(&state, mx, my, container, cx);
                         cx.notify(entity_id);
                     }

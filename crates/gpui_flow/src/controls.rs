@@ -24,7 +24,9 @@ impl Controls {
         }
     }
 
-    /// Set the container size (needed for zoom centering and fit-view).
+    /// Set the canvas size to assume (for zoom centering and fit-view) until
+    /// the graph has been laid out. After that the canvas's real size is
+    /// used (`FlowState::canvas_size`).
     pub fn container_size(mut self, width: f32, height: f32) -> Self {
         self.container_size = (width, height);
         self
@@ -42,7 +44,8 @@ impl Render for Controls {
         let state_zoom_in = self.state.clone();
         let state_zoom_out = self.state.clone();
         let state_fit = self.state.clone();
-        let (cw, ch) = self.container_size;
+        // The size to assume until the graph has reported its real one.
+        let fallback = self.container_size;
         let entity_id = cx.entity_id();
         let background = self.background;
         let border = self.border;
@@ -60,6 +63,7 @@ impl Render for Controls {
             .child(control_button("+", foreground, {
                 move |_, _, cx| {
                     state_zoom_in.update(cx, |state, _| {
+                        let (cw, ch) = state.canvas_size().unwrap_or(fallback);
                         state.zoom_in(cw, ch);
                     });
                     cx.notify(entity_id);
@@ -69,6 +73,7 @@ impl Render for Controls {
                 // Unicode minus sign
                 move |_, _, cx| {
                     state_zoom_out.update(cx, |state, _| {
+                        let (cw, ch) = state.canvas_size().unwrap_or(fallback);
                         state.zoom_out(cw, ch);
                     });
                     cx.notify(entity_id);
@@ -79,6 +84,7 @@ impl Render for Controls {
                 // Fit view icon (↢)
                 move |_, _, cx| {
                     state_fit.update(cx, |state, _| {
+                        let (cw, ch) = state.canvas_size().unwrap_or(fallback);
                         state.fit_view(40.0, cw, ch);
                     });
                     cx.notify(entity_id);

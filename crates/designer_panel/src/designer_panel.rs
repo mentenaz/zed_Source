@@ -81,6 +81,9 @@ use workspace::{
 pub use project_item::FlowFile;
 pub use workflow_json::{apply_saved_layout, auto_layout, load, save};
 
+/// The canvas size to assume before the graph has been laid out. Once it
+/// has, the minimap, the zoom controls and fit-view use its real size
+/// (`FlowState::canvas_size`), which `FlowGraph` reports every time it changes.
 const CANVAS_SIZE: (f32, f32) = (1200.0, 800.0);
 
 /// How far an action moves down when another is inserted above it: a leaf's
@@ -1049,7 +1052,8 @@ impl DesignerPanel {
             hex(cx.theme().muted_foreground),
             hex(cx.theme().danger),
         );
-        flow_state.fit_view(60.0, CANVAS_SIZE.0, CANVAS_SIZE.1);
+        // Fits once the canvas has been laid out and its real size is known.
+        flow_state.request_fit(60.0);
         let state = cx.new(|_| flow_state);
         let context_target = Rc::new(RefCell::new(ContextTarget {
             node_id: None,
@@ -2658,7 +2662,7 @@ impl DesignerPanel {
 
     fn on_fit_view_click(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| {
-            state.fit_view(60.0, CANVAS_SIZE.0, CANVAS_SIZE.1);
+            state.request_fit(60.0);
             cx.notify();
         });
     }
@@ -2854,9 +2858,9 @@ impl DesignerPanel {
 
     /// The flow-space center of the visible canvas, the default insertion
     /// point when nothing is selected. Read back off `FlowGraph`'s laid-out
-    /// box so it tracks the pane's real size — the hardcoded `CANVAS_SIZE`
-    /// that `fit_view` and auto-layout use is a layout hint, not a claim
-    /// about how much canvas is actually on screen.
+    /// box so it tracks the pane's real size — `CANVAS_SIZE` is only the
+    /// size assumed before the first layout, not a claim about how much
+    /// canvas is actually on screen.
     fn canvas_center(&self, cx: &App) -> FlowPoint {
         let bounds = self.flow.read(cx).panel_bounds();
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {

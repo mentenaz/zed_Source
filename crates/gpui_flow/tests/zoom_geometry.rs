@@ -564,6 +564,51 @@ fn world_covers_the_viewport_at_every_zoom_and_size(cx: &mut gpui::TestAppContex
     }
 }
 
+/// A panned viewport puts the world, and so every node, exactly where the
+/// viewport says: a node at flow `(x, y)` is drawn at
+/// `graph origin + viewport + (x, y) * zoom`. Culling, fit-view, the minimap and
+/// `flow_point_at` all assume that. The world used to be placed at
+/// `viewport * zoom` (gpui's `scale` multiplies an element's own insets), which
+/// only agreed at viewport (0, 0), the case every other test here uses.
+#[gpui::test]
+fn panned_world_starts_at_the_viewport(cx: &mut gpui::TestAppContext) {
+    for zoom in [0.25_f32, 0.5, 2.0] {
+        let (state, window) = open_windowed(cx, build_spread_nodes(), zoom, gpui_size(900.0, 700.0));
+        state.update(cx, |state, _| {
+            state.viewport.x = 240.0;
+            state.viewport.y = -180.0;
+        });
+        settle(cx, &window);
+
+        let mut view = view_of(cx, &window);
+        let graph = bounds_of(&mut view, "flow-graph");
+        let world = bounds_of(&mut view, "flow-world");
+        assert_close(
+            world.origin.x.as_f32(),
+            graph.origin.x.as_f32() + 240.0,
+            &format!("world origin x @zoom {zoom}"),
+        );
+        assert_close(
+            world.origin.y.as_f32(),
+            graph.origin.y.as_f32() - 180.0,
+            &format!("world origin y @zoom {zoom}"),
+        );
+
+        // `near` sits at flow (40, 40).
+        let near = bounds_of(&mut view, "near");
+        assert_close(
+            near.origin.x.as_f32(),
+            graph.origin.x.as_f32() + 240.0 + 40.0 * zoom,
+            &format!("node x @zoom {zoom}"),
+        );
+        assert_close(
+            near.origin.y.as_f32(),
+            graph.origin.y.as_f32() - 180.0 + 40.0 * zoom,
+            &format!("node y @zoom {zoom}"),
+        );
+    }
+}
+
 #[gpui::test]
 fn resize_does_not_move_or_resize_nodes(cx: &mut gpui::TestAppContext) {
     let layout = calibrate(cx);

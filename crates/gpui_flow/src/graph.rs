@@ -1412,8 +1412,22 @@ impl Render for FlowGraph {
                     .child({
                         let viewport_for_background = viewport_for_world;
                         let panel_bounds_for_layout = self.panel_bounds.clone();
+                        let state_for_size = self.state.clone();
                         canvas(
-                            move |bounds, _window, _cx| {
+                            move |bounds, _window, cx| {
+                                // The minimap, the controls and a requested
+                                // fit use this size, so they match the pane
+                                // the graph is drawn in rather than an
+                                // assumed one. Only written when it changed.
+                                let (width, height) =
+                                    (bounds.size.width.as_f32(), bounds.size.height.as_f32());
+                                if state_for_size.read(cx).canvas_size() != Some((width, height)) {
+                                    state_for_size.update(cx, |state, cx| {
+                                        if state.set_canvas_size(width, height) {
+                                            cx.notify();
+                                        }
+                                    });
+                                }
                                 // The background fills this element exactly
                                 // (`.absolute().size_full()`), so its box is
                                 // the graph panel's own on-screen rect — the
@@ -1440,8 +1454,16 @@ impl Render for FlowGraph {
             .child(
                 div()
                     .absolute()
-                    .left(px(viewport_for_world.x))
-                    .top(px(viewport_for_world.y))
+                    // `scale` multiplies this element's own insets too (see
+                    // gpui's `test_scale_applies_to_insets_and_padding`), so
+                    // the pan is given in flow units: scaled, it lands at
+                    // `(viewport.x, viewport.y)`, which is where culling,
+                    // fit-view, the minimap and `flow_point_at` all assume the
+                    // world starts. Giving it in screen pixels put the world at
+                    // `viewport * zoom` instead, so nodes still on screen were
+                    // culled and the minimap's rectangle was off.
+                    .left(px(viewport_for_world.x / viewport_for_world.zoom))
+                    .top(px(viewport_for_world.y / viewport_for_world.zoom))
                     .scale(viewport_for_world.zoom)
                     // Test-support only (a no-op in release builds): lets the
                     // zoom/resize tests read back the world's own box, which is
