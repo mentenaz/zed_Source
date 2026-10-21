@@ -11,8 +11,29 @@
 > It depends only on `gpui` and has no notion of a theme: colours are raw
 > `u32` values, so callers convert from the active theme themselves. Depend
 > on it with `gpui_flow.workspace = true`. Run an example with
-> `cargo run -p gpui_flow --example basic -j 8`. The rest of this file is the
-> upstream README.
+> `cargo run -p gpui_flow --example basic -j 8`.
+>
+> **How zoom works here.** The graph is laid out once in flow units inside a
+> single world container that is zoomed with `.scale(zoom)`. In this fork's
+> gpui, `scale` multiplies the element's own insets as well as its size, so
+> the world's `left`/`top` are given as `viewport / zoom`: once scaled, the
+> world starts exactly at the viewport. Culling, fit view, the minimap,
+> zoom-to-cursor and `flow_point_at` all assume that position;
+> `tests/zoom_geometry.rs` covers it, with a pan, at several zooms.
+>
+> **The canvas size is measured, not assumed.** `FlowGraph` reports its
+> on-screen size to `FlowState` every time it is laid out
+> (`FlowState::canvas_size()`). The minimap's viewport rectangle and the
+> zoom/fit buttons use that size. The sizes given to
+> `Minimap::container_bounds` and `Controls::container_size` are only
+> fallbacks for the first frame. To fit a flow that may not have been drawn
+> yet, call `FlowState::request_fit(padding)`: it fits right away when the
+> size is known, otherwise as soon as it is.
+>
+> **Known gap.** SVG icons and images inside nodes are rasterised at their
+> unscaled size, so they look blurry when zoomed out.
+>
+> The rest of this file is the upstream README.
 
 A node-based flow graph editor for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), inspired by [React Flow / xyflow](https://reactflow.dev).
 
@@ -162,6 +183,8 @@ FlowGraph::new(state, cx)
 let state = FlowState::new(nodes, edges);
 
 // Viewport
+state.request_fit(40.0);                   // fit into the canvas as drawn (fork)
+state.canvas_size();                       // Some((w, h)) once laid out (fork)
 state.fit_view(40.0, width, height);
 state.zoom_in(width, height);
 state.zoom_out(width, height);
@@ -184,10 +207,10 @@ state.redo();
 ### Components
 
 ```rust
-// Minimap
+// Minimap (in this fork the size is a fallback until the canvas is laid out)
 Minimap::new(state).container_bounds(width, height)
 
-// Zoom controls
+// Zoom controls (same: a fallback until the canvas is laid out)
 Controls::new(state).container_size(width, height)
 ```
 

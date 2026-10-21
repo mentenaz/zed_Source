@@ -23,6 +23,11 @@
 //! to be. The background pattern is a separate viewport-sized layer so pan
 //! cannot expose an unpainted strip. The tests at the end pin these properties.
 //!
+//! A fifth is *placement*: `.scale()` multiplies the world's own insets too,
+//! so the world is positioned at `viewport / zoom` and lands at the viewport
+//! once scaled. With the viewport at (0, 0) a wrong placement is invisible,
+//! so `panned_world_starts_at_the_viewport` pans before it checks.
+//!
 //! ## Why the fixtures are pre-seeded
 //!
 //! Container boxes are re-fitted to their children by a measure pass that runs
