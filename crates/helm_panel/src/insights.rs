@@ -91,6 +91,7 @@ impl HelmPanel {
             return failed_screen(
                 "Failed to load traffic",
                 &self.error_msg,
+                self.error_link.clone(),
                 Some(
                     Button::new("traffic-retry")
                         .outline()
@@ -204,6 +205,7 @@ impl HelmPanel {
                 // The two lists load as a pair (see `load_security`).
                 state: self.dependabot_alerts.state,
                 error: String::new(),
+                error_link: None,
                 is_empty: dependabot + secret_scanning == 0,
                 refreshing: false,
                 pager: None,

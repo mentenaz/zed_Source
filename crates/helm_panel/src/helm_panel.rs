@@ -66,36 +66,35 @@ use gpui_component::{
 use gpui_flow::{Controls, FlowGraph, FlowNode, FlowState, NodeId};
 use serde_json::json;
 
+use accounts::{HelmAccountEvent, HelmAccounts};
 use attach::{CreateRepoAttach, DEFAULT_COMMIT_MESSAGE};
 use changes::*;
 use collaborators::*;
+pub use commit_identity::CommitIdentity;
 use helm_backend::github::{
-    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, GhCliAccount,
-    GhCliSignInCanceller, GhCliSignInFailure, Comment, CommitSummary, Deployment, DeviceFlow, GhError,
-    GhState, GitHubUser, GitHubUserDetail, Issue, OrgDetail, OrgInvitation, OrgMember, Package,
-    PackageVersion, Page, Pull, Release, Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob,
-    WorkflowRun, fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
-    HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, PollOutcome, clone_canceller, clone_repo, gh_add_collaborator, gh_cli_accounts,
-    gh_cli_sign_in, gh_cli_sign_in_canceller, gh_cli_token, parse_device_prompt,
-    gh_create_pull,
-    gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
-    gh_get_current_user, gh_get_org_detail, gh_get_org_logins, gh_get_org_role,
-    gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths,
-    gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user, gh_get_workflow_run,
-    gh_get_workflow_run_jobs, gh_list_dependabot_alerts, gh_list_issue_comments,
-    gh_list_org_invitations, gh_list_package_versions, gh_list_packages,
+    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, Comment, CommitSummary,
+    Deployment, DeviceFlow, ErrorLink, GhCliAccount, GhCliSignInCanceller, GhCliSignInFailure,
+    GhError, GhState, GitHubUser, GitHubUserDetail, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, Issue,
+    OrgDetail, OrgInvitation, OrgMember, Package, PackageVersion, Page, PollOutcome, Pull, Release,
+    Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun, clone_canceller, clone_repo,
+    fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
+    gh_add_collaborator, gh_cli_accounts, gh_cli_sign_in, gh_cli_sign_in_canceller, gh_cli_token,
+    gh_create_pull, gh_create_release, gh_create_repo, gh_decline_org_invitation,
+    gh_decline_repo_invitation, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
+    gh_get_org_role, gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones,
+    gh_get_traffic_paths, gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user,
+    gh_get_workflow_run, gh_get_workflow_run_jobs, gh_list_dependabot_alerts,
+    gh_list_issue_comments, gh_list_org_invitations, gh_list_package_versions, gh_list_packages,
     gh_list_secret_scanning_alerts, gh_remove_collaborator, gh_update_repo, gh_update_topics,
-    gh_update_user, peek_page, peek_page_under, poll_for_token, request_device_code, requests,
-    search_repositories_page,
+    gh_update_user, parse_device_prompt, peek_page, peek_page_under, poll_for_token,
+    request_device_code, requests, search_repositories_page,
 };
 use helm_backend::{EventRecvError, on_tokio};
 pub use helm_panel_settings::{HelmAccount, HelmAccountSource, HelmPanelSettings};
-pub use commit_identity::CommitIdentity;
-pub use repo_access::RepoAccess;
 use helm_ui::*;
+pub use repo_access::RepoAccess;
 use repository_modal::*;
 use settings::{DockSide, Settings as _};
-use accounts::{HelmAccountEvent, HelmAccounts};
 use state::*;
 use workflow_run_tab::*;
 use workspace::{
@@ -206,6 +205,9 @@ pub struct HelmPanel {
     forward_stack: Vec<HelmScreen>,
     load_state: LoadState,
     error_msg: String,
+    /// Where on GitHub the error in `error_msg` can be put right, if
+    /// anywhere (single sign-on, an organisation's approval of Helm).
+    error_link: Option<ErrorLink>,
 
     // Auth
     /// Whether the stored sign-in has been checked at least once.
@@ -486,6 +488,7 @@ impl HelmPanel {
                 forward_stack: Vec::new(),
                 load_state: LoadState::Idle,
                 error_msg: String::new(),
+                error_link: None,
                 auth_initialized: false,
                 active_login: None,
                 sign_in: SignIn::Idle,
@@ -621,11 +624,7 @@ impl HelmPanel {
     /// this workspace by [`Self::attach_created_repo`] instead of only
     /// navigating to its detail screen. Without a GitHub login it reports a
     /// toast and sends the user to the Helm panel, where signing in happens.
-    pub fn open_create_repo_for_attach(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_create_repo_for_attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.account.is_empty() {
             self.notify(
                 "Sign in to GitHub from the Helm panel to create a repository.",
@@ -638,13 +637,7 @@ impl HelmPanel {
             }
             return;
         }
-        self.open_workspace_modal(
-            HelmModalKind::CreateRepo {
-                attach_local: true,
-            },
-            window,
-            cx,
-        );
+        self.open_workspace_modal(HelmModalKind::CreateRepo { attach_local: true }, window, cx);
     }
 
     /// Shows `message` as a toast on the workspace this panel is attached
@@ -654,6 +647,28 @@ impl HelmPanel {
     /// — calling it here panics with "window first layer should be a
     /// gpui_component::Root". `workspace::Toast` is the mechanism Zed's own
     /// windows actually support.
+    /// [`Self::notify`] for a request GitHub refused: when the refusal can
+    /// be put right on GitHub (single sign-on, an organisation's approval of
+    /// Helm), the toast's button opens that page.
+    fn notify_error(
+        &self,
+        message: impl Into<std::borrow::Cow<'static, str>>,
+        error: &GhError,
+        cx: &mut App,
+    ) {
+        let message = message.into();
+        let link = error.link();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                let mut toast = Toast::new(NotificationId::unique::<HelmPanel>(), message);
+                if let Some(link) = link {
+                    toast = toast.on_click(link.label, move |_, cx| cx.open_url(&link.url));
+                }
+                workspace.show_toast(toast, cx);
+            })
+            .ok();
+    }
+
     fn notify(&self, message: impl Into<std::borrow::Cow<'static, str>>, cx: &mut App) {
         let message = message.into();
         self.workspace

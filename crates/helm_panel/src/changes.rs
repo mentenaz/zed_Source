@@ -273,11 +273,12 @@ impl HelmPanel {
                             "A change finished after the account switch; it was made with the previous account.",
                             cx,
                         ),
-                        Err(error) => this.notify(
+                        Err(error) => this.notify_error(
                             format!(
                                 "Failed to {} with the previous account: {error}",
                                 action.failure_label()
                             ),
+                            &error,
                             cx,
                         ),
                     }
@@ -295,7 +296,11 @@ impl HelmPanel {
                     if error.is_permission() {
                         this.check_repo_access(true, cx);
                     }
-                    this.notify(format!("Failed to {}: {error}", action.failure_label()), cx);
+                    this.notify_error(
+                        format!("Failed to {}: {error}", action.failure_label()),
+                        &error,
+                        cx,
+                    );
                     this.action_settled(&action, cx);
                 }
                 (Err(_), TokenScopeCheck::MissingScope) => {

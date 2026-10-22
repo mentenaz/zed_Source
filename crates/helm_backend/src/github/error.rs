@@ -23,6 +23,13 @@ pub enum GhError {
     /// 403 that is not a rate limit. The token lacks a scope, or the account
     /// lacks the right, or a policy forbids it.
     Forbidden { message: String },
+    /// 403 because the organisation restricts OAuth App access and has not
+    /// approved Helm, so GitHub hides its data from Helm's token.
+    OrgNotApproved {
+        /// The organisation's login, as GitHub names it in the answer.
+        organization: Option<String>,
+        message: String,
+    },
     /// The organisation requires this token to be authorized for SSO.
     SsoRequired {
         message: String,
@@ -65,9 +72,30 @@ impl GhError {
             self,
             GhError::Unauthorized { .. }
                 | GhError::Forbidden { .. }
+                | GhError::OrgNotApproved { .. }
                 | GhError::SsoRequired { .. }
                 | GhError::NotFound { .. }
         )
+    }
+
+    /// Where on GitHub this error can be put right, with what to call the
+    /// button: authorizing Helm's token for an organisation's single
+    /// sign-on, or requesting an organisation's approval of Helm.
+    pub fn link(&self) -> Option<ErrorLink> {
+        match self {
+            GhError::SsoRequired {
+                authorization_url: Some(url),
+                ..
+            } => Some(ErrorLink {
+                label: "Authorize on GitHub",
+                url: url.clone(),
+            }),
+            GhError::OrgNotApproved { .. } => Some(ErrorLink {
+                label: "Request access",
+                url: super::oauth::helm_app_settings_url(),
+            }),
+            _ => None,
+        }
     }
 
     /// The HTTP status behind this error, when there was one.
@@ -75,6 +103,7 @@ impl GhError {
         match self {
             GhError::Unauthorized { .. } => Some(401),
             GhError::Forbidden { .. } => Some(403),
+            GhError::OrgNotApproved { .. } => Some(403),
             GhError::SsoRequired { .. } => Some(403),
             GhError::NotFound { .. } => Some(404),
             GhError::EmptyRepository => Some(409),
@@ -86,6 +115,35 @@ impl GhError {
             | GhError::Other(_) => None,
         }
     }
+}
+
+/// A link that puts an error right on GitHub, and what to call it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErrorLink {
+    pub label: &'static str,
+    pub url: String,
+}
+
+/// GitHub's message, after a plain sentence, unless it adds nothing.
+fn github_said(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("not found") {
+        String::new()
+    } else {
+        format!(" GitHub said: {trimmed}")
+    }
+}
+
+/// The organisation named in GitHub's answer to a token from an OAuth App
+/// the organisation has not approved: "…the `name` organization has
+/// enabled OAuth App access restrictions…".
+fn restricted_organization(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("the `")?;
+    let (name, after) = rest.split_once('`')?;
+    after
+        .trim_start()
+        .starts_with("organization")
+        .then(|| name.to_string())
 }
 
 pub(super) fn unix_now() -> u64 {
@@ -117,12 +175,37 @@ impl fmt::Display for GhError {
         match self {
             GhError::Other(message) => write!(f, "{message}"),
             GhError::Network(message) => write!(f, "Network error: {message}"),
-            GhError::Unauthorized { message } => write!(f, "GitHub API 401: {message}"),
-            GhError::Forbidden { message } => write!(f, "GitHub API 403: {message}"),
-            GhError::SsoRequired { message, .. } => {
-                write!(f, "GitHub API 403 (single sign-on required): {message}")
+            GhError::Unauthorized { message } => write!(
+                f,
+                "GitHub no longer accepts this sign-in.{}",
+                github_said(message)
+            ),
+            GhError::Forbidden { message } => write!(
+                f,
+                "This account doesn't have access to that.{}",
+                github_said(message)
+            ),
+            GhError::OrgNotApproved { organization, .. } => {
+                let organization = organization.as_deref().map_or_else(
+                    || "This organization".to_string(),
+                    |name| format!("The {name} organization"),
+                );
+                write!(
+                    f,
+                    "{organization} hasn't approved Helm, so GitHub hides its data from Helm. \
+                     An organization owner can approve Helm, or you can request access."
+                )
             }
-            GhError::NotFound { message } => write!(f, "GitHub API 404: {message}"),
+            GhError::SsoRequired { .. } => write!(
+                f,
+                "This organization requires single sign-on. Authorize Helm's sign-in for it on \
+                 GitHub, then retry."
+            ),
+            GhError::NotFound { message } => write!(
+                f,
+                "Not found, or this account can't see it.{}",
+                github_said(message)
+            ),
             GhError::EmptyRepository => write!(f, "This repository is empty."),
             GhError::Validation { message } => write!(f, "GitHub API 422: {message}"),
             GhError::Status { status, message } => write!(f, "GitHub API {status}: {message}"),
@@ -241,6 +324,16 @@ fn failure(response: &RawResponse) -> GhError {
         return GhError::SsoRequired {
             message,
             authorization_url,
+        };
+    }
+    if response.status == 403
+        && message
+            .to_ascii_lowercase()
+            .contains("oauth app access restrictions")
+    {
+        return GhError::OrgNotApproved {
+            organization: restricted_organization(&message),
+            message,
         };
     }
     match response.status {
@@ -367,6 +460,61 @@ mod tests {
             GhError::Forbidden {
                 message: "Resource not accessible".into()
             }
+        );
+    }
+
+    #[test]
+    fn an_organization_that_has_not_approved_helm_is_told_apart() {
+        let body = r#"{"message":"Although you appear to have the correct authorization credentials, the `Sencorp-Interim` organization has enabled OAuth App access restrictions, meaning that data access to third-parties is limited."}"#;
+        let error = interpret::<serde_json::Value>(&answer(403, body)).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                GhError::OrgNotApproved { organization: Some(name), .. } if name == "Sencorp-Interim"
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_permission());
+        assert_eq!(error.status(), Some(403));
+        assert!(
+            error
+                .to_string()
+                .starts_with("The Sencorp-Interim organization hasn't approved Helm")
+        );
+        assert_eq!(error.link().unwrap().label, "Request access");
+
+        // Any other 403 is plain "no access", with no link.
+        let forbidden =
+            interpret::<serde_json::Value>(&answer(403, r#"{"message":"Must have admin rights"}"#))
+                .unwrap_err();
+        assert_eq!(
+            forbidden.to_string(),
+            "This account doesn't have access to that. GitHub said: Must have admin rights"
+        );
+        assert_eq!(forbidden.link(), None);
+    }
+
+    #[test]
+    fn single_sign_on_links_to_githubs_authorization() {
+        let error = GhError::SsoRequired {
+            message: "Resource protected by organization SAML enforcement.".into(),
+            authorization_url: Some("https://github.com/orgs/example/sso?request=abc".into()),
+        };
+        assert_eq!(
+            error.link(),
+            Some(ErrorLink {
+                label: "Authorize on GitHub",
+                url: "https://github.com/orgs/example/sso?request=abc".into(),
+            })
+        );
+        assert!(error.to_string().contains("requires single sign-on"));
+        // A bare 404 does not repeat GitHub's "Not Found".
+        assert_eq!(
+            GhError::NotFound {
+                message: "Not Found".into()
+            }
+            .to_string(),
+            "Not found, or this account can't see it."
         );
     }
 
@@ -538,14 +686,15 @@ mod tests {
     }
 
     #[test]
-    fn errors_read_the_way_they_used_to() {
-        // Code that still matches on the text keeps working.
+    fn errors_read_as_plain_sentences() {
+        // Shown to the user as they are, so they say what went wrong
+        // rather than which status GitHub answered with.
         assert_eq!(
             GhError::Forbidden {
                 message: "Forbidden".into()
             }
             .to_string(),
-            "GitHub API 403: Forbidden"
+            "This account doesn't have access to that. GitHub said: Forbidden"
         );
         assert_eq!(
             GhError::Network("timed out".into()).to_string(),
@@ -555,6 +704,6 @@ mod tests {
             message: "Not Found".into(),
         }
         .into();
-        assert_eq!(text, "GitHub API 404: Not Found");
+        assert_eq!(text, "Not found, or this account can't see it.");
     }
 }

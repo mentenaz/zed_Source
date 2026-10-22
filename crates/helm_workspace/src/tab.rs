@@ -30,8 +30,8 @@ use helm_backend::{
         Pull, Readme, RefMovement, Repo, RepoTree, ResolvedRef, SearchCodeMatch, TreeEntry,
         TreeEntryKind, TreeLoadResult, build_tree, compare_ref_movement, fetch_blob_at_path,
         fetch_commit_detail, fetch_compare, fetch_page, fetch_page_under, fetch_readme,
-        fetch_readme_at_path, fetch_repo_tree, gh_get_branches,
-        gh_get_current_user, gh_get_repo, gh_list_tags, requests, resolve_ref, search_code_page,
+        fetch_readme_at_path, fetch_repo_tree, gh_get_branches, gh_get_current_user, gh_get_repo,
+        gh_list_tags, requests, resolve_ref, search_code_page,
     },
     on_tokio,
 };
@@ -978,9 +978,9 @@ impl WorkspaceTab {
                 this.repository_loading = false;
                 if this.account.is_current(account_load) {
                     match user_info {
-                        Ok(user) => this.account.finish(Ok(
-                            user.name.unwrap_or_else(|| user.login.clone()),
-                        )),
+                        Ok(user) => this
+                            .account
+                            .finish(Ok(user.name.unwrap_or_else(|| user.login.clone()))),
                         Err(GhError::Unauthorized { .. }) => {
                             this.account.finish(Ok("Not signed in".into()))
                         }
@@ -2040,7 +2040,7 @@ impl WorkspaceTab {
     }
 
     fn resolve_selected_ref(&mut self, cx: &mut Context<Self>) {
-                if self.ref_name.is_empty() {
+        if self.ref_name.is_empty() {
             self.ref_load.clear();
             if self.repo.default_branch.is_empty() {
                 self.load_empty_repository_tree(cx);
@@ -2086,7 +2086,8 @@ impl WorkspaceTab {
                         if is_empty {
                             this.tree_empty = true;
                             this.tree.finish(Ok(RepoTree::default()));
-                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading {
+                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading
+                        {
                             this.tree.finish(Err(error.clone()));
                         }
                         this.ref_load.finish(Err(error));
@@ -2146,7 +2147,8 @@ impl WorkspaceTab {
                         if is_empty {
                             this.tree_empty = true;
                             this.tree.finish(Ok(RepoTree::default()));
-                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading {
+                        } else if this.tree.value.is_none() && this.tree.state != LoadState::Loading
+                        {
                             this.tree.finish(Err(error.clone()));
                         }
                         this.ref_load.finish(Err(error));
@@ -2194,12 +2196,9 @@ impl Render for WorkspaceTab {
                 .unwrap_or_else(|| "Could not determine the signed-in GitHub account.".into());
             let error = error.clone();
             let scope_missing = self.repository_scope_missing;
-            let authorization_url = match error {
-                GhError::SsoRequired {
-                    authorization_url, ..
-                } => authorization_url.clone(),
-                _ => None,
-            };
+            // Single sign-on to authorize, or an organisation's approval
+            // of Helm to request.
+            let error_link = error.link();
             let repo_url = self.repo.html_url.clone();
             return v_flex()
                 .size_full()
@@ -2230,12 +2229,12 @@ impl Render for WorkspaceTab {
                             }),
                     )
                 })
-                .when_some(authorization_url, |this, url| {
+                .when_some(error_link, |this, link| {
                     this.child(
-                        Button::new("helm-workspace-authorize-sso")
+                        Button::new("helm-workspace-error-link")
                             .primary()
-                            .label("Authorize on GitHub")
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                            .label(link.label)
+                            .on_click(move |_, _, cx| cx.open_url(&link.url)),
                     )
                 })
                 .when(!repo_url.is_empty(), |this| {
@@ -2338,10 +2337,9 @@ impl Render for WorkspaceTab {
                                 .when(self.repo.disabled, |select| {
                                     select.placeholder("Repository disabled")
                                 })
-                                .when(
-                                    !self.repo.disabled && default_branch.is_empty(),
-                                    |select| select.placeholder("No default branch"),
-                                ),
+                                .when(!self.repo.disabled && default_branch.is_empty(), |select| {
+                                    select.placeholder("No default branch")
+                                }),
                         ),
                     ),
             )

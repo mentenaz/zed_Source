@@ -13,9 +13,37 @@ use std::sync::Arc;
 
 use gpui::Context;
 use helm_backend::{
-    github::{GhState, Page, Repo, fetch_page, peek_page, requests},
+    github::{ErrorLink, GhError, GhState, Page, Repo, fetch_page, peek_page, requests},
     on_tokio,
 };
+
+/// A load's error: its text, and where on GitHub it can be put right.
+pub trait LoadError: std::fmt::Display {
+    /// The button that puts it right on GitHub, if there is one.
+    fn link(&self) -> Option<ErrorLink> {
+        None
+    }
+}
+
+impl LoadError for GhError {
+    fn link(&self) -> Option<ErrorLink> {
+        GhError::link(self)
+    }
+}
+
+impl LoadError for String {}
+
+/// A finished load's result as a section stores it: the error as text, and
+/// its link apart.
+fn split_error<V, E: LoadError>(result: Result<V, E>) -> (Result<V, String>, Option<ErrorLink>) {
+    match result {
+        Ok(value) => (Ok(value), None),
+        Err(error) => {
+            let link = error.link();
+            (Err(error.to_string()), link)
+        }
+    }
+}
 
 use crate::HelmView;
 
@@ -31,6 +59,8 @@ pub struct Section<T> {
     pub state: LoadState,
     /// Why the last load failed. Empty unless `state` is `Error`.
     pub error: String,
+    /// Where on GitHub the last failure can be put right, if anywhere.
+    pub error_link: Option<ErrorLink>,
     /// Which page `items` is, counting from 1. A list that is not paged is
     /// always on page 1 of 1.
     pub page: u32,
@@ -51,6 +81,7 @@ impl<T> Default for Section<T> {
             items: Vec::new(),
             state: LoadState::Idle,
             error: String::new(),
+            error_link: None,
             page: 1,
             last_page: 1,
             refreshing: false,
@@ -65,6 +96,8 @@ pub struct Loaded<T> {
     pub state: LoadState,
     /// Why the last load failed. Empty unless `state` is `Error`.
     pub error: String,
+    /// Where on GitHub the last failure can be put right, if anywhere.
+    pub error_link: Option<ErrorLink>,
     load: u64,
 }
 
@@ -74,6 +107,7 @@ impl<T> Default for Loaded<T> {
             value: None,
             state: LoadState::Idle,
             error: String::new(),
+            error_link: None,
             load: 0,
         }
     }
@@ -85,6 +119,7 @@ impl<T> Loaded<T> {
         self.value = None;
         self.state = LoadState::Idle;
         self.error.clear();
+        self.error_link = None;
         self.load += 1;
     }
 
@@ -93,6 +128,7 @@ impl<T> Loaded<T> {
         self.load += 1;
         self.state = LoadState::Loading;
         self.error.clear();
+        self.error_link = None;
         self.load
     }
 
@@ -104,6 +140,7 @@ impl<T> Loaded<T> {
                 self.value = Some(value);
                 self.state = LoadState::Idle;
                 self.error.clear();
+                self.error_link = None;
             }
             Err(error) => {
                 self.state = LoadState::Error;
@@ -125,6 +162,7 @@ impl<T> Section<T> {
         self.items.clear();
         self.state = LoadState::Idle;
         self.error.clear();
+        self.error_link = None;
         self.page = 1;
         self.last_page = 1;
         self.refreshing = false;
@@ -136,6 +174,7 @@ impl<T> Section<T> {
     pub fn begin(&mut self) {
         self.state = LoadState::Loading;
         self.error.clear();
+        self.error_link = None;
         self.refreshing = false;
     }
 
@@ -180,6 +219,7 @@ impl<T> Section<T> {
         self.last_page = remembered.last_page;
         self.state = LoadState::Idle;
         self.error.clear();
+        self.error_link = None;
         self.refreshing = true;
         self.load += 1;
         self.load
@@ -232,7 +272,7 @@ pub trait HelmViewExt: HelmView {
         fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let load = loaded(self).begin();
@@ -247,7 +287,9 @@ pub trait HelmViewExt: HelmView {
                 }
                 let loaded = loaded(this);
                 if loaded.is_current(load) {
-                    loaded.finish(result.map_err(|error| error.to_string()));
+                    let (result, link) = split_error(result);
+                    loaded.finish(result);
+                    loaded.error_link = link;
                 }
                 cx.notify();
             })
@@ -265,7 +307,7 @@ pub trait HelmViewExt: HelmView {
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let Some(repo) = self.repo().cloned() else {
@@ -286,7 +328,7 @@ pub trait HelmViewExt: HelmView {
         fetch: impl FnOnce(Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<Vec<T>, E>> + Send + 'static,
     {
         section(self).begin();
@@ -299,7 +341,10 @@ pub trait HelmViewExt: HelmView {
                 if !this.is_current_state(&started) {
                     return;
                 }
-                section(this).finish(result.map_err(|error| error.to_string()));
+                let (result, link) = split_error(result);
+                let section = section(this);
+                section.finish(result);
+                section.error_link = link;
                 cx.notify();
             })
             .ok();
@@ -316,7 +361,7 @@ pub trait HelmViewExt: HelmView {
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<Vec<T>, E>> + Send + 'static,
     {
         let Some(repo) = self.repo().cloned() else {
@@ -341,7 +386,7 @@ pub trait HelmViewExt: HelmView {
         fetch: impl FnOnce(Repo, Arc<GhState>) -> Fut + Send + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<Page<T>, E>> + Send + 'static,
     {
         let Some(repo) = self.repo().cloned() else {
@@ -364,7 +409,9 @@ pub trait HelmViewExt: HelmView {
                 // Another page was asked for, or the screen was left, while
                 // this one was on its way.
                 if section.is_current(load) {
-                    section.finish_page(result.map_err(|error| error.to_string()));
+                    let (result, link) = split_error(result);
+                    section.finish_page(result);
+                    section.error_link = link;
                 }
                 // Even a dropped answer changed how many requests are left.
                 cx.notify();

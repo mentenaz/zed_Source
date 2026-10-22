@@ -22,10 +22,11 @@ impl HelmPanel {
         store: impl FnOnce(&mut Self, T) + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         self.load_state = LoadState::Loading;
+        self.error_link = None;
         self.error_msg.clear();
         cx.notify();
         let gh_state = self.gh_state.clone();
@@ -44,6 +45,7 @@ impl HelmPanel {
                     Err(e) => {
                         this.load_state = LoadState::Error;
                         this.error_msg = e.to_string();
+                        this.error_link = e.link();
                     }
                 }
                 cx.notify();
@@ -62,7 +64,7 @@ impl HelmPanel {
         store: impl FnOnce(&mut Self, T) + 'static,
     ) where
         T: Send + 'static,
-        E: std::fmt::Display + Send + 'static,
+        E: LoadError + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let Some(repo) = self.selected_repo.clone() else {

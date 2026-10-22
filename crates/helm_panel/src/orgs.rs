@@ -123,6 +123,7 @@ impl HelmPanel {
             return failed_screen(
                 "Failed to load organization",
                 &self.error_msg,
+                self.error_link.clone(),
                 Some(
                     Button::new("org-retry")
                         .outline()
@@ -156,11 +157,14 @@ impl HelmPanel {
         if let Some(private_repos) = org.total_private_repos {
             stats = stats.item("Private", fmt_num(private_repos), 1);
         }
-        let stats = div().px_3().py_2().child(
-            stats
-                .item("Your role", role, 1)
-                .item("Created", short_date(&org.created_at), 1),
-        );
+        let stats = div()
+            .px_3()
+            .py_2()
+            .child(stats.item("Your role", role, 1).item(
+                "Created",
+                short_date(&org.created_at),
+                1,
+            ));
 
         let link = |id: &'static str, text: String, url: String| {
             Link::new(id).href(url).child(text).into_any_element()
@@ -262,7 +266,11 @@ pub(super) fn org_member_row(ix: usize, member: &OrgMember, cx: &App) -> ListIte
             h_flex()
                 .items_center()
                 .gap_2()
-                .child(github_avatar(&member.avatar_url, &member.login, AVATAR_SIZE))
+                .child(github_avatar(
+                    &member.avatar_url,
+                    &member.login,
+                    AVATAR_SIZE,
+                ))
                 .child(div().text_color(foreground).child(member.login.clone())),
         )
         .suffix(move |_, _| {

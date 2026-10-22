@@ -267,6 +267,7 @@ impl HelmPanel {
             ListStatus {
                 state: self.repos.state,
                 error: self.repos.error.clone(),
+                error_link: self.repos.error_link.clone(),
                 // `repos_shown` is the page of what the search box leaves,
                 // worked out at the top of `render`.
                 is_empty: self.repos_shown.is_empty(),

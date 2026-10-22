@@ -86,6 +86,7 @@ impl HelmPanel {
                 // screen is shown, so there is no spinner or error to draw.
                 state: LoadState::Idle,
                 error: String::new(),
+                error_link: None,
                 is_empty: self.invitations.items.is_empty() && self.org_invitations.is_empty(),
                 refreshing: false,
                 pager: None,

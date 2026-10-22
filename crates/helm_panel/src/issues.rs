@@ -79,6 +79,7 @@ impl HelmPanel {
                     Err(e) => {
                         this.detail_comments_state = LoadState::Error;
                         this.error_msg = e.to_string();
+                        this.error_link = e.link();
                     }
                 }
                 cx.notify();
@@ -276,7 +277,13 @@ impl HelmPanel {
         }
 
         if self.detail_comments_state == LoadState::Error {
-            return failed_screen("Failed to load comments", &self.error_msg, None, cx);
+            return failed_screen(
+                "Failed to load comments",
+                &self.error_msg,
+                self.error_link.clone(),
+                None,
+                cx,
+            );
         }
 
         if self.detail_comments.is_empty() {

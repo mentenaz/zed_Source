@@ -22,7 +22,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, StyledExt as _,
-    button::Button,
+    button::{Button, ButtonVariants as _},
     h_flex,
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     pagination::Pagination,
@@ -30,6 +30,8 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
+
+use helm_backend::github::ErrorLink;
 
 use crate::{HelmView, LoadState, Section};
 
@@ -191,6 +193,9 @@ impl<V: HelmView> ListView<V> {
 pub struct ListStatus<V = ()> {
     pub state: LoadState,
     pub error: String,
+    /// Where on GitHub the error can be put right (single sign-on, an
+    /// organisation's approval of Helm), shown as a button beside Retry.
+    pub error_link: Option<ErrorLink>,
     pub is_empty: bool,
     /// The rows are a remembered answer that is being checked.
     pub refreshing: bool,
@@ -212,6 +217,7 @@ impl<T> Section<T> {
         ListStatus {
             state: self.state,
             error: self.error.clone(),
+            error_link: self.error_link.clone(),
             is_empty: self.items.is_empty(),
             refreshing: self.refreshing,
             pager: None,
@@ -222,6 +228,7 @@ impl<T> Section<T> {
         ListStatus {
             state: self.state,
             error: self.error.clone(),
+            error_link: self.error_link.clone(),
             is_empty: self.items.is_empty(),
             refreshing: self.refreshing,
             pager: None,
@@ -296,10 +303,22 @@ pub trait HelmListViewExt: HelmView {
                     )
                 })
                 .child(
-                    Button::new("helm-list-retry")
-                        .outline()
-                        .label("Retry")
-                        .on_click(cx.listener(move |this, _, _, cx| retry(this, cx))),
+                    h_flex()
+                        .gap_2()
+                        .when_some(status.error_link.clone(), |row, link| {
+                            row.child(
+                                Button::new("helm-list-error-link")
+                                    .primary()
+                                    .label(link.label)
+                                    .on_click(move |_, _, cx| cx.open_url(&link.url)),
+                            )
+                        })
+                        .child(
+                            Button::new("helm-list-retry")
+                                .outline()
+                                .label("Retry")
+                                .on_click(cx.listener(move |this, _, _, cx| retry(this, cx))),
+                        ),
                 )
                 .into_any_element()
         } else if status.is_empty {

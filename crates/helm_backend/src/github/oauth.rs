@@ -20,6 +20,13 @@ use super::error::GhError;
 /// uses no client secret.
 pub const HELM_OAUTH_CLIENT_ID: &str = "Ov23li4HBhs95CCtVsmP";
 
+/// Helm's page in the user's GitHub settings: what it may access, which
+/// organisations have approved it, and where to request approval from one
+/// that has not, or revoke Helm's access.
+pub fn helm_app_settings_url() -> String {
+    format!("https://github.com/settings/connections/applications/{HELM_OAUTH_CLIENT_ID}")
+}
+
 /// The scopes a first sign-in asks for.
 pub const HELM_OAUTH_SCOPES: &[&str] = &["repo", "read:org", "user"];
 
@@ -87,9 +94,11 @@ pub async fn request_device_code(
     if let Some(error) = parsed.error {
         return Err(oauth_error(&error, parsed.error_description));
     }
-    let (Some(device_code), Some(user_code), Some(verification_uri)) =
-        (parsed.device_code, parsed.user_code, parsed.verification_uri)
-    else {
+    let (Some(device_code), Some(user_code), Some(verification_uri)) = (
+        parsed.device_code,
+        parsed.user_code,
+        parsed.verification_uri,
+    ) else {
         return Err(GhError::Parse(
             "GitHub's device-code answer is missing the code".into(),
         ));
@@ -141,9 +150,7 @@ fn oauth_error(code: &str, description: Option<String>) -> GhError {
     let message = match code {
         "expired_token" => "The sign-in code expired. Start the sign-in again.".to_string(),
         "access_denied" => "The sign-in was cancelled on GitHub.".to_string(),
-        "device_flow_disabled" => {
-            "Device sign-in is turned off for Helm's GitHub app.".to_string()
-        }
+        "device_flow_disabled" => "Device sign-in is turned off for Helm's GitHub app.".to_string(),
         "incorrect_client_credentials" | "unsupported_grant_type" | "incorrect_device_code" => {
             format!("GitHub refused the sign-in ({code}).")
         }

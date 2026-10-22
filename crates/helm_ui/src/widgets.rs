@@ -6,11 +6,17 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable as _, Size, avatar::Avatar, button::Button, h_flex,
-    progress::Progress, spinner::Spinner, tag::Tag as Pill, v_flex,
+    ActiveTheme as _, Sizable as _, Size,
+    avatar::Avatar,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    progress::Progress,
+    spinner::Spinner,
+    tag::Tag as Pill,
+    v_flex,
 };
 
-use helm_backend::github::{RateLimit, Repo};
+use helm_backend::github::{ErrorLink, RateLimit, Repo};
 
 /// The size of an avatar in a list row (members, collaborators, the
 /// account menu).
@@ -138,6 +144,7 @@ pub fn note_screen(text: &'static str, cx: &App) -> gpui::AnyElement {
 pub fn failed_screen(
     label: &'static str,
     reason: &str,
+    link: Option<ErrorLink>,
     retry: Option<Button>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -154,7 +161,19 @@ pub fn failed_screen(
                     .child(reason.to_string()),
             )
         })
-        .children(retry)
+        .child(
+            h_flex()
+                .gap_2()
+                // Where GitHub lets the user put it right: single sign-on,
+                // or an organisation's approval of Helm.
+                .children(link.map(|link| {
+                    Button::new("helm-error-link")
+                        .primary()
+                        .label(link.label)
+                        .on_click(move |_, _, cx| cx.open_url(&link.url))
+                }))
+                .children(retry),
+        )
         .into_any_element()
 }
 
