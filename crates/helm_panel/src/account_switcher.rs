@@ -327,6 +327,16 @@ impl HelmPanel {
                                 },
                             ),
                         );
+                        let revoke_panel = panel.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("Sign out of {name} and revoke…")).on_click(
+                                move |_, _, cx| {
+                                    revoke_panel
+                                        .update(cx, |this, cx| this.sign_out_and_revoke(cx))
+                                        .ok();
+                                },
+                            ),
+                        );
                         let remove_panel = panel.clone();
                         menu = menu.item(
                             PopupMenuItem::new(format!("Remove {name}")).on_click(

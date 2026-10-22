@@ -15,6 +15,27 @@ pub(super) fn app_settings_url() -> String {
     format!("https://github.com/settings/connections/applications/{HELM_OAUTH_CLIENT_ID}")
 }
 
+/// Where an account's token is revoked on GitHub, by how it was signed in,
+/// and what to tell the user about that page.
+fn revoke_page(source: HelmAccountSource, name: &str) -> (String, String) {
+    match source {
+        HelmAccountSource::OauthApp => (
+            app_settings_url(),
+            format!("Signed out of {name}. To end its sign-in on GitHub too, click Revoke on the page that opened."),
+        ),
+        HelmAccountSource::Token => (
+            "https://github.com/settings/tokens".to_string(),
+            format!("Signed out of {name}. To end the token on GitHub too, delete it on the page that opened."),
+        ),
+        HelmAccountSource::GhCli => (
+            "https://github.com/settings/applications".to_string(),
+            format!(
+                "Signed out of {name}. Its token was the GitHub CLI's: revoking \"GitHub CLI\" on the page that opened also signs gh out on this machine."
+            ),
+        ),
+    }
+}
+
 /// Asks GitHub who the panel's token belongs to and whether it carries what
 /// Helm needs, then loads the organisations for the menu.
 async fn check_session(gh_state: &GhState) -> AuthOutcome {
@@ -567,6 +588,25 @@ impl HelmPanel {
         .detach();
     }
 
+    /// Signs out of the panel's account, as [`Self::handle_logout`] does, and
+    /// opens the GitHub page where its token can be revoked, which ends it on
+    /// every machine. Helm cannot revoke it itself: GitHub only lets an OAuth
+    /// App do that with its client secret, which an app on the user's
+    /// machine cannot keep secret, so Helm has none.
+    pub(super) fn sign_out_and_revoke(&mut self, cx: &mut Context<Self>) {
+        let Some(login) = self.bound_login(cx) else {
+            return;
+        };
+        let source = HelmPanelSettings::get_global(cx)
+            .account(&login)
+            .map_or(HelmAccountSource::OauthApp, |account| account.source);
+        let name = Self::account_name(&login, cx);
+        let (url, message) = revoke_page(source, &name);
+        self.handle_logout(cx);
+        cx.open_url(&url);
+        self.notify(message, cx);
+    }
+
     /// The sign-in screen, in whichever state the sign-in is.
     pub(super) fn render_auth(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The stored sign-in hasn't been checked yet: never flash the
@@ -995,5 +1035,22 @@ impl HelmPanel {
                 .child("Helm in your GitHub settings"),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_kind_of_account_is_revoked_where_github_keeps_it() {
+        assert_eq!(revoke_page(HelmAccountSource::OauthApp, "me").0, app_settings_url());
+        assert_eq!(
+            revoke_page(HelmAccountSource::Token, "me").0,
+            "https://github.com/settings/tokens"
+        );
+        let (url, message) = revoke_page(HelmAccountSource::GhCli, "me");
+        assert_eq!(url, "https://github.com/settings/applications");
+        assert!(message.contains("signs gh out"));
     }
 }

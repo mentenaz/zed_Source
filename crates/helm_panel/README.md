@@ -339,11 +339,15 @@ Short answers for anyone reviewing Helm before it is used at a company.
   `ZED_DEVELOPMENT_USE_FILE_CREDENTIALS` is set, for throwaway testing; an
   older file of that kind is moved into the credential store at startup.
 - **How long does a token last?** Helm's OAuth App tokens do not expire on
-  their own. Signing out of an account in Helm deletes Helm's copy on this
-  machine but does not revoke the token on GitHub; to revoke it, use
-  "Revoke" on Helm's page in GitHub's settings
-  (Settings > Applications > Authorized OAuth Apps), which ends it on every
-  machine.
+  their own. "Sign out of <name>" deletes Helm's copy on this machine but
+  leaves the token valid on GitHub. "Sign out of <name> and revoke…" in
+  the account menu also opens the GitHub page where it is revoked, which
+  ends it on every machine: Helm's page under Authorized OAuth Apps, the
+  token settings for a pasted token, or the GitHub CLI's entry for an
+  imported one (revoking that signs `gh` out too). Helm cannot revoke it by
+  itself: GitHub only allows that with the OAuth App's client secret, and
+  an app installed on users' machines cannot keep one secret, so Helm has
+  none.
 - **Where does the token go?** Only to GitHub: to `api.github.com` for
   Helm's requests, and to `github.com` for git over HTTPS. For the git
   panel's push, pull and fetch it is passed to that one `git` process as
