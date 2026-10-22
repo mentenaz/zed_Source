@@ -291,6 +291,12 @@ impl HelmPanel {
         self.error_msg = notice;
         self.auth_initialized = true;
         self.load_state = LoadState::Idle;
+        // The workspace still uses this account, now without a token: the
+        // git panel shows it as signed out, and git in this repository must
+        // not fall back to its own login meanwhile (as at startup without
+        // a token, `apply_auth_outcome`).
+        self.signed_out = self.active_login.is_some();
+        self.register_git_credentials(cx);
         cx.notify();
     }
 
