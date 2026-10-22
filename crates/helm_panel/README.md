@@ -128,6 +128,20 @@ Making a repository public exposes its code and history to everyone, and
 GitHub may refuse the change depending on organisation policy or your plan.
 A refusal is handled as described below.
 
+### Scopes Helm asks for
+
+Signing in asks GitHub for `repo`, `read:org` and `user`:
+
+- `repo`: your repositories, public and private, and changing them:
+  creating and editing repositories, pull requests, releases,
+  collaborators, and the git token for push, pull and fetch.
+- `read:org`: the organisations you belong to (the Organizations screen
+  and the Owner list when creating a repository).
+- `user`: editing your GitHub profile from Zed, and reading your verified
+  email addresses for the commit identity. `user:email` alone would cover
+  the emails, but the first profile edit would then need a second sign-in
+  for `user`, so Helm asks for it up front.
+
 ### When GitHub rejects a change
 
 Every change Helm sends — creating or editing a repository, pull requests,
