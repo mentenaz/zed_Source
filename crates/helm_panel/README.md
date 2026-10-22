@@ -322,6 +322,44 @@ entry in `lists.rs`, and a render function that calls `list_screen`.
   wins, Helm says so in a toast, and closing that window hands the folder
   back to the other.
 
+## Security at a glance
+
+Short answers for anyone reviewing Helm before it is used at a company.
+
+- **What can Helm access?** What the account can, within the scopes it
+  asks for: `repo`, `read:org` and `user` (see "Scopes Helm asks for").
+  Organisations that restrict OAuth Apps see nothing until an owner
+  approves Helm, and organisations with single sign-on need the sign-in
+  authorized for them.
+- **Where is the token kept?** In the operating system's credential store
+  (Windows Credential Manager, the macOS Keychain, the Secret Service on
+  Linux), as `helm://github.com/<login>`. Never in `settings.json`, which
+  only lists the account names, and never in Zed's log. A development
+  build stores credentials in a plain-text file only when
+  `ZED_DEVELOPMENT_USE_FILE_CREDENTIALS` is set, for throwaway testing; an
+  older file of that kind is moved into the credential store at startup.
+- **How long does a token last?** Helm's OAuth App tokens do not expire on
+  their own. Signing out of an account in Helm deletes Helm's copy on this
+  machine but does not revoke the token on GitHub; to revoke it, use
+  "Revoke" on Helm's page in GitHub's settings
+  (Settings > Applications > Authorized OAuth Apps), which ends it on every
+  machine.
+- **Where does the token go?** Only to GitHub: to `api.github.com` for
+  Helm's requests, and to `github.com` for git over HTTPS. For the git
+  panel's push, pull and fetch it is passed to that one `git` process as
+  an `Authorization` header in `GIT_CONFIG_*` environment variables, and
+  never written to a git config file. Git in a Zed terminal asks Zed's
+  credential helper for it instead, so it is never in a terminal's
+  environment (see the section above). Other hosts never get it.
+- **What about the GitHub CLI?** "Use GitHub CLI" copies one `gh` account's
+  token once. Helm keeps its own copy from then on and does not run `gh`
+  again; signing out of `gh` does not sign Helm out.
+- **Who decides what it may do?** GitHub: an organisation's OAuth App
+  policy and single sign-on, the account's own permissions on each
+  repository, and the scopes above. Helm does not get around any of them;
+  it tells you which one stopped a request, with a button to fix it on
+  GitHub where there is one.
+
 ## Things to know
 
 - `src/helm_panel.rs` is large (several thousand lines) and holds every
