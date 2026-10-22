@@ -111,22 +111,29 @@ pub fn apply_to<S: BuildHasher>(env: &mut HashMap<String, String, S>, dirs: &[Pa
 }
 
 /// Git settings (`key`, `value`) for the remote commands of the repository
-/// in each folder.
-static GIT_REMOTE_CONFIG: RwLock<Vec<(PathBuf, Vec<(String, String)>)>> = RwLock::new(Vec::new());
+/// in each folder, with who set them: (folder, owner, entries). The same
+/// folder can be open in two windows; each window's own settings are kept,
+/// the latest apply, and when one window takes its settings back the
+/// other's apply again.
+static GIT_REMOTE_CONFIG: RwLock<Vec<(PathBuf, u64, Vec<(String, String)>)>> =
+    RwLock::new(Vec::new());
 
 /// Sets the git settings push, pull and fetch get in the repository at
-/// `repository`, replacing any set before. Empty `entries` removes them.
-pub fn set_git_remote_config(repository: &Path, entries: Vec<(String, String)>) {
+/// `repository`, for `owner` (any number unique to the caller, such as an
+/// entity id), replacing any `owner` set before. Empty `entries` removes
+/// `owner`'s.
+pub fn set_git_remote_config(owner: u64, repository: &Path, entries: Vec<(String, String)>) {
     let Ok(mut config) = GIT_REMOTE_CONFIG.write() else {
         return;
     };
-    config.retain(|(folder, _)| folder != repository);
+    config.retain(|(folder, set_by, _)| !(folder == repository && *set_by == owner));
     if !entries.is_empty() {
-        config.push((repository.to_path_buf(), entries));
+        config.push((repository.to_path_buf(), owner, entries));
     }
 }
 
-/// The git settings set for the repository at `repository`.
+/// The git settings set for the repository at `repository`: the ones set
+/// last, when more than one owner has set some.
 pub fn git_remote_config(repository: &Path) -> Vec<(String, String)> {
     GIT_REMOTE_CONFIG
         .read()
@@ -134,8 +141,9 @@ pub fn git_remote_config(repository: &Path) -> Vec<(String, String)> {
         .and_then(|config| {
             config
                 .iter()
-                .find(|(folder, _)| folder == repository)
-                .map(|(_, entries)| entries.clone())
+                .rev()
+                .find(|(folder, _, _)| folder == repository)
+                .map(|(_, _, entries)| entries.clone())
         })
         .unwrap_or_default()
 }
@@ -188,8 +196,10 @@ pub enum GitCredential {
     Refuse,
 }
 
-/// The github.com credential for the repository in each folder.
-static GIT_CREDENTIALS: RwLock<Vec<(PathBuf, GitCredential)>> = RwLock::new(Vec::new());
+/// The github.com credential for the repository in each folder, with who
+/// set it: (folder, owner, credential). As with [`GIT_REMOTE_CONFIG`], the
+/// latest for a folder applies.
+static GIT_CREDENTIALS: RwLock<Vec<(PathBuf, u64, GitCredential)>> = RwLock::new(Vec::new());
 
 /// Zed's own git credential helper, once it is answering: the helper
 /// command for git's config, and the socket it talks to.
@@ -212,16 +222,16 @@ fn path_key(path: &Path) -> String {
     }
 }
 
-/// Sets, or with `None` removes, the github.com credential git run in the
-/// repository at `repository` (or a folder below it) is given.
-pub fn set_git_credential(repository: &Path, credential: Option<GitCredential>) {
+/// Sets, or with `None` removes, the github.com credential `owner` gives
+/// git run in the repository at `repository` (or a folder below it).
+pub fn set_git_credential(owner: u64, repository: &Path, credential: Option<GitCredential>) {
     let Ok(mut credentials) = GIT_CREDENTIALS.write() else {
         return;
     };
     let key = path_key(repository);
-    credentials.retain(|(folder, _)| path_key(folder) != key);
+    credentials.retain(|(folder, set_by, _)| !(path_key(folder) == key && *set_by == owner));
     if let Some(credential) = credential {
-        credentials.push((repository.to_path_buf(), credential));
+        credentials.push((repository.to_path_buf(), owner, credential));
     }
 }
 
@@ -233,7 +243,7 @@ pub fn git_credential_for(directory: &Path) -> Option<GitCredential> {
     let credentials = GIT_CREDENTIALS.read().ok()?;
     credentials
         .iter()
-        .filter_map(|(folder, credential)| {
+        .filter_map(|(folder, _, credential)| {
             let folder = path_key(folder);
             let contains = directory == folder
                 || directory
@@ -241,6 +251,8 @@ pub fn git_credential_for(directory: &Path) -> Option<GitCredential> {
                     .is_some_and(|rest| rest.starts_with(separator));
             contains.then_some((folder.len(), credential))
         })
+        // The nearest folder; for one folder set by several owners, the
+        // last one set (`max_by_key` keeps the last of equals).
         .max_by_key(|(length, _)| *length)
         .map(|(_, credential)| credential.clone())
 }
@@ -402,8 +414,8 @@ mod tests {
             username: username.to_string(),
             password: "secret".to_string(),
         };
-        set_git_credential(&outer, Some(login("a")));
-        set_git_credential(&inner, Some(login("b")));
+        set_git_credential(1, &outer, Some(login("a")));
+        set_git_credential(1, &inner, Some(login("b")));
 
         let found = |path: &Path| match git_credential_for(path) {
             Some(GitCredential::Login { username, .. }) => Some(username),
@@ -416,11 +428,19 @@ mod tests {
         // A sibling whose name merely starts the same is not inside.
         assert_eq!(found(&PathBuf::from("ide-env-cred-test").join("outer2")), None);
 
-        set_git_credential(&inner, Some(GitCredential::Refuse));
+        set_git_credential(1, &inner, Some(GitCredential::Refuse));
         assert_eq!(found(&inner.join("deep")), Some("refused".to_string()));
-        set_git_credential(&inner, None);
+        set_git_credential(1, &inner, None);
         assert_eq!(found(&inner), Some("a".to_string()));
-        set_git_credential(&outer, None);
+
+        // The same folder in a second window: its credential applies while
+        // it is set, and the first window's comes back when it goes.
+        set_git_credential(2, &outer, Some(login("c")));
+        assert_eq!(found(&outer), Some("c".to_string()));
+        set_git_credential(2, &outer, None);
+        assert_eq!(found(&outer), Some("a".to_string()));
+
+        set_git_credential(1, &outer, None);
         assert_eq!(found(&outer), None);
     }
 
@@ -444,7 +464,7 @@ mod tests {
     fn git_remote_config_is_per_repository_and_can_be_removed() {
         let repository = PathBuf::from("ide-env-test-repository");
         let other = PathBuf::from("ide-env-test-other");
-        set_git_remote_config(&repository, vec![("a".to_string(), "1".to_string())]);
+        set_git_remote_config(1, &repository, vec![("a".to_string(), "1".to_string())]);
 
         let env = with_git_remote_config(&repository, Arc::new(HashMap::new()));
         assert_eq!(env["GIT_CONFIG_KEY_0"], "a");
@@ -454,7 +474,7 @@ mod tests {
             &untouched
         ));
 
-        set_git_remote_config(&repository, Vec::new());
+        set_git_remote_config(1, &repository, Vec::new());
         assert!(git_remote_config(&repository).is_empty());
     }
 

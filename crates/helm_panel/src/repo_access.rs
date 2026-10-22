@@ -11,10 +11,43 @@
 
 use std::collections::HashSet;
 
+use std::path::PathBuf;
+use std::sync::Mutex;
+
 use helm_backend::github::{
     GitHubRemote, RepoPermission, gh_get_repo, git_auth_config, parse_github_remote,
 };
 use ide_env::GitCredential;
+
+/// Which panel gave git which account's login for which folder: (folder,
+/// panel, login). Only to warn when two windows on the same folder use
+/// different accounts, since git can only log in as one of them there.
+static FOLDER_LOGINS: Mutex<Vec<(PathBuf, u64, String)>> = Mutex::new(Vec::new());
+
+/// Records that `owner` gives git `login` for `folder`, and returns the
+/// login another panel already gives it for the same folder, when that is a
+/// different account.
+fn claim_folder(folder: &std::path::Path, owner: u64, login: &str) -> Option<String> {
+    let Ok(mut claims) = FOLDER_LOGINS.lock() else {
+        return None;
+    };
+    claims.retain(|(_, claimed_by, _)| *claimed_by != owner);
+    let other = claims
+        .iter()
+        .find(|(claimed, _, claimed_login)| {
+            claimed == folder && !claimed_login.eq_ignore_ascii_case(login)
+        })
+        .map(|(_, _, claimed_login)| claimed_login.clone());
+    claims.push((folder.to_path_buf(), owner, login.to_string()));
+    other
+}
+
+/// Forgets `owner`'s claims ([`claim_folder`]).
+fn release_folders(owner: u64) {
+    if let Ok(mut claims) = FOLDER_LOGINS.lock() {
+        claims.retain(|(_, claimed_by, _)| *claimed_by != owner);
+    }
+}
 use project::git_store::{GitStore, GitStoreEvent};
 
 use super::accounts::read_token;
@@ -240,12 +273,14 @@ impl HelmPanel {
             return;
         }
         self.unregister_git_credentials();
+        let owner = self.git_owner;
         if refused && let Some(dir) = dir {
             ide_env::set_git_remote_config(
+                owner,
                 &dir,
                 vec![("credential.https://github.com.helper".to_string(), String::new())],
             );
-            ide_env::set_git_credential(&dir, Some(GitCredential::Refuse));
+            ide_env::set_git_credential(owner, &dir, Some(GitCredential::Refuse));
             self.git_credentials_dir = Some(dir);
             self.git_credentials_refused = true;
             cx.notify();
@@ -272,10 +307,11 @@ impl HelmPanel {
                     return;
                 }
                 let entries = token.as_deref().map(git_auth_config).unwrap_or_default();
-                ide_env::set_git_remote_config(&dir, entries);
+                ide_env::set_git_remote_config(owner, &dir, entries);
                 // Git in a terminal asks Zed's credential helper, which
                 // answers from this (section 11, item 4).
                 ide_env::set_git_credential(
+                    owner,
                     &dir,
                     token.map(|token| GitCredential::Login {
                         username: "x-access-token".to_string(),
@@ -283,6 +319,20 @@ impl HelmPanel {
                     }),
                 );
                 this.account_loading = false;
+                // Another window on this folder uses a different account:
+                // git logs in as whichever window set it up last.
+                if let Some(login) = this.signed_in_login().map(str::to_string)
+                    && let Some(other) = claim_folder(&dir, owner, &login)
+                {
+                    this.notify(
+                        format!(
+                            "This folder is also open in another window as @{other}. Git uses one \
+                             GitHub account per folder, so pushes from both windows now go out as \
+                             @{login}. Use the same account in both, or close one."
+                        ),
+                        cx,
+                    );
+                }
                 cx.notify();
             })
             .ok();
@@ -342,9 +392,12 @@ impl HelmPanel {
     /// account's token (signed out, account switched or removed).
     pub(super) fn unregister_git_credentials(&mut self) {
         self.git_credentials_refused = false;
+        release_folders(self.git_owner);
         if let Some(dir) = self.git_credentials_dir.take() {
-            ide_env::set_git_remote_config(&dir, Vec::new());
-            ide_env::set_git_credential(&dir, None);
+            // Only this panel's: another window on the same folder keeps its
+            // own, which then apply again.
+            ide_env::set_git_remote_config(self.git_owner, &dir, Vec::new());
+            ide_env::set_git_credential(self.git_owner, &dir, None);
         }
     }
 

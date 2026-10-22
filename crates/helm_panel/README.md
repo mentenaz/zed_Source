@@ -292,6 +292,36 @@ To add a list screen: add the endpoint and its response type in
 `helm_backend`, a `Section` field on the panel, a loader, a row function, an
 entry in `lists.rs`, and a render function that calls `list_screen`.
 
+## Networks, certificates and the credential helper
+
+- **Proxy.** Helm's requests to GitHub go through Zed's HTTP client, which
+  uses Zed's `"proxy"` setting, or the `HTTPS_PROXY` / `HTTP_PROXY`
+  environment variables. On Windows the system proxy (Internet Options, or
+  a PAC script) is not read. Behind a company proxy, set
+  `"proxy": "http://proxy.example:8080"` in Zed's settings, and for git
+  (clone, push, pull, fetch) `git config --global http.proxy
+  http://proxy.example:8080`, since git does not read the system proxy
+  either.
+- **Certificates.** Requests are checked against the operating system's
+  certificate store (on Windows, the one `certmgr` shows), so a company's
+  inspection certificate installed there is trusted. Only if that store
+  cannot be loaded does Zed fall back to the root certificates it ships
+  with.
+- **The credential helper.** Git in a Zed terminal asks Zed for the
+  workspace account's token (`git_credential` crate) over a socket in a
+  folder named `zed-git-credential*` under your temporary folder, which
+  only your Windows account and administrators can open. A program running
+  as you could ask it for a token, but it could equally read the token
+  from Windows Credential Manager (`helm://github.com/<login>`), so the
+  helper exposes nothing new. The token is never put in a terminal's
+  environment, and only github.com over HTTPS is answered.
+- **Several windows.** Each window's Helm panel gives git the settings for
+  its own repository folder, and takes them back when the window closes.
+  If the same folder is open in two windows with different accounts, git
+  can only log in as one of them there: the window that set it up last
+  wins, Helm says so in a toast, and closing that window hands the folder
+  back to the other.
+
 ## Things to know
 
 - `src/helm_panel.rs` is large (several thousand lines) and holds every

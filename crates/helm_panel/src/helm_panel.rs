@@ -245,6 +245,12 @@ pub struct HelmPanel {
     /// The repository folder whose git push, pull and fetch were given this
     /// account's token (`repo_access.rs`), to take it back.
     git_credentials_dir: Option<std::path::PathBuf>,
+    /// This panel's number in `ide_env`'s per-folder git settings, so that
+    /// two windows on the same folder do not undo each other's.
+    git_owner: u64,
+    /// Takes this panel's git settings back when it goes away (its window
+    /// closed), so they do not outlive it.
+    _release_git_credentials: Subscription,
     /// Whether what `git_credentials_dir` was given is a refusal (the
     /// account is signed out) rather than the account's token.
     git_credentials_refused: bool,
@@ -507,6 +513,9 @@ impl HelmPanel {
                 commit_identity: CommitIdentity::Unknown,
                 commit_identity_key: None,
                 git_credentials_dir: None,
+                git_owner: cx.entity_id().as_u64(),
+                _release_git_credentials: cx
+                    .on_release(|this: &mut HelmPanel, _| this.unregister_git_credentials()),
                 git_credentials_refused: false,
                 signed_out: false,
                 account_loading: false,

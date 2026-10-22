@@ -130,7 +130,7 @@ pub fn run_helper(operation: Option<&str>) -> i32 {
 /// so new terminals use it. `program` is this binary.
 pub fn start_server(program: &Path) -> io::Result<PathBuf> {
     let folder = tempfile::Builder::new()
-        .prefix("forge-git-credential")
+        .prefix("zed-git-credential")
         .tempdir()?;
     let socket = folder.path().join("credential.sock");
     let listener = net::UnixListener::bind(&socket)?;
@@ -242,6 +242,7 @@ mod tests {
     fn a_request_over_the_socket_gets_the_folders_credential() {
         let repository = std::env::temp_dir().join("git-credential-test-repository");
         ide_env::set_git_credential(
+            0,
             &repository,
             Some(GitCredential::Login {
                 username: "x-access-token".to_string(),
@@ -267,7 +268,7 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         server.join().unwrap();
-        ide_env::set_git_credential(&repository, None);
+        ide_env::set_git_credential(0, &repository, None);
 
         assert_eq!(response, "username=x-access-token\npassword=secret\n");
     }
