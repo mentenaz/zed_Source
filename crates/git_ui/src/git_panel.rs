@@ -1287,6 +1287,9 @@ pub struct GitPanel {
     /// out and the user chose to sign in again: the push runs once the
     /// account is back, if that is soon (`github_account.rs`).
     push_after_sign_in: Option<std::time::Instant>,
+    /// The refusal toast this panel has up, if any, so it can be taken down
+    /// once it no longer applies (`github_account.rs`).
+    refusal_toast: Option<github_account::RefusalToast>,
     _settings_subscription: Subscription,
     git_access: Option<GitAccess>,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1628,6 +1631,7 @@ impl GitPanel {
                 _helm_observation: None,
                 helm_panel: None,
                 push_after_sign_in: None,
+                refusal_toast: None,
                 _settings_subscription,
                 git_access: None,
                 commit_menu_handle: PopoverMenuHandle::default(),

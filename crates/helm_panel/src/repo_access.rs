@@ -233,6 +233,11 @@ impl HelmPanel {
                     can_push,
                     suggested_login,
                 };
+                // The account can push (or GitHub did not say): an offer
+                // made for an account that could not is out of date.
+                if access.can_push != Some(false) {
+                    this.dismiss_access_offer(cx);
+                }
                 this.offer_account_switch(&access, &key, cx);
                 this.repo_access = Some(access);
                 cx.notify();
@@ -403,6 +408,20 @@ impl HelmPanel {
 
     /// Shows the "switch to the account that can push" toast, once per
     /// account and repository in this session.
+    /// Takes down the "switch to the account that can push" toast. Deferred,
+    /// since an account switch can come from a toast or menu of the
+    /// workspace while it is being updated.
+    pub(super) fn dismiss_access_offer(&self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.dismiss_toast(&NotificationId::unique::<RepoAccess>(), cx)
+                })
+                .ok();
+        });
+    }
+
     fn offer_account_switch(&mut self, access: &RepoAccess, key: &str, cx: &mut Context<Self>) {
         let Some(suggested) = access.suggested_login.clone() else {
             return;

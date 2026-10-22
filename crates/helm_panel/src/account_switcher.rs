@@ -101,9 +101,13 @@ impl HelmPanel {
         self.gh_state = Arc::new(GhState::new(self.gh_state.http.clone()));
         self.active_login = login;
         self.adding_account = false;
-        // Checked again for the new account once it is signed in.
+        // Checked again for the new account once it is signed in. The offer
+        // to switch was about the previous account: it goes, and the new
+        // account gets its own if it cannot push either.
         self.repo_access = None;
         self.repo_access_key = None;
+        self.repo_access_offered.clear();
+        self.dismiss_access_offer(cx);
         self.commit_identity = CommitIdentity::Unknown;
         self.commit_identity_key = None;
         // The previous account's token no longer goes along with pushes;

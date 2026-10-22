@@ -30,6 +30,17 @@ pub(super) enum GitHubNeed {
 /// The toast refusing a remote command.
 struct GitHubRefusal;
 
+/// Why the refusal toast is up, to tell when it stops applying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RefusalToast {
+    /// The workspace's account was still loading.
+    Loading,
+    /// The workspace's account was signed out.
+    SignedOut,
+    /// This account could not do what `GitHubNeed` asks.
+    Account { login: String, need: GitHubNeed },
+}
+
 /// How long after choosing "Sign in again" from a refused push the push
 /// still runs by itself once the account is back. Long enough for a
 /// browser sign-in, short enough that a sign-in much later does not push
@@ -139,6 +150,7 @@ impl GitPanel {
             .helm_panel()
             .is_some_and(|helm| helm.read(cx).is_loading_github_account());
         if loading {
+            self.refusal_toast = Some(RefusalToast::Loading);
             let toast = workspace::Toast::new(
                 NotificationId::unique::<GitHubRefusal>(),
                 "Helm is still loading the GitHub account for this workspace. Try again in a \
@@ -155,6 +167,10 @@ impl GitPanel {
         let Some((reason, suggested)) = self.github_refusal(need, cx) else {
             return false;
         };
+        self.refusal_toast = self
+            .helm_panel()
+            .and_then(|helm| helm.read(cx).signed_in_login().map(str::to_string))
+            .map(|login| RefusalToast::Account { login, need });
         let mut toast = workspace::Toast::new(NotificationId::unique::<GitHubRefusal>(), reason);
         if let (Some((login, name)), Some(helm)) = (suggested, self.helm_panel.clone()) {
             toast = toast.on_click(format!("Switch to {name}"), move |_, cx| {
@@ -199,6 +215,7 @@ impl GitPanel {
         } else {
             "Sign in again"
         };
+        self.refusal_toast = Some(RefusalToast::SignedOut);
         let panel = cx.weak_entity();
         let helm = helm.downgrade();
         let retry_push = need == GitHubNeed::Push;
@@ -274,6 +291,42 @@ impl GitPanel {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Takes the refusal toast down once what it said no longer holds: the
+    /// account finished loading, signed in again, or was switched (a
+    /// refusal names the account it was about), or can now do what was
+    /// refused. Called whenever the Helm panel changes.
+    fn dismiss_stale_refusal(&mut self, cx: &mut Context<Self>) {
+        let Some(shown) = self.refusal_toast.clone() else {
+            return;
+        };
+        let Some(helm) = self.helm_panel() else {
+            return;
+        };
+        let still_applies = match &shown {
+            RefusalToast::Loading => helm.read(cx).is_loading_github_account(),
+            RefusalToast::SignedOut => helm.read(cx).signed_out_login().is_some(),
+            RefusalToast::Account { login, need } => {
+                let same_account = helm
+                    .read(cx)
+                    .signed_in_login()
+                    .is_some_and(|current| current.eq_ignore_ascii_case(login));
+                same_account && self.github_refusal(*need, cx).is_some()
+            }
+        };
+        if still_applies {
+            return;
+        }
+        self.refusal_toast = None;
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.dismiss_toast(&NotificationId::unique::<GitHubRefusal>(), cx)
+                })
+                .ok();
+        });
     }
 
     /// Runs the push that was refused while the account was signed out, now
@@ -411,6 +464,7 @@ impl GitPanel {
         self.helm_panel = Some(helm.downgrade());
         self._helm_observation = Some(cx.observe_in(&helm, window, |this, _, window, cx| {
             this.push_once_signed_in(window, cx);
+            this.dismiss_stale_refusal(cx);
             cx.notify();
         }));
     }
