@@ -4900,6 +4900,8 @@ impl GitPanel {
                     log::error!("Error while pushing {:?}", e);
                     if github_account::is_private_email_rejection(&e) {
                         this.show_private_email_rejection(cx);
+                    } else if github_account::is_temporary_failure(&e) {
+                        this.show_push_retry(force_push, cx);
                     } else {
                         this.show_error_toast(action.name(), e, cx)
                     }

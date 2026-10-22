@@ -39,6 +39,37 @@ const PUSH_AFTER_SIGN_IN_WINDOW: std::time::Duration = std::time::Duration::from
 /// The toast explaining a push GitHub refused for a private email.
 struct PrivateEmailRejection;
 
+/// What git prints when a remote command failed for a reason that may well
+/// be gone on the next try: no connection, a name that did not resolve, a
+/// timeout, a dropped connection, or a server error from the host.
+const TEMPORARY_FAILURES: &[&str] = &[
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "failed to connect",
+    "network is unreachable",
+    "timed out",
+    "connection reset",
+    "connection was reset",
+    "connection refused",
+    "the remote end hung up unexpectedly",
+    "ssl connect error",
+    "schannel: failed to receive handshake",
+    "the requested url returned error: 500",
+    "the requested url returned error: 502",
+    "the requested url returned error: 503",
+    "the requested url returned error: 504",
+];
+
+/// Whether a remote command failed for a temporary reason (see
+/// [`TEMPORARY_FAILURES`]), so that trying again is the useful next step
+/// rather than reading the log.
+pub(super) fn is_temporary_failure(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_lowercase();
+    TEMPORARY_FAILURES
+        .iter()
+        .any(|pattern| message.contains(pattern))
+}
+
 /// Whether a failed push was GitHub refusing it because a commit carries an
 /// email address the account keeps private ("GH007: Your push would
 /// publish a private email address").
@@ -263,6 +294,38 @@ impl GitPanel {
             self.push_after_sign_in = None;
             self.push(false, false, window, cx);
         }
+    }
+
+    /// The toast for a push that failed for a temporary reason
+    /// ([`is_temporary_failure`]): "Retry" pushes again the same way, in
+    /// place of the "View Log" other failures get, since the log of a
+    /// dropped connection says little.
+    pub(super) fn show_push_retry(&self, force_push: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        cx.defer(move |cx| {
+            workspace.update(cx, |workspace, cx| {
+                let toast = StatusToast::new(
+                    "git push failed: GitHub could not be reached",
+                    cx,
+                    move |this, _cx| {
+                        this.icon(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .action("Retry", move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| panel.push(force_push, false, window, cx))
+                                .ok();
+                        })
+                    },
+                );
+                workspace.toggle_status_toast(toast, cx);
+            });
+        });
     }
 
     /// Explains a push GitHub refused because a commit uses an email the
@@ -675,6 +738,33 @@ impl GitPanel {
             CommitIdentity::Unknown
             | CommitIdentity::Checking
             | CommitIdentity::Applied { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_temporary_failure_is_offered_a_retry() {
+        let failed = |message: &str| anyhow::anyhow!("{message}");
+        for temporary in [
+            "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+            "fatal: unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443 after 21045 ms: Timed out",
+            "error: RPC failed; curl 56 Recv failure: Connection was reset",
+            "fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 502",
+            "fatal: the remote end hung up unexpectedly",
+        ] {
+            assert!(is_temporary_failure(&failed(temporary)), "{temporary}");
+        }
+        for lasting in [
+            "! [rejected] main -> main (non-fast-forward)",
+            "remote: Permission to o/r.git denied to someone.\nfatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+            "remote: Repository not found.",
+            "remote: error: GH007: Your push would publish a private email address.",
+        ] {
+            assert!(!is_temporary_failure(&failed(lasting)), "{lasting}");
         }
     }
 }
