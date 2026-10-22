@@ -18,6 +18,40 @@ use gpui_component::{
 
 use helm_backend::github::{ErrorLink, RateLimit, Repo};
 
+/// Hues (degrees) accounts are told apart by, spread round the wheel so
+/// that the first few accounts differ clearly.
+const ACCOUNT_HUES: [f32; 8] = [210., 35., 150., 280., 0., 185., 95., 320.];
+
+/// The colour an account is shown in, to tell windows using different
+/// accounts apart: `chosen` ("#rrggbb") when it parses, else one of
+/// [`ACCOUNT_HUES`] picked from `login` (ignoring case), at a saturation and
+/// lightness that read on light and dark themes alike. The same login always
+/// gets the same colour.
+pub fn account_color(login: &str, chosen: Option<&str>) -> Hsla {
+    if let Some(chosen) = chosen
+        && let Ok(rgba) = gpui::Rgba::try_from(chosen.trim())
+    {
+        return rgba.into();
+    }
+    // FNV-1a, so the pick does not change between runs.
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in login.to_ascii_lowercase().bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    let hue = ACCOUNT_HUES[hash as usize % ACCOUNT_HUES.len()];
+    gpui::hsla(hue / 360., 0.65, 0.55, 1.)
+}
+
+/// A small filled circle in an account's colour, put before its name.
+pub fn account_dot(color: Hsla) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(gpui::px(8.))
+        .rounded_full()
+        .bg(color)
+}
+
 /// The size of an avatar in a list row (members, collaborators, the
 /// account menu).
 pub const AVATAR_SIZE: f32 = 24.0;
@@ -224,6 +258,21 @@ pub fn short_date(iso: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_account_keeps_its_colour_unless_one_is_chosen() {
+        assert_eq!(
+            account_color("mentenaz", None),
+            account_color("Mentenaz", None)
+        );
+        let chosen = account_color("mentenaz", Some("#ff0000"));
+        assert_eq!(chosen, gpui::Rgba::try_from("#ff0000").unwrap().into());
+        // A colour that does not parse falls back to the picked one.
+        assert_eq!(
+            account_color("mentenaz", Some("red-ish")),
+            account_color("mentenaz", None)
+        );
+    }
 
     #[test]
     fn avatars_are_fetched_at_the_size_they_are_drawn() {

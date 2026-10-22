@@ -200,6 +200,11 @@ impl HelmPanel {
             return None;
         }
         let accounts = settings.accounts.clone();
+        // Each account's colour, beside its name in the menu.
+        let colors: Vec<gpui::Hsla> = accounts
+            .iter()
+            .map(|account| settings.account_color(&account.login))
+            .collect();
         let default_login = settings.default_account().map(|account| account.login.clone());
         let active = self.active_login.clone();
         let label = match &active {
@@ -217,7 +222,12 @@ impl HelmPanel {
                 .as_ref()
                 .filter(|user| user.login.eq_ignore_ascii_case(login))
                 .map_or("", |user| user.avatar_url.as_str());
+            // Ringed in the account's colour, the one the git panel and
+            // the Workspace tab show it in too.
+            let color = HelmPanelSettings::get_global(cx).account_color(login);
             github_avatar(url, login, AVATAR_SIZE)
+                .border_2()
+                .border_color(color)
         });
 
         let button = Button::new("helm-account-menu")
@@ -231,7 +241,7 @@ impl HelmPanel {
                             .as_deref()
                             .is_some_and(|active| active.eq_ignore_ascii_case(login))
                     };
-                    for account in &accounts {
+                    for (ix, account) in accounts.iter().enumerate() {
                         let is_default = default_login
                             .as_deref()
                             .is_some_and(|default| default.eq_ignore_ascii_case(&account.login));
@@ -244,20 +254,28 @@ impl HelmPanel {
                         }
                         let panel = panel.clone();
                         let login = account.login.clone();
+                        let color = colors[ix];
+                        let label = SharedString::from(label);
                         menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked(is_active(&account.login))
-                                .on_click(move |_, _, cx| {
-                                    panel
-                                        .update(cx, |this, cx| {
-                                            if !this.active_login.as_deref().is_some_and(
-                                                |active| active.eq_ignore_ascii_case(&login),
-                                            ) {
-                                                this.switch_account(login.clone(), cx);
-                                            }
-                                        })
-                                        .ok();
-                                }),
+                            PopupMenuItem::element(move |_, _| {
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(account_dot(color))
+                                    .child(label.clone())
+                            })
+                            .checked(is_active(&account.login))
+                            .on_click(move |_, _, cx| {
+                                panel
+                                    .update(cx, |this, cx| {
+                                        if !this.active_login.as_deref().is_some_and(
+                                            |active| active.eq_ignore_ascii_case(&login),
+                                        ) {
+                                            this.switch_account(login.clone(), cx);
+                                        }
+                                    })
+                                    .ok();
+                            }),
                         );
                     }
 

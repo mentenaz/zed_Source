@@ -97,9 +97,12 @@ impl WorkspaceSection {
 
 /// Opens the repository Workspace, reusing an already-open tab for the same
 /// repository in the active pane.
+/// `account_color` is the colour of the account `gh_state` belongs to, shown
+/// beside "Signed in as …".
 pub fn open_workspace_tab(
     repo: Repo,
     gh_state: Arc<GhState>,
+    account_color: Option<gpui::Hsla>,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -121,7 +124,11 @@ pub fn open_workspace_tab(
     if let Some(existing) = existing {
         workspace.activate_item(&existing, true, true, window, cx);
     } else {
-        let tab = cx.new(|cx| WorkspaceTab::new(repo, gh_state, languages, pane, window, cx));
+        let tab = cx.new(|cx| {
+            let mut tab = WorkspaceTab::new(repo, gh_state, languages, pane, window, cx);
+            tab.account_color = account_color;
+            tab
+        });
         workspace.add_item_to_active_pane(Box::new(tab), None, true, window, cx);
     }
 }
@@ -133,6 +140,8 @@ pub struct WorkspaceTab {
     repository_error: Option<GhError>,
     repository_scope_missing: bool,
     account: Loaded<String>,
+    /// The colour of the account this tab uses, as Helm shows it.
+    account_color: Option<gpui::Hsla>,
     focus_handle: FocusHandle,
     ref_selector: Entity<SelectState<RefList>>,
     refs_error: Option<String>,
@@ -898,6 +907,7 @@ impl WorkspaceTab {
             repository_error: None,
             repository_scope_missing: false,
             account: Loaded::default(),
+            account_color: None,
             focus_handle: cx.focus_handle(),
             ref_selector,
             refs_error: None,
@@ -2464,6 +2474,7 @@ impl Render for WorkspaceTab {
                 gpui_component::h_flex()
                     .items_center()
                     .gap_2()
+                    .children(self.account_color.map(helm_ui::account_dot))
                     .child(
                         div()
                             .text_xs()

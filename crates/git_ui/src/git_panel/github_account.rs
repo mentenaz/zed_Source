@@ -466,6 +466,15 @@ impl GitPanel {
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().colors().border_variant)
+            // The account's colour, the same as in Helm and the Workspace
+            // tab, so windows using different accounts are told apart.
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(settings.account_color(&login)),
+            )
             .child(
                 Icon::new(IconName::Github)
                     .size(IconSize::XSmall)

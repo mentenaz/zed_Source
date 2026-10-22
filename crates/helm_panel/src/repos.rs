@@ -159,8 +159,18 @@ impl HelmPanel {
             return;
         };
         let gh_state = self.gh_state.clone();
+        let account_color = self
+            .signed_in_login()
+            .map(|login| HelmPanelSettings::get_global(cx).account_color(login));
         workspace.update(cx, |workspace, cx| {
-            helm_workspace::open_workspace_tab(repo, gh_state, workspace, window, cx);
+            helm_workspace::open_workspace_tab(
+                repo,
+                gh_state,
+                account_color,
+                workspace,
+                window,
+                cx,
+            );
         });
     }
 

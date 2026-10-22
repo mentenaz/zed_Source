@@ -59,6 +59,11 @@ pub struct HelmAccountContent {
     /// A name to show for the account instead of the login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The colour the account is shown in ("#rrggbb"), to tell windows
+    /// using different accounts apart. Without it, one is picked from the
+    /// login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// How the account was signed in. Decides how a missing scope is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<HelmAccountSource>,

@@ -63,6 +63,7 @@ pub fn remember_account(login: &str, source: HelmAccountSource, cx: &mut App) {
                 id: None,
                 former_logins: Vec::new(),
                 label: None,
+                color: None,
                 source: Some(source),
                 git_name: None,
                 git_email: None,

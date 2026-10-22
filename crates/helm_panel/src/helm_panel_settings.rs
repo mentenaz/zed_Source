@@ -26,6 +26,8 @@ pub struct HelmAccount {
     /// Logins it had before being renamed on GitHub.
     pub former_logins: Vec<String>,
     pub label: Option<String>,
+    /// The colour chosen for it in settings ("#rrggbb"), if any.
+    pub color: Option<String>,
     /// How it was signed in; accounts listed before this was recorded count
     /// as signed in through Helm's OAuth App.
     pub source: HelmAccountSource,
@@ -73,6 +75,19 @@ impl HelmPanelSettings {
             })
     }
 
+    /// The colour `login`'s account is shown in: the one chosen in settings,
+    /// else one picked from the login it was first listed under, so it stays
+    /// the same after a rename.
+    pub fn account_color(&self, login: &str) -> gpui::Hsla {
+        match self.account(login) {
+            Some(account) => helm_ui::account_color(
+                account.former_logins.first().unwrap_or(&account.login),
+                account.color.as_deref(),
+            ),
+            None => helm_ui::account_color(login, None),
+        }
+    }
+
     /// The listed account with GitHub's numeric id `id`.
     pub fn account_by_id(&self, id: u64) -> Option<&HelmAccount> {
         self.accounts.iter().find(|account| account.id == Some(id))
@@ -95,6 +110,7 @@ impl Settings for HelmPanelSettings {
                     id: account.id,
                     former_logins: account.former_logins.clone(),
                     label: account.label.clone(),
+                    color: account.color.clone(),
                     source: account.source.unwrap_or(HelmAccountSource::OauthApp),
                     git_name: account.git_name.clone(),
                     git_email: account.git_email.clone(),
@@ -114,6 +130,7 @@ mod tests {
             id,
             former_logins: former.iter().map(|login| login.to_string()).collect(),
             label: None,
+            color: None,
             source: HelmAccountSource::OauthApp,
             git_name: None,
             git_email: None,
