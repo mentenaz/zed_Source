@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use db::kvp::KeyValueStore;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use git::{GitHostingProviderRegistry, parse_git_remote_url};
 use gpui::{
@@ -17,7 +18,6 @@ use gpui_component::{
     list::ListItem,
     resizable_panel,
     scroll::ScrollableElement as _,
-    searchable_list::SearchableVec,
     select::{Select, SelectEvent, SelectState},
     separator::Separator,
     tag::Tag,
@@ -31,11 +31,17 @@ use helm_backend::{
         TreeEntryKind, TreeLoadResult, build_tree, compare_ref_movement, fetch_blob_at_path,
         fetch_commit_detail, fetch_compare, fetch_page, fetch_page_under, fetch_readme,
         fetch_readme_at_path, fetch_repo_tree, gh_get_branches, gh_get_current_user, gh_get_repo,
-        gh_list_tags, requests, resolve_ref, search_code_page,
+        gh_list_tags, gh_search_refs, requests, resolve_ref, search_code_page,
     },
     on_tokio,
 };
 use helm_ui::{LoadState, Loaded, Section};
+
+use crate::ref_list::{RefList, RefSearch, branch_label, tag_label};
+
+/// The key-value store key prefix of the branch or tag a repository's
+/// Workspace tab showed last, followed by `owner/name`.
+const REMEMBERED_REF_KEY: &str = "helm_workspace_ref";
 use language::{Capability, LanguageRegistry, Point};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use workspace::{Item, Workspace};
@@ -128,7 +134,7 @@ pub struct WorkspaceTab {
     repository_scope_missing: bool,
     account: Loaded<String>,
     focus_handle: FocusHandle,
-    ref_selector: Entity<SelectState<SearchableVec<String>>>,
+    ref_selector: Entity<SelectState<RefList>>,
     refs_error: Option<String>,
     ref_name: String,
     ref_is_tag: bool,
@@ -816,9 +822,17 @@ impl WorkspaceTab {
         } else {
             vec![format!("branch: {ref_name}")]
         };
+        let search_state = gh_state.clone();
+        let (search_owner, search_name) = (repo.owner.login.clone(), repo.name.clone());
         let ref_selector = cx.new(|cx| {
+            let search = RefSearch {
+                gh_state: search_state,
+                owner: search_owner,
+                name: search_name,
+                picker: cx.weak_entity(),
+            };
             SelectState::new(
-                SearchableVec::new(refs),
+                RefList::new(refs, Some(search)),
                 (!repo.disabled && !ref_name.is_empty()).then_some(IndexPath::default()),
                 window,
                 cx,
@@ -1942,15 +1956,54 @@ impl WorkspaceTab {
 
     fn on_ref_selected(
         &mut self,
-        _: &Entity<SelectState<SearchableVec<String>>>,
-        event: &SelectEvent<SearchableVec<String>>,
+        _: &Entity<SelectState<RefList>>,
+        event: &SelectEvent<RefList>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let SelectEvent::Confirm(Some(selection)) = event else {
             return;
         };
-        let Some((kind, name)) = selection.split_once(": ") else {
+        self.remember_ref(selection, cx);
+        self.show_ref(selection, cx);
+    }
+
+    /// The key under which this repository's last shown branch or tag is
+    /// remembered.
+    fn remembered_ref_key(&self) -> String {
+        format!(
+            "{REMEMBERED_REF_KEY}-{}/{}",
+            self.repo.owner.login.to_lowercase(),
+            self.repo.name.to_lowercase()
+        )
+    }
+
+    /// Remembers `label` as the branch or tag this repository's Workspace
+    /// tab shows next time, instead of the default branch.
+    fn remember_ref(&self, label: &str, cx: &mut Context<Self>) {
+        let kvp = KeyValueStore::global(cx);
+        let (key, label) = (self.remembered_ref_key(), label.to_string());
+        cx.background_spawn(async move {
+            // Only a convenience: failing to remember it changes nothing else.
+            kvp.write_kvp(key, label).await.ok();
+        })
+        .detach();
+    }
+
+    /// GitHub's search of this repository's branches and tags, for the
+    /// picker (`ref_list.rs`).
+    fn ref_search(&self) -> RefSearch {
+        RefSearch {
+            gh_state: self.gh_state.clone(),
+            owner: self.repo.owner.login.clone(),
+            name: self.repo.name.clone(),
+            picker: self.ref_selector.downgrade(),
+        }
+    }
+
+    /// Shows the branch or tag the picker labels `label` ("branch: main").
+    fn show_ref(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some((kind, name)) = label.split_once(": ") else {
             return;
         };
         self.ref_is_tag = kind == "tag";
@@ -1985,24 +2038,60 @@ impl WorkspaceTab {
         let name = self.repo.name.clone();
         let gh_state = self.gh_state.clone();
         let default_branch = self.ref_name.clone();
+        let kvp = KeyValueStore::global(cx);
+        let remembered_key = self.remembered_ref_key();
         cx.spawn_in(window, async move |this, cx| {
+            let remembered = cx
+                .background_executor()
+                .spawn(async move { kvp.read_kvp(&remembered_key).ok().flatten() })
+                .await;
             let result = on_tokio(async move {
                 let branches = match gh_get_branches(owner.clone(), name.clone(), &gh_state).await {
                     Ok(branches) => branches,
                     Err(GhError::EmptyRepository) => Vec::new(),
                     Err(error) => return Err(error),
                 };
-                let tags = match gh_list_tags(owner, name, &gh_state).await {
+                let tags = match gh_list_tags(owner.clone(), name.clone(), &gh_state).await {
                     Ok(tags) => tags,
                     Err(GhError::EmptyRepository) => Vec::new(),
                     Err(error) => return Err(error),
                 };
-                Ok::<_, GhError>((branches, tags))
+                // The branch or tag shown last time, if it still exists:
+                // among those loaded, or else found by name on GitHub.
+                let remembered = match remembered {
+                    Some(label) => {
+                        let loaded = branches.iter().any(|b| branch_label(&b.name) == label)
+                            || tags.iter().any(|t| tag_label(&t.name) == label);
+                        let exists = loaded
+                            || match label.split_once(": ") {
+                                Some((_, ref_name)) => gh_search_refs(
+                                    owner,
+                                    name,
+                                    ref_name.to_string(),
+                                    100,
+                                    &gh_state,
+                                )
+                                .await
+                                .is_ok_and(|found| {
+                                    found
+                                        .branches
+                                        .iter()
+                                        .map(|branch| branch_label(branch))
+                                        .chain(found.tags.iter().map(|tag| tag_label(tag)))
+                                        .any(|found| found == label)
+                                }),
+                                None => false,
+                            };
+                        exists.then_some(label)
+                    }
+                    None => None,
+                };
+                Ok::<_, GhError>((branches, tags, remembered))
             })
             .await;
             this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok((branches, tags)) => {
+                    Ok((branches, tags, remembered)) => {
                         this.commit_tags.clear();
                         for tag in &tags {
                             this.commit_tags
@@ -2012,19 +2101,30 @@ impl WorkspaceTab {
                         }
                         let mut items = branches
                             .iter()
-                            .map(|branch| format!("branch: {}", branch.name))
+                            .map(|branch| branch_label(&branch.name))
                             .collect::<Vec<_>>();
-                        items.extend(tags.iter().map(|tag| format!("tag: {}", tag.name)));
+                        items.extend(tags.iter().map(|tag| tag_label(&tag.name)));
                         if items.is_empty() && !default_branch.is_empty() {
-                            items.push(format!("branch: {default_branch}"));
+                            items.push(branch_label(&default_branch));
                         }
-                        let selected_label = if this.ref_is_tag {
-                            format!("tag: {}", this.ref_name)
+                        let mut selected_label = if this.ref_is_tag {
+                            tag_label(&this.ref_name)
                         } else {
-                            format!("branch: {}", this.ref_name)
+                            branch_label(&this.ref_name)
                         };
+                        // Back to the branch or tag shown last time.
+                        if let Some(remembered) = remembered
+                            && remembered != selected_label
+                        {
+                            if !items.contains(&remembered) {
+                                items.push(remembered.clone());
+                            }
+                            this.show_ref(&remembered, cx);
+                            selected_label = remembered;
+                        }
+                        let list = RefList::new(items, Some(this.ref_search()));
                         this.ref_selector.update(cx, |state, cx| {
-                            state.set_items(SearchableVec::new(items), window, cx);
+                            state.set_items(list, window, cx);
                             state.set_selected_value(&selected_label, window, cx);
                         });
                         this.refs_error = None;

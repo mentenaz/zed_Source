@@ -40,7 +40,7 @@ pub use api::{
     gh_list_issue_comments, gh_list_issues, gh_list_org_invitations, gh_list_package_versions,
     gh_list_packages, gh_list_pulls, gh_list_recent_commits, gh_list_releases,
     gh_list_secret_scanning_alerts, gh_list_tags, gh_list_workflow_runs, gh_remove_collaborator,
-    gh_update_repo, gh_update_topics, gh_update_user,
+    gh_search_refs, gh_update_repo, gh_update_topics, gh_update_user, RefMatches,
 };
 pub use cache::{CachedResponse, MAX_CACHED_RESPONSES, RateLimit, ResponseCache};
 pub use clone::{

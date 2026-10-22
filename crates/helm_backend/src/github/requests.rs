@@ -182,6 +182,42 @@ pub fn branches(owner: &str, name: &str) -> ApiRequest {
     get(repo_path(owner, name, "/branches?per_page=100"))
 }
 
+/// GitHub's GraphQL query for the branches and tags of a repository whose
+/// names contain `$query`, anywhere in them. The REST API can only match
+/// the start of a ref's name (`git/matching-refs`).
+const SEARCH_REFS_QUERY: &str = "\
+query($owner: String!, $name: String!, $query: String!, $first: Int!) {
+  repository(owner: $owner, name: $name) {
+    branches: refs(refPrefix: \"refs/heads/\", query: $query, first: $first, \
+orderBy: {field: ALPHABETICAL, direction: ASC}) { nodes { name } }
+    tags: refs(refPrefix: \"refs/tags/\", query: $query, first: $first, \
+orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) { nodes { name } }
+  }
+}";
+
+/// Up to `first` branches and up to `first` tags of `owner/name` whose
+/// names contain `query`, through GitHub's GraphQL API. GraphQL has an
+/// allowance of its own, counted in points, so it is tracked apart from
+/// the REST one.
+pub fn search_refs(owner: &str, name: &str, query: &str, first: u32) -> ApiRequest {
+    ApiRequest {
+        rate_limit_resource: "graphql",
+        ..with_body(
+            "POST",
+            "/graphql".to_string(),
+            json!({
+                "query": SEARCH_REFS_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "query": query,
+                    "first": first,
+                },
+            }),
+        )
+    }
+}
+
 pub fn tags(owner: &str, name: &str) -> ApiRequest {
     get(repo_path(owner, name, "/tags?per_page=100"))
 }
@@ -571,6 +607,18 @@ mod tests {
 
     fn line(request: &ApiRequest) -> String {
         format!("{} {}", request.method, request.path)
+    }
+
+    #[test]
+    fn a_ref_search_is_one_graphql_query_with_its_text_as_a_variable() {
+        let request = search_refs("o", "r", "login \"fix\"", 50);
+        assert_eq!(line(&request), "POST /graphql");
+        assert_eq!(request.rate_limit_resource, "graphql");
+        let body = request.body.unwrap();
+        // The text is a variable, never spliced into the query.
+        assert_eq!(body["variables"]["query"], "login \"fix\"");
+        assert_eq!(body["variables"]["first"], 50);
+        assert!(body["query"].as_str().unwrap().contains("refs/heads/"));
     }
 
     #[test]

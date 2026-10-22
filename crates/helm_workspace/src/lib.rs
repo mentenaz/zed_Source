@@ -1,5 +1,6 @@
 //! Read-only GitHub repository Workspace.
 
+mod ref_list;
 mod tab;
 
 pub use tab::{

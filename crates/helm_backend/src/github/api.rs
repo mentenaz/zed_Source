@@ -215,6 +215,88 @@ async fn fetch<T: DeserializeOwned>(state: &GhState, request: ApiRequest) -> Res
     interpret(&send(state, request).await?)
 }
 
+/// Branches and tags whose names matched a search ([`gh_search_refs`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefMatches {
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlAnswer {
+    data: Option<RefSearchData>,
+    #[serde(default)]
+    errors: Vec<GraphQlError>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlError {
+    message: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RefSearchData {
+    repository: Option<RefSearchRepository>,
+}
+
+#[derive(Deserialize)]
+struct RefSearchRepository {
+    branches: RefNodes,
+    tags: RefNodes,
+}
+
+#[derive(Deserialize)]
+struct RefNodes {
+    nodes: Vec<RefNode>,
+}
+
+#[derive(Deserialize)]
+struct RefNode {
+    name: String,
+}
+
+/// What a ref search answered. GraphQL reports failures in an `errors` list
+/// next to (or instead of) the data, with the HTTP status still 200, so they
+/// are turned into the errors a REST answer would have given.
+fn ref_matches(answer: GraphQlAnswer) -> Result<RefMatches, GhError> {
+    if let Some(error) = answer.errors.into_iter().next() {
+        let message = error.message;
+        return Err(match error.kind.as_deref() {
+            Some("NOT_FOUND") => GhError::NotFound { message },
+            Some("FORBIDDEN") => GhError::Forbidden { message },
+            _ => GhError::Other(format!("GitHub could not search the branches: {message}")),
+        });
+    }
+    let repository = answer
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| GhError::NotFound {
+            message: "Not Found".into(),
+        })?;
+    let names = |nodes: RefNodes| nodes.nodes.into_iter().map(|node| node.name).collect();
+    Ok(RefMatches {
+        branches: names(repository.branches),
+        tags: names(repository.tags),
+    })
+}
+
+/// Up to `first` branches and `first` tags of `owner/name` whose names
+/// contain `query` anywhere, found by GitHub rather than among what was
+/// loaded, so a repository with hundreds of branches can still be searched.
+pub async fn gh_search_refs(
+    owner: String,
+    name: String,
+    query: String,
+    first: u32,
+    state: &GhState,
+) -> Result<RefMatches, GhError> {
+    let answer: GraphQlAnswer =
+        fetch(state, requests::search_refs(&owner, &name, &query, first)).await?;
+    ref_matches(answer)
+}
+
 /// Sends a request whose answer carries nothing worth reading. GitHub
 /// replies 204 with an empty body to most deletes and some updates.
 async fn perform(state: &GhState, request: ApiRequest) -> Result<(), GhError> {
@@ -1310,6 +1392,32 @@ pub async fn gh_update_topics(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_ref_search_answer_becomes_branch_and_tag_names() {
+        let answer: GraphQlAnswer = serde_json::from_value(json!({
+            "data": { "repository": {
+                "branches": { "nodes": [{ "name": "feature/login-fix" }, { "name": "login" }] },
+                "tags": { "nodes": [{ "name": "login-v1" }] }
+            }}
+        }))
+        .unwrap();
+        assert_eq!(
+            ref_matches(answer).unwrap(),
+            RefMatches {
+                branches: vec!["feature/login-fix".into(), "login".into()],
+                tags: vec!["login-v1".into()],
+            }
+        );
+
+        // A repository GitHub does not show is not found.
+        let missing: GraphQlAnswer = serde_json::from_value(json!({
+            "data": { "repository": null },
+            "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to a Repository" }]
+        }))
+        .unwrap();
+        assert!(matches!(ref_matches(missing), Err(GhError::NotFound { .. })));
+    }
 
     #[test]
     fn oauth_scopes_header_is_split_and_trimmed() {
