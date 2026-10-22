@@ -906,6 +906,94 @@ already work through Git Credential Manager (shipped with Git for Windows):
 
 ---
 
+# Later — Forks and Contributing Back
+
+### Goal
+
+Contribute to a repository you cannot push to without leaving Zed: fork it
+as the workspace's account, push to the fork, and open a pull request back
+to the original. The fork button alone saves little (it is two clicks on
+github.com); the value is the whole loop, where remotes, identity and the
+account's credentials are set up correctly, which is what Helm's account
+work already does well.
+
+Status: **parked** (2026-10-22), designed but not built. Roughly a day for
+all three parts. Decisions still open are listed at the end.
+
+### What it builds on
+
+- The repository access check (`repo_access.rs`) already knows when the
+  workspace's account cannot push, and the git panel refuses the push with
+  "Switch to <account that can>".
+- The create-repository dialog's Owner dropdown and name field, and the
+  "wait until GitHub has the new repository" step (`attach.rs`).
+- Cloning as the workspace's account without prompts (`clone.rs`).
+- Organisation and single sign-on errors that explain themselves, with a
+  button (`GhError::link`): companies often turn forking of private
+  repositories off.
+- `requests::create_pull` already takes the head as a plain string, so a
+  cross-fork pull request (`head: "yourlogin:branch"` sent to the original
+  repository) needs no new endpoint.
+
+### 1. "Fork and push" when a push is refused (most value)
+
+The usual moment: you cloned someone else's repository, committed, and
+Push is refused.
+
+- The git panel's refusal toast gets a second button next to "Switch to
+  <account>": **Fork to @you**. When no listed account can push, it is the
+  only one.
+- Fork: `POST /repos/{owner}/{repo}/forks` as the workspace's account (an
+  existing fork is returned instead of a second one), wait until GitHub has
+  created it, point `origin` at the fork and add the original as
+  `upstream` (unless `upstream` already exists), then push the branch to
+  the fork with the branch tracking it. SSH remotes get the fork's SSH
+  address.
+- The toast then says "Pushed to you/project. Create a pull request to
+  owner/project?", leading into part 3.
+- Edge cases: forking disabled by the organisation or owner (GitHub's
+  refusal, explained); an `upstream` remote pointing elsewhere (keep it,
+  add the original as `upstream-original`).
+
+### 2. Fork from the repository detail screen (covers search)
+
+- A **Fork** button on the repository detail screen, beside Clone
+  repository and Open Workspace. Search results open that screen, so it
+  covers search. Hidden for your own repositories; **Open your fork** for
+  one you already forked.
+- The dialog reuses the create dialog: Owner (your account first, then
+  organisations, "Forking as @login to …"), name (same by default), and
+  "Copy the default branch only".
+- Afterwards: "Forked to you/project" with **Clone** (the existing flow,
+  plus the `upstream` remote) and **Open in Workspace**.
+
+### 3. Pull request to the original (cross-fork)
+
+- When the repository is a fork (GitHub reports its parent), the Create
+  pull request dialog gets an **Into** choice: the original (default) or
+  the fork. Head is your branch, shown as `you:branch`; base is the
+  original's default branch, editable.
+- Afterwards: "Pull request #N opened on owner/project" with **Open on
+  GitHub**.
+- Offered from the "Pushed to your fork" toast (part 1), from Helm's
+  Create pull request when the workspace's repository is a fork, and after
+  a git panel push to a branch in your fork.
+
+### Decisions still open
+
+1. Remote layout after forking: `origin` = your fork and `upstream` = the
+   original (recommended; GitHub's convention), or keep `origin` as the
+   original and add the fork as `fork`.
+2. "Copy the default branch only": on by default (GitHub's default) or off.
+3. Pull requests from a fork go into the original by default (recommended).
+4. Build all three together, or part 1 first.
+
+Also add rows for each to `REGRESSION_MATRIX.md` when it is built: the
+fork is created as the workspace's account, pushes reach the fork as that
+account, and the pull request opens on the original.
+
+---
+
 # 5. Recommended Priority
 
 The phases should not necessarily be treated as rigid releases. They represent an order of **technical dependency and product maturity**.
