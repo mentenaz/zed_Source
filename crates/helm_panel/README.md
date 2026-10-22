@@ -366,6 +366,11 @@ Short answers for anyone reviewing Helm before it is used at a company.
 
 ## Things to know
 
+- Before tagging a release that changes accounts, git identity or
+  credentials, run `REGRESSION_MATRIX.md` (account × repository × action:
+  author, committer, and which account pushed), with
+  `script/helm-identity-check.ps1` to read the results.
+
 - `src/helm_panel.rs` is large (several thousand lines) and holds every
   screen. Search for the `HelmScreen` variant you need rather than reading
   top to bottom.
