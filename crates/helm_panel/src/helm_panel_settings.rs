@@ -20,6 +20,11 @@ pub struct HelmPanelSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelmAccount {
     pub login: String,
+    /// GitHub's numeric id, once Helm has seen it (`None` for an account
+    /// listed before ids were recorded, until its next sign-in check).
+    pub id: Option<u64>,
+    /// Logins it had before being renamed on GitHub.
+    pub former_logins: Vec<String>,
     pub label: Option<String>,
     /// How it was signed in; accounts listed before this was recorded count
     /// as signed in through Helm's OAuth App.
@@ -52,11 +57,25 @@ impl HelmPanelSettings {
     }
 
     /// The listed account with this login, compared the way GitHub compares
-    /// logins: ignoring case.
+    /// logins: ignoring case. A login the account had before it was renamed
+    /// finds it too.
     pub fn account(&self, login: &str) -> Option<&HelmAccount> {
         self.accounts
             .iter()
             .find(|account| account.login.eq_ignore_ascii_case(login))
+            .or_else(|| {
+                self.accounts.iter().find(|account| {
+                    account
+                        .former_logins
+                        .iter()
+                        .any(|former| former.eq_ignore_ascii_case(login))
+                })
+            })
+    }
+
+    /// The listed account with GitHub's numeric id `id`.
+    pub fn account_by_id(&self, id: u64) -> Option<&HelmAccount> {
+        self.accounts.iter().find(|account| account.id == Some(id))
     }
 }
 
@@ -73,6 +92,8 @@ impl Settings for HelmPanelSettings {
                 .flatten()
                 .map(|account| HelmAccount {
                     login: account.login.clone(),
+                    id: account.id,
+                    former_logins: account.former_logins.clone(),
                     label: account.label.clone(),
                     source: account.source.unwrap_or(HelmAccountSource::OauthApp),
                     git_name: account.git_name.clone(),
@@ -80,5 +101,40 @@ impl Settings for HelmPanelSettings {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account(login: &str, id: Option<u64>, former: &[&str]) -> HelmAccount {
+        HelmAccount {
+            login: login.to_string(),
+            id,
+            former_logins: former.iter().map(|login| login.to_string()).collect(),
+            label: None,
+            source: HelmAccountSource::OauthApp,
+            git_name: None,
+            git_email: None,
+        }
+    }
+
+    #[test]
+    fn a_renamed_account_is_found_by_its_old_login_and_its_id() {
+        let settings = HelmPanelSettings {
+            button: true,
+            dock: DockSide::Right,
+            default_account: None,
+            accounts: vec![
+                account("NewName", Some(42), &["OldName"]),
+                account("other", None, &[]),
+            ],
+        };
+        assert_eq!(settings.account("newname").unwrap().login, "NewName");
+        assert_eq!(settings.account("oldname").unwrap().login, "NewName");
+        assert_eq!(settings.account_by_id(42).unwrap().login, "NewName");
+        assert!(settings.account_by_id(7).is_none());
+        assert!(settings.account("nobody").is_none());
     }
 }

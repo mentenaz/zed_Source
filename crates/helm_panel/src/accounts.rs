@@ -8,7 +8,9 @@
 
 use anyhow::{Context as _, Result};
 use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, Global};
-use settings::{HelmAccountContent, HelmAccountSource};
+use settings::{HelmAccountContent, HelmAccountSource, Settings as _};
+
+use crate::HelmPanelSettings;
 
 /// The credential-store name of `login`'s token. Logins are compared
 /// ignoring case on GitHub, so the name is lowercased.
@@ -58,6 +60,8 @@ pub fn remember_account(login: &str, source: HelmAccountSource, cx: &mut App) {
             Some(account) => account.source = Some(source),
             None => accounts.push(HelmAccountContent {
                 login: login.clone(),
+                id: None,
+                former_logins: Vec::new(),
                 label: None,
                 source: Some(source),
                 git_name: None,
@@ -68,6 +72,73 @@ pub fn remember_account(login: &str, source: HelmAccountSource, cx: &mut App) {
             panel.default_account = Some(login);
         }
     });
+}
+
+/// Records GitHub's numeric id for `login`'s account, which recognises it
+/// after a rename. Nothing is written when it is already recorded.
+pub fn record_account_id(login: &str, id: u64, cx: &mut App) {
+    let known = HelmPanelSettings::get_global(cx)
+        .account(login)
+        .is_some_and(|account| account.id == Some(id));
+    if known {
+        return;
+    }
+    let login = login.to_string();
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        let panel = settings.helm_panel.get_or_insert_default();
+        if let Some(account) = panel
+            .accounts
+            .get_or_insert_default()
+            .iter_mut()
+            .find(|account| account.login.eq_ignore_ascii_case(&login))
+        {
+            account.id = Some(id);
+        }
+    });
+}
+
+/// Records that the account listed as `old` is now called `new` on GitHub:
+/// its entry, and the default account if it was that one, take the new
+/// login, and the old one is kept as a former login. The token is moved
+/// separately ([`move_token`]).
+pub fn rename_account(old: &str, new: &str, cx: &mut App) {
+    let (old, new) = (old.to_string(), new.to_string());
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        let panel = settings.helm_panel.get_or_insert_default();
+        if let Some(account) = panel
+            .accounts
+            .get_or_insert_default()
+            .iter_mut()
+            .find(|account| account.login.eq_ignore_ascii_case(&old))
+        {
+            if !account
+                .former_logins
+                .iter()
+                .any(|former| former.eq_ignore_ascii_case(&old))
+            {
+                account.former_logins.push(account.login.clone());
+            }
+            account
+                .former_logins
+                .retain(|former| !former.eq_ignore_ascii_case(&new));
+            account.login = new.clone();
+        }
+        if panel
+            .default_account
+            .as_deref()
+            .is_some_and(|default| default.eq_ignore_ascii_case(&old))
+        {
+            panel.default_account = Some(new);
+        }
+    });
+}
+
+/// Stores `token` under `new` and deletes it from under `old`, for an
+/// account renamed on GitHub. The old entry is only deleted once the new
+/// one is written.
+pub async fn move_token(old: &str, new: &str, token: &str, cx: &AsyncApp) -> Result<()> {
+    write_token(new, token, cx).await?;
+    delete_token(old, cx).await
 }
 
 /// Records the name and email commits are authored with in workspaces

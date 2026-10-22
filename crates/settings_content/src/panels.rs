@@ -48,6 +48,14 @@ pub struct HelmPanelSettingsContent {
 pub struct HelmAccountContent {
     /// The GitHub login.
     pub login: String,
+    /// GitHub's numeric id for the account. Unlike the login it never
+    /// changes, so an account renamed on GitHub is still recognised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    /// Logins the account had before it was renamed on GitHub, so a
+    /// workspace that remembers an old one still finds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_logins: Vec<String>,
     /// A name to show for the account instead of the login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,

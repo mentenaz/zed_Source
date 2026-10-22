@@ -4,7 +4,10 @@
 //! `accounts.rs`); no `gh` install is involved.
 
 use super::*;
-use super::accounts::{delete_token, read_token, remember_account, write_token};
+use super::accounts::{
+    delete_token, move_token, read_token, record_account_id, remember_account, rename_account,
+    write_token,
+};
 
 /// Where a user asks an organisation to approve Helm's OAuth App, or
 /// revokes Helm's access.
@@ -46,13 +49,18 @@ async fn check_session(gh_state: &GhState) -> AuthOutcome {
 
 impl HelmPanel {
     /// The login this panel uses: the one it signed in as, else the default
-    /// account from settings.
+    /// account from settings. A login the account had before a rename is
+    /// given as its current one, which its token is stored under.
     pub(super) fn bound_login(&self, cx: &App) -> Option<String> {
-        self.active_login.clone().or_else(|| {
-            HelmPanelSettings::get_global(cx)
-                .default_account()
-                .map(|account| account.login.clone())
-        })
+        let settings = HelmPanelSettings::get_global(cx);
+        match &self.active_login {
+            Some(login) => Some(
+                settings
+                    .account(login)
+                    .map_or_else(|| login.clone(), |account| account.login.clone()),
+            ),
+            None => settings.default_account().map(|account| account.login.clone()),
+        }
     }
 
     /// How to show `login`: its label from settings, else the login.
@@ -93,11 +101,24 @@ impl HelmPanel {
                     AuthOutcome::NotLoggedIn
                 }
                 Ok(Some(token)) => {
+                    let stored = token.clone();
                     let outcome = on_tokio(async move {
                         gh_state.set_token(Some(token)).await;
                         check_session(&gh_state).await
                     })
                     .await;
+                    // The token now belongs to a different login: the
+                    // account was renamed on GitHub. Its token moves to the
+                    // new login's entry (settings follow in
+                    // `apply_auth_outcome`).
+                    if let AuthOutcome::Ready { account, .. } = &outcome
+                        && !account.eq_ignore_ascii_case(&login)
+                        && let Err(error) = move_token(&login, account, &stored, cx).await
+                    {
+                        log::error!(
+                            "helm_panel: could not move the token of renamed account {login}: {error:#}"
+                        );
+                    }
                     if matches!(outcome, AuthOutcome::Revoked)
                         && let Err(error) = delete_token(&login, cx).await
                     {
@@ -134,6 +155,13 @@ impl HelmPanel {
                 orgs,
                 user,
             } => {
+                // Renamed on GitHub since it was listed: the same token now
+                // answers to a new login.
+                if !account.eq_ignore_ascii_case(&login) {
+                    rename_account(&login, &account, cx);
+                    self.save_account_binding(Some(&account), cx);
+                }
+                record_account_id(&account, user.id, cx);
                 self.active_login = Some(account.clone());
                 self.account = account;
                 self.scopes = scopes;
@@ -356,11 +384,33 @@ impl HelmPanel {
                 probe.set_token(Some(token.clone())).await;
                 gh_get_current_user(&probe)
                     .await
-                    .map(|user| (user.login, token))
+                    .map(|user| (user.login, user.id, token))
             })
             .await;
             this.update(cx, |this, cx| match identity {
-                Ok((login, token)) => {
+                Ok((login, id, token)) => {
+                    // Signing in again as an account that was renamed on
+                    // GitHub: a different login, but the same account. Its
+                    // entry takes the new login, and the old token goes.
+                    if let Some(expected) = this.sign_in_for.expected_login().map(str::to_string)
+                        && !expected.eq_ignore_ascii_case(&login)
+                        && HelmPanelSettings::get_global(cx)
+                            .account(&expected)
+                            .and_then(|account| account.id)
+                            == Some(id)
+                    {
+                        rename_account(&expected, &login, cx);
+                        cx.spawn(async move |_, cx| {
+                            if let Err(error) = delete_token(&expected, cx).await {
+                                log::error!(
+                                    "helm_panel: could not delete the old token of renamed account {expected}: {error:#}"
+                                );
+                            }
+                        })
+                        .detach();
+                        this.store_account(login, token, source, cx);
+                        return;
+                    }
                     if let Some(expected) = this.sign_in_for.expected_login()
                         && !expected.eq_ignore_ascii_case(&login)
                     {
