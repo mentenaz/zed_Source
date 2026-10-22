@@ -235,7 +235,7 @@ impl HelmRepositoryModal {
             HelmModalKind::CreatePull(_) => "Create pull request",
             HelmModalKind::CreateRelease => "Create release",
             HelmModalKind::EditProfile(_) => "Edit profile",
-            HelmModalKind::CommitIdentity { .. } => "Commit email",
+            HelmModalKind::CommitIdentity { .. } => "Commit name and email",
             HelmModalKind::CloneRepo => "Clone repository",
         }
     }

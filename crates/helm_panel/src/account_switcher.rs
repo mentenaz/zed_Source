@@ -264,7 +264,7 @@ impl HelmPanel {
                     menu = menu.separator();
                     if active.is_some() {
                         let identity_panel = panel.clone();
-                        menu = menu.item(PopupMenuItem::new("Commit email…").on_click(
+                        menu = menu.item(PopupMenuItem::new("Commit name and email…").on_click(
                             move |_, window, cx| {
                                 identity_panel
                                     .update(cx, |this, cx| {
