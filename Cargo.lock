@@ -844,6 +844,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "app_names"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1482,6 +1489,8 @@ name = "auto_update_helper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
+ "const_format",
  "log",
  "scopeguard",
  "simplelog",
@@ -3299,6 +3308,7 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "askpass",
  "clap",
  "clap_complete",
@@ -3330,6 +3340,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "async-channel 2.5.0",
  "async-tungstenite",
  "chrono",
@@ -6639,6 +6650,7 @@ dependencies = [
 name = "explorer_command_injector"
 version = "0.1.0"
 dependencies = [
+ "app_names",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-registry 0.6.1",
@@ -10188,6 +10200,7 @@ name = "install_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "client",
  "gpui",
  "log",
@@ -14439,6 +14452,7 @@ dependencies = [
 name = "paths"
 version = "0.1.0"
 dependencies = [
+ "app_names",
  "const_format",
  "dirs",
  "ignore",
@@ -16964,6 +16978,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "release_channel"
 version = "0.1.0"
 dependencies = [
+ "app_names",
  "gpui",
  "semver",
 ]
@@ -22079,6 +22094,7 @@ name = "util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "async-fs",
  "async_zip",
  "collections",
@@ -24083,6 +24099,7 @@ checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
 name = "windows_resources"
 version = "0.1.0"
 dependencies = [
+ "app_names",
  "embed-resource",
 ]
 
@@ -25151,6 +25168,7 @@ dependencies = [
  "agent_skills",
  "agent_ui",
  "anyhow",
+ "app_names",
  "ashpd",
  "askpass",
  "assets",
@@ -25471,6 +25489,7 @@ name = "zed_credentials_provider"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "credentials_provider",
  "futures 0.3.34",
  "gpui",

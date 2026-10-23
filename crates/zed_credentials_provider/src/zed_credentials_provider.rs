@@ -24,6 +24,22 @@ static ZED_DEVELOPMENT_USE_FILE_CREDENTIALS: LazyLock<bool> = LazyLock::new(|| {
     std::env::var("ZED_DEVELOPMENT_USE_FILE_CREDENTIALS").is_ok_and(|value| !value.is_empty())
 });
 
+/// The keychain name for the credential at `url`.
+///
+/// Upstream Zed stores each credential under its bare URL. This app puts its
+/// URL scheme from `editions.json` in front (`forgesuper:https://…`), so its
+/// entries stay apart from Zed's when both are installed. Credentials saved
+/// under the bare URL by earlier builds are copied across when first read
+/// (see [`KeychainCredentialsProvider`]).
+fn keychain_key(url: &str) -> String {
+    let scheme = app_names::PRODUCT.scheme;
+    if scheme == "zed" {
+        url.to_string()
+    } else {
+        format!("{scheme}:{url}")
+    }
+}
+
 /// Set once the move of the old credentials file into the keychain has been
 /// started, so it runs once per process however often [`global`] is called.
 static MIGRATION_STARTED: AtomicBool = AtomicBool::new(false);
@@ -70,7 +86,8 @@ fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
     provider
 }
 
-/// A credentials provider that stores credentials in the system keychain.
+/// A credentials provider that stores credentials in the system keychain,
+/// under [`keychain_key`].
 ///
 /// Earlier builds of this fork stored credentials in the development file
 /// (see [`DevelopmentCredentialsProvider`]). Entries still in that file are
@@ -78,6 +95,11 @@ fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
 /// as soon as it is read, so a read that runs before the startup move still
 /// finds its credential. An entry leaves the file only after the keychain
 /// has accepted it, and the file is deleted once it is empty.
+///
+/// Earlier builds also stored keychain entries under the bare URL. A read
+/// that finds nothing under the new key copies the bare-URL entry across.
+/// The bare-URL entry is left in place, since upstream Zed may use it too;
+/// deleting a credential removes both, so a deleted one cannot come back.
 struct KeychainCredentialsProvider {
     legacy_file: DevelopmentCredentialsProvider,
 }
@@ -100,13 +122,14 @@ impl KeychainCredentialsProvider {
 
         let mut moved = 0;
         for (url, (username, password)) in entries {
+            let key = keychain_key(&url);
             let in_keychain = cx
-                .update(|cx| cx.read_credentials(&url))
+                .update(|cx| cx.read_credentials(&key))
                 .await
                 .is_ok_and(|found| found.is_some());
             if !in_keychain {
                 if let Err(error) = cx
-                    .update(|cx| cx.write_credentials(&url, &username, &password))
+                    .update(|cx| cx.write_credentials(&key, &username, &password))
                     .await
                 {
                     log::error!(
@@ -133,14 +156,27 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
         async move {
-            if let Some(found) = cx.update(|cx| cx.read_credentials(url)).await? {
+            let key = keychain_key(url);
+            if let Some(found) = cx.update(|cx| cx.read_credentials(&key)).await? {
                 return Ok(Some(found));
+            }
+            if key != url
+                && let Some((username, password)) =
+                    cx.update(|cx| cx.read_credentials(url)).await?
+            {
+                if let Err(error) = cx
+                    .update(|cx| cx.write_credentials(&key, &username, &password))
+                    .await
+                {
+                    log::error!("could not copy the credential for {url} to {key}: {error:#}");
+                }
+                return Ok(Some((username, password)));
             }
             let Some((username, password)) = self.legacy_file.get(url) else {
                 return Ok(None);
             };
             match cx
-                .update(|cx| cx.write_credentials(url, &username, &password))
+                .update(|cx| cx.write_credentials(&key, &username, &password))
                 .await
             {
                 Ok(()) => self.legacy_file.forget(url),
@@ -163,7 +199,8 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
-            cx.update(move |cx| cx.write_credentials(url, username, password))
+            let key = keychain_key(url);
+            cx.update(|cx| cx.write_credentials(&key, username, password))
                 .await?;
             self.legacy_file.forget(url);
             Ok(())
@@ -180,7 +217,14 @@ impl CredentialsProvider for KeychainCredentialsProvider {
             // Dropped from the old file first, so a deleted credential cannot
             // come back from it on the next read.
             self.legacy_file.forget(url);
-            cx.update(move |cx| cx.delete_credentials(url)).await
+            let key = keychain_key(url);
+            if key != url {
+                // Removed under the bare URL too, or the next read would copy
+                // it back. Usually there is none, which Windows reports as an
+                // error, so the result is ignored.
+                cx.update(|cx| cx.delete_credentials(url)).await.ok();
+            }
+            cx.update(|cx| cx.delete_credentials(&key)).await
         }
         .boxed_local()
     }

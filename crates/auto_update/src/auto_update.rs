@@ -282,10 +282,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
             .map(|channel| channel.poll_for_updates())
             .unwrap_or(false);
 
-        if option_env!("ZED_UPDATE_EXPLANATION").is_none()
-            && env::var("ZED_UPDATE_EXPLANATION").is_err()
-            && poll_for_updates
-        {
+        if update_explanation().is_none() && poll_for_updates {
             let mut update_subscription = AutoUpdateSetting::get_global(cx)
                 .0
                 .then(|| updater.start_polling(cx));
@@ -307,14 +304,35 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     cx.set_global(GlobalAutoUpdate(Some(auto_updater)));
 }
 
-pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
-    if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION")
+/// Why the app does not update itself, shown by "Check for Updates".
+///
+/// Upstream Zed returns `None` unless a package manager set
+/// `ZED_UPDATE_EXPLANATION`, and then updates from zed.dev. This fork must
+/// never do that (it would install upstream Zed), and is updated by winget or
+/// apt instead, so this always returns a message: `ZED_UPDATE_EXPLANATION`,
+/// at build time or run time, or the default below.
+fn update_explanation() -> Option<String> {
+    option_env!("ZED_UPDATE_EXPLANATION")
         .map(ToOwned::to_owned)
         .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
-    {
+        .or_else(|| {
+            Some(format!(
+                "Update {} with 'winget upgrade Mentenaz.Forge.Super' on Windows, \
+                 or install the latest release from \
+                 https://github.com/mentenaz/zed_Source/releases.",
+                release_channel::RELEASE_CHANNEL.display_name()
+            ))
+        })
+}
+
+pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
+    if let Some(message) = update_explanation() {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            &format!(
+                "{} was installed via a package manager.",
+                release_channel::RELEASE_CHANNEL.display_name()
+            ),
             Some(&message),
             &["OK"],
             cx,

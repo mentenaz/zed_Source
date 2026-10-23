@@ -348,28 +348,34 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
         .context("Failed to shell-escape Zed executable path.")
 }
 
-/// Returns a path for the zed cli executable, this function
-/// should be called from the zed executable, not zed-cli.
+/// Returns a path for the CLI executable, this function
+/// should be called from the GUI executable, not the CLI.
 pub fn get_zed_cli_path() -> Result<PathBuf> {
     use anyhow::Context as _;
-    let zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
-    let parent = zed_path
+    let app_path =
+        std::env::current_exe().context("Failed to determine current app executable path.")?;
+    let parent = app_path
         .parent()
-        .context("Failed to determine parent directory of zed executable path.")?;
+        .context("Failed to determine parent directory of app executable path.")?;
 
-    let possible_locations: &[&str] = if cfg!(target_os = "macos") {
-        // On macOS, the zed executable and zed-cli are inside the app bundle,
+    let possible_locations: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        // On macOS, the app executable and CLI are inside the app bundle,
         // so here ./cli is for both installed and development builds.
-        &["./cli"]
+        vec![PathBuf::from("./cli")]
     } else if cfg!(target_os = "windows") {
-        // bin/zed.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/zed.exe", "./cli.exe"]
+        // bin/<command>.exe is for installed builds, ./cli.exe is for development builds.
+        vec![
+            PathBuf::from(format!("bin/{}.exe", app_names::PRODUCT.command)),
+            PathBuf::from("./cli.exe"),
+        ]
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/zed", "./cli"]
+        vec![
+            PathBuf::from(format!("../bin/{}", app_names::PRODUCT.command)),
+            PathBuf::from("./cli"),
+        ]
     } else {
-        anyhow::bail!("unsupported platform for determining zed-cli path");
+        anyhow::bail!("unsupported platform for determining the CLI path");
     };
 
     possible_locations
@@ -379,13 +385,15 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
                 .join(p)
                 .canonicalize()
                 .ok()
-                .filter(|p| p != &zed_path)
+                .filter(|p| p != &app_path)
         })
         .with_context(|| {
-            format!(
-                "could not find zed-cli from any of: {}",
-                possible_locations.join(", ")
-            )
+            let searched = possible_locations
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("could not find the CLI from any of: {searched}")
         })
 }
 

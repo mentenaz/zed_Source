@@ -44,7 +44,7 @@ struct ExplorerCommandInjector;
 impl IExplorerCommand_Impl for ExplorerCommandInjector_Impl {
     fn GetTitle(&self, _: Ref<IShellItemArray>) -> Result<windows_core::PWSTR> {
         let command_description =
-            retrieve_command_description().unwrap_or(HSTRING::from("Open with Zed"));
+            retrieve_command_description().unwrap_or(HSTRING::from(format!("Open with {}", app_names::PRODUCT.display)));
         unsafe { SHStrDupW(&command_description) }
     }
 
@@ -128,10 +128,10 @@ impl IClassFactory_Impl for ExplorerCommandInjectorFactory_Impl {
 }
 
 const MODULE_ID: GUID = cfg_select! {
-    feature = "stable" => { GUID::from_u128(0x6a1f6b13_3b82_48a1_9e06_7bb0a6d0bffd) },
-    feature = "preview" => { GUID::from_u128(0xaf8e85ea_fb20_4db2_93cf_56513c1ec697) },
-    feature = "nightly" => { GUID::from_u128(0x266f2cfe_1653_42af_b55c_fe3590c83871) },
-    _ => { GUID::from_u128(0x685f4d49_6718_4c55_b271_ebb5c6a48d6f) },
+    feature = "stable" => { GUID::from_u128(0x59604d59_ca43_4e15_bc8c_2d80015297bb) },
+    feature = "preview" => { GUID::from_u128(0x70c84040_1e69_458a_bbad_14f15e916d75) },
+    feature = "nightly" => { GUID::from_u128(0x177fc2e4_4cf7_4c9e_bdbd_5a40c8059aeb) },
+    _ => { GUID::from_u128(0xbb19dbc9_0dcb_4d5b_a9a5_ed7ebb4102a7) },
 };
 
 #[unsafe(no_mangle)]
@@ -174,18 +174,22 @@ fn get_zed_install_folder() -> Option<PathBuf> {
 
 #[inline]
 fn get_zed_exe_path() -> Option<String> {
-    get_zed_install_folder().map(|path| path.join("Zed.exe").to_string_lossy().into_owned())
+    get_zed_install_folder().map(|path| path.join(format!("{}.exe", app_names::PRODUCT.install_name)).to_string_lossy().into_owned())
 }
 
 #[inline]
 fn retrieve_command_description() -> Result<HSTRING> {
-    const REG_PATH: &str = cfg_select! {
-        feature = "stable" => { r#"Software\Classes\ZedContextMenu"# },
-        feature = "preview" => { r#"Software\Classes\ZedPreviewContextMenu"# },
-        feature = "nightly" => { r#"Software\Classes\ZedNightlyContextMenu"# },
-        _ => { r#"Software\Classes\ZedDevContextMenu"# },
-    };
+    // const REG_PATH: &str = cfg_select! {
+    //     feature = "stable" => { r#"Software\Classes\ZedContextMenu"# },
+    //     feature = "preview" => { r#"Software\Classes\ZedPreviewContextMenu"# },
+    //     feature = "nightly" => { r#"Software\Classes\ZedNightlyContextMenu"# },
+    //     _ => { r#"Software\Classes\ZedDevContextMenu"# },
+    // };
 
-    let key = windows_registry::CURRENT_USER.open(REG_PATH)?;
+    let reg_path = format!(r"Software\Classes\{}ContextMenu",app_names::PRODUCT.dir);
+    let key = windows_registry::CURRENT_USER.open(reg_path)?;
+
+
+    // let key = windows_registry::CURRENT_USER.open(REG_PATH)?;
     key.get_hstring("Title")
 }

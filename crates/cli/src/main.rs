@@ -12,7 +12,8 @@ mod completions;
 use crate::completions::Shell;
 
 use anyhow::{Context as _, Result};
-use clap::{CommandFactory, Parser};
+use app_names::{DEV_BIN, PRODUCT};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use cli::{CliRequest, CliResponse, IpcHandshake, ipc::IpcOneShotServer};
 use parking_lot::Mutex;
 use std::{
@@ -47,23 +48,7 @@ trait InstalledApp {
 }
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "zed",
-    disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
-
-Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
-          Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
-          Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
-)]
+#[command(disable_version_flag = true)]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
     ///
@@ -79,41 +64,35 @@ struct Args {
     /// Reuse an existing window, replacing its workspace
     #[arg(short, long, overrides_with_all = ["add", "new", "existing", "classic"], hide = true)]
     reuse: bool,
-    /// Open in existing Zed window
+    /// Open in an existing window
     #[arg(short = 'e', long = "existing", overrides_with_all = ["add", "new", "reuse", "classic"])]
     existing: bool,
     /// Use the classic open behavior: new window for directories, reuse for files
     #[arg(long, hide = true, overrides_with_all = ["add", "new", "reuse", "existing"])]
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
-    /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
-    #[cfg_attr(
-        not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
-    )]
+    /// This overrides the default platform-specific data directory location.
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
-    /// The paths to open in Zed (space-separated).
+    /// The paths to open (space-separated).
     ///
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print the app's version and path.
     #[arg(short, long)]
     version: bool,
-    /// Run zed in the foreground (useful for debugging)
+    /// Run the app in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
+    /// Custom path to the app bundle or binary
     #[arg(long)]
     zed: Option<PathBuf>,
-    /// Run zed in dev-server mode
+    /// Run in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// the app will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -124,7 +103,7 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
+    /// Not supported in the CLI, only on the app binary
     /// Will attempt to give the correct command to run
     #[arg(long)]
     system_specs: bool,
@@ -138,10 +117,10 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
     diff: Vec<String>,
-    /// Generate shell completions for Zed
+    /// Generate shell completions
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
-    /// Uninstall Zed from user system
+    /// Uninstall the app from the user's system
     #[cfg(all(
         any(target_os = "linux", target_os = "macos"),
         not(feature = "no-bundled-uninstall")
@@ -150,7 +129,7 @@ struct Args {
     uninstall: bool,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having the app act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
 }
@@ -481,6 +460,37 @@ fn main() {
     }
 }
 
+fn parse_args() -> Args {
+    let command = Args::command()
+        .name(PRODUCT.command)
+        .before_help(format!(
+            "The {install} CLI binary.
+This CLI is a separate binary that invokes {install}.
+
+Examples:
+    `{command}`
+          Simply opens {install}
+    `{command} --foreground`
+          Runs in foreground (shows all logs)
+    `{command} path-to-your-project`
+          Open your project in {install}
+    `{command} -n path-to-file`
+          Open file/folder in a new window",
+            install = PRODUCT.install_name,
+            command = PRODUCT.command,
+        ))
+        .after_help(format!(
+            "To read from stdin, append '-', e.g. 'ps axf | {command} -'",
+            command = PRODUCT.command,
+        ));
+
+    let matches = command.get_matches();
+    match Args::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(error) => error.format(&mut Args::command().name(PRODUCT.command)).exit(),
+    }
+}
+
 fn run() -> Result<()> {
     #[cfg(unix)]
     util::prevent_root_execution();
@@ -510,7 +520,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let args = Args::parse();
+    let args = parse_args();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     if let Some(socket) = &args.askpass {
@@ -672,7 +682,11 @@ fn run() -> Result<()> {
     let wsl = None;
 
     for path in args.paths_with_position.iter() {
-        if URL_PREFIX.iter().any(|&prefix| path.starts_with(prefix)) {
+        if URL_PREFIX.iter().any(|&prefix| path.starts_with(prefix))
+            || path
+                .strip_prefix(PRODUCT.scheme)
+                .is_some_and(|rest| rest.starts_with("://"))
+        {
             urls.push(path.to_string());
         } else if path == "-" && args.paths_with_position.len() == 1 {
             let file = NamedTempFile::new()?;
@@ -894,7 +908,7 @@ mod linux {
     use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
     use fork::Fork;
 
-    use crate::{Detect, InstalledApp};
+    use crate::{DEV_BIN, Detect, InstalledApp, PRODUCT};
 
     struct App(PathBuf);
 
@@ -906,10 +920,13 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // libexec is the standard, lib/<command> is for Arch (and other
+                // non-libexec distros), ./<dev bin> is for development builds.
+                let possible_locations = [
+                    format!("../libexec/{}-editor", PRODUCT.command),
+                    format!("../lib/{0}/{0}-editor", PRODUCT.command),
+                    format!("./{DEV_BIN}"),
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -925,12 +942,8 @@ mod linux {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+                "{} {}{} – {}",
+                PRODUCT.display,
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
@@ -1178,7 +1191,7 @@ mod windows {
         core::HSTRING,
     };
 
-    use crate::{Detect, InstalledApp};
+    use crate::{DEV_BIN, Detect, InstalledApp, PRODUCT};
     use std::io;
     use std::path::{Path, PathBuf};
     use std::process::{ExitStatus, Stdio};
@@ -1202,12 +1215,8 @@ mod windows {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+                "{} {}{} – {}",
+                PRODUCT.display,
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
@@ -1274,9 +1283,13 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // ../<install name>.exe is the standard, lib/<command> is for
+                // MSYS2, ./<dev bin>.exe is for development builds.
+                let possible_locations = [
+                    format!("../{}.exe", PRODUCT.install_name),
+                    format!("../lib/{0}/{0}-editor.exe", PRODUCT.command),
+                    format!("./{DEV_BIN}.exe"),
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1314,7 +1327,16 @@ mod mac_os {
 
     use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 
-    use crate::{Detect, InstalledApp};
+    use crate::{DEV_BIN, Detect, InstalledApp, PRODUCT};
+
+    fn app_executable(app_bundle: &Path) -> PathBuf {
+        let macos = app_bundle.join("Contents/MacOS");
+        [PRODUCT.install_name, DEV_BIN, PRODUCT.command]
+            .into_iter()
+            .map(|name| macos.join(name))
+            .find(|path| path.exists())
+            .unwrap_or_else(|| macos.join(PRODUCT.install_name))
+    }
 
     #[derive(Debug, Deserialize)]
     struct InfoPlist {
@@ -1375,7 +1397,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+            format!("{} {} – {}", PRODUCT.display, self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1452,7 +1474,7 @@ mod mac_os {
             user_data_dir: Option<&str>,
         ) -> io::Result<ExitStatus> {
             let path = match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_executable(app_bundle),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             };
 
@@ -1466,7 +1488,7 @@ mod mac_os {
 
         fn path(&self) -> PathBuf {
             match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_executable(app_bundle),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             }
         }

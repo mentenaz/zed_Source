@@ -1,7 +1,7 @@
 name: build_windows_dev
 
 # Manual, no-release build: click "Run workflow" (Actions tab) on any
-# branch, download the zipped zed.exe from the run's Artifacts section once
+# branch, download the zipped forgedev.exe from the run's Artifacts section once
 # it finishes. Does not create a GitHub Release and does not code-sign —
 # for local testing of a branch's build only. See script/bundle-windows.ps1
 # for the full signed-installer pipeline this intentionally skips.
@@ -15,10 +15,9 @@ on:
         default: zed
       isolate:
         description: >-
-          Build as a separate app ("ZedDevBuild") with its own settings/data
-          dir and instance lock, so it doesn't share state with or refuse to
-          launch alongside your regular installed Zed. Only patches the
-          checked-out CI copy — never the committed source.
+          Build as a separate app ("ForgeSuperBuild") with its own
+          settings/data dir and instance lock, so it doesn't share state with
+          or refuse to launch alongside your regular installed Forge.
         required: false
         type: boolean
         default: true
@@ -54,21 +53,14 @@ jobs:
         if: ${{ inputs.isolate }}
         shell: pwsh
         run: |
-          # Changes the app name used for the settings/data directory
-          # (%APPDATA%\Zed -> %APPDATA%\ZedDevBuild) and the Windows
-          # single-instance mutex, so this build neither reads/writes your
-          # regular Zed's settings and workspace database nor refuses to
-          # launch because your regular Zed is already running. Only edits
-          # this ephemeral checkout inside the runner — never committed.
-          $paths = 'crates/paths/src/paths.rs'
-          (Get-Content $paths -Raw) `
-            -replace 'pub const APP_NAME: &str = "Zed";', 'pub const APP_NAME: &str = "ZedDevBuild";' |
-            Set-Content $paths -NoNewline
-
-          $instance = 'crates/zed/src/zed/windows_only_instance.rs'
-          (Get-Content $instance -Raw) `
-            -replace '"\{\}-Instance-Mutex"', '"{}-CI-Instance-Mutex"' |
-            Set-Content $instance -NoNewline
+          # Changes the settings/data directory (ForgeSuper ->
+          # ForgeSuperBuild) and the Windows single-instance mutex, so this
+          # build neither reads/writes your regular Forge's settings and
+          # workspace database nor refuses to launch because your regular
+          # Forge is already running. Values are consumed by
+          # crates/app_names/build.rs.
+          "FORGE_DIR_SUFFIX=Build" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "FORGE_IPC_SUFFIX=-CI" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build (release)
         shell: pwsh
@@ -78,7 +70,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item "target/release/${{ inputs.package }}.exe" dist/ -ErrorAction Stop
+          $binName = if ('${{ inputs.package }}' -eq 'zed') { 'forgedev' } else { '${{ inputs.package }}' }
+          Copy-Item "target/release/$binName.exe" dist/ -ErrorAction Stop
           # Best-effort: pick up any runtime DLLs cargo's build scripts placed
           # next to the binary (e.g. conpty.dll) so the .exe has a chance of
           # running standalone. The full installer pipeline

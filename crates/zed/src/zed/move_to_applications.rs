@@ -70,12 +70,16 @@ impl MoveToApplicationsRequest {
         workspace: WeakEntity<MultiWorkspace>,
         cx: &mut AsyncWindowContext,
     ) -> Result<()> {
+        let brand = app_names::PRODUCT.brand;
         let response = cx
             .prompt(
                 PromptLevel::Info,
-                "Move Zed to Applications?",
+                format!("Move {brand} to Applications?"),
                 Some(
-                    "Zed is running from a temporary location. Move it to Applications to finish installing it.",
+                    format!(
+                        "{brand} is running from a temporary location. Move it to Applications to finish installing it."
+                    )
+                    .as_str(),
                 ),
                 &[
                     PromptButton::ok("Yes"),
@@ -103,7 +107,7 @@ impl MoveToApplicationsRequest {
                         .ok();
                     cx.prompt(
                         PromptLevel::Critical,
-                        "Failed to move Zed to Applications",
+                        format!("Failed to move {brand} to Applications"),
                         Some(&error.to_string()),
                         &["OK"],
                     )
@@ -178,7 +182,10 @@ impl Render for InstallingZedModal {
                     .py_3()
                     .border_b_1()
                     .border_color(theme.colors().border_variant)
-                    .child(Label::new("Installing Zed…")),
+                    .child(Label::new(format!(
+                        "Installing {}…",
+                        app_names::PRODUCT.brand
+                    ))),
             )
             .child(
                 h_flex()
@@ -196,11 +203,17 @@ impl Render for InstallingZedModal {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(Label::new("Moving Zed to Applications"))
+                            .child(Label::new(format!(
+                                "Moving {} to Applications",
+                                app_names::PRODUCT.brand
+                            )))
                             .child(
-                                Label::new("Zed will reopen when installation is complete.")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                Label::new(format!(
+                                    "{} will reopen when installation is complete.",
+                                    app_names::PRODUCT.brand
+                                ))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                             ),
                     ),
             )

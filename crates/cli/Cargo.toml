@@ -18,9 +18,13 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
+edition-zed = ["app_names/edition-zed"]
+edition-super = ["app_names/edition-super"]
+edition-lite = ["app_names/edition-lite"]
 no-bundled-uninstall = ["cli"]
 default = ["cli"]
 cli = [
+    "dep:app_names",
     "dep:askpass",
     "dep:clap",
     "dep:clap_complete",
@@ -45,6 +49,7 @@ cli = [
 
 [dependencies]
 anyhow.workspace = true
+app_names = { workspace = true, optional = true }
 askpass = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }

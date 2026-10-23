@@ -6,12 +6,15 @@ version = "1.27.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zeddev"
+default-run = "forgedev"
 
 [lints]
 workspace = true
 
 [features]
+edition-zed = ["app_names/edition-zed", "windows_resources/edition-zed"]
+edition-super = ["app_names/edition-super", "windows_resources/edition-super"]
+edition-lite = ["app_names/edition-lite", "windows_resources/edition-lite"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -55,7 +58,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zeddev"
+name = "forgedev"
 path = "src/main.rs"
 
 [[bin]]
@@ -65,6 +68,7 @@ required-features = ["visual-tests"]
 
 [dependencies]
 acp_thread.workspace = true
+app_names.workspace = true
 acp_tools.workspace = true
 action_log = { workspace = true, optional = true }
 activity_indicator.workspace = true
@@ -307,39 +311,39 @@ repl = { workspace = true, features = ["test-support"] }
 
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.ZedDev"
-name = "ZedDev"
+identifier = "dev.forge.super-Dev"
+name = "Mentenaz Forge Super Dev"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["forgesuper"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "dev.forge.super-Nightly"
+name = "Mentenaz Forge Super Nightly"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["forgesuper"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "dev.forge.super-Preview"
+name = "Mentenaz Forge Super Preview"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["forgesuper"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "dev.forge.super"
+name = "Mentenaz Forge Super"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["forgesuper"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

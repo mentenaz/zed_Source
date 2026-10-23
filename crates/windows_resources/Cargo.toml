@@ -13,5 +13,11 @@ path = "src/windows_resources.rs"
 doctest = false
 test = false
 
+[features]
+edition-zed = ["app_names/edition-zed"]
+edition-super = ["app_names/edition-super"]
+edition-lite = ["app_names/edition-lite"]
+
 [target.'cfg(target_os = "windows")'.dependencies]
+app_names.workspace = true
 embed-resource = "3.0"

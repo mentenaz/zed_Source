@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Installs a locally built `zeddev.exe` for this user only — PATH entry +
-    Explorer right-click "Open with Zed Dev" — without Inno Setup, code
+    Installs a locally built `forgedev.exe` for this user only — PATH entry +
+    Explorer right-click "Open with Forge Dev" — without Inno Setup, code
     signing, or admin rights.
 
 .DESCRIPTION
@@ -29,11 +29,11 @@
     inherited environment).
 
 .PARAMETER ExePath
-    The built `zeddev.exe` to install. Defaults to `target/release/zeddev.exe`
+    The built `forgedev.exe` to install. Defaults to `target/release/forgedev.exe`
     (build it first with `script/build-release.ps1` if it doesn't exist yet).
 
 .PARAMETER InstallDir
-    Where to copy the exe. Defaults to `%LOCALAPPDATA%\ZedDev\bin`.
+    Where to copy the exe. Defaults to `%LOCALAPPDATA%\ForgeSuper\bin`.
 
 .PARAMETER Uninstall
     Removes everything this script added — the PATH entry, the context-menu
@@ -47,19 +47,19 @@
 #>
 [CmdletBinding()]
 Param(
-    [string]$ExePath = "target/release/zeddev.exe",
-    [string]$InstallDir = "$env:LOCALAPPDATA\ZedDev\bin",
+    [string]$ExePath = "target/release/forgedev.exe",
+    [string]$InstallDir = "$env:LOCALAPPDATA\ForgeSuper\bin",
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
 
 # Matches `RegValueName`/`ShellNameShort` for the "dev" channel in zed.iss —
-# kept distinct from "Zed"/"ZedPreview"/"ZedNightly" so this never collides
-# with a real installed Zed's own context-menu/PATH entries.
-$RegValueName = "ZedDevLocal"
-$ShellLabel = "Open with Zed Dev"
-$InstalledExe = Join-Path $InstallDir "zeddev.exe"
+# kept distinct from stable/preview/nightly so this never collides with a
+# real installed Forge's own context-menu/PATH entries.
+$RegValueName = "ForgeSuperLocal"
+$ShellLabel = "Open with Forge Dev"
+$InstalledExe = Join-Path $InstallDir "forgedev.exe"
 
 function Broadcast-EnvironmentChange {
     if (-not ("Win32.NativeMethods" -as [type])) {
@@ -163,5 +163,5 @@ Install-ContextMenu
 Broadcast-EnvironmentChange
 
 Write-Host ""
-Write-Host "Done. Open a new terminal to pick up the PATH change — 'zeddev' will launch it." -ForegroundColor Cyan
+Write-Host "Done. Open a new terminal to pick up the PATH change — 'forgedev' will launch it." -ForegroundColor Cyan
 Write-Host "Right-click a file/folder in Explorer -> 'Show more options' -> '$ShellLabel'." -ForegroundColor Cyan

@@ -17,6 +17,7 @@ test-support = ["clock/test-support", "collections/test-support", "gpui/test-sup
 
 [dependencies]
 anyhow.workspace = true
+app_names.workspace = true
 async-channel.workspace = true
 async-tungstenite = { workspace = true, features = ["tokio", "tokio-rustls-manual-roots"] }
 chrono.workspace = true

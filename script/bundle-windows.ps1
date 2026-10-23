@@ -80,6 +80,10 @@ $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
 
+# The built-in updater is always off in this fork (see update_explanation in
+# crates/auto_update). Set ZED_UPDATE_EXPLANATION before running this script
+# only to change the message "Check for Updates" shows.
+
 function CheckEnvironmentVariables {
     if(-not $env:CI) {
         return
@@ -132,12 +136,12 @@ function GenerateLicenses {
 }
 
 function BuildZedAndItsFriends {
-    Write-Output "Building Zed and its friends, for channel: $channel"
-    # Build zeddev.exe (this fork's `zed` package renames its bin to
-    # "zeddev" so a local dev build doesn't collide with a real Zed install —
-    # see crates/zed/Cargo.toml), cli.exe and auto_update_helper.exe
+    Write-Output "Building Forge and its friends, for channel: $channel"
+    # Build forgedev.exe (the shared development binary name; packaging
+    # renames it to the edition's install name), cli.exe and
+    # auto_update_helper.exe.
     cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\zeddev.exe" -Destination "$innoDir\Zed.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\forgedev.exe" -Destination "$innoDir\ForgeSuper.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
@@ -176,7 +180,7 @@ function BuildRemoteServer {
 
 function ZipZedAndItsFriendsDebug {
     $items = @(
-        ".\$CargoOutDir\zeddev.pdb",
+        ".\$CargoOutDir\forgedev.pdb",
         ".\$CargoOutDir\cli.pdb",
         ".\$CargoOutDir\auto_update_helper.pdb",
         ".\$CargoOutDir\explorer_command_injector.pdb",
@@ -238,7 +242,7 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    $files = "$innoDir\ForgeSuper.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
     & "$innoDir\sign.ps1" $files
 }
 
@@ -263,8 +267,8 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\forge-super.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\forge-super" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -285,60 +289,66 @@ function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
     switch ($channel) {
         "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
+            $appId = "{{8A3F0E4C-6B21-4C7D-9E10-2D5A7B9C1F01}"
             $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "Zed"
-            $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
-            $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Mentenaz Forge Super"
+            $appDisplayName = "Mentenaz Forge Super"
+            $appSetupName = "Mentenaz-Forge-Super-$Architecture"
+            # Must match app_names::IPC_STABLE + "-Instance-Mutex".
+            $appMutex = "Forge-Super-Editor-Stable-Instance-Mutex"
+            $appExeName = "ForgeSuper"
+            # Must match app_names::PRODUCT.dir; explorer_command_injector
+            # reads Software\Classes\<dir>ContextMenu.
+            $regValueName = "ForgeSuper"
+            $appUserId = "dev.forge.super"
+            $appShellNameShort = "Forge &Super"
+            $appAppxFullName = "Mentenaz.Forge.Super_1.0.0.0_neutral__654wrvrakbnw4"
         }
         "preview" {
-            $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
+            $appId = "{{8A3F0E4C-6B21-4C7D-9E10-2D5A7B9C1F02}"
             $appIconName = "app-icon-preview"
-            $appName = "Zed Preview"
-            $appDisplayName = "Zed Preview"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Preview-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedPreview"
-            $appUserId = "ZedIndustries.Zed.Preview"
-            $appShellNameShort = "Z&ed Preview"
-            $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Mentenaz Forge Super Preview"
+            $appDisplayName = "Mentenaz Forge Super Preview"
+            $appSetupName = "Mentenaz-Forge-Super-Preview-$Architecture"
+            # Must match app_names::IPC_PREVIEW + "-Instance-Mutex".
+            $appMutex = "Forge-Super-Editor-Preview-Instance-Mutex"
+            $appExeName = "ForgeSuper"
+            # Must match app_names::PRODUCT.dir.
+            $regValueName = "ForgeSuperPreview"
+            $appUserId = "dev.forge.super-Preview"
+            $appShellNameShort = "Forge &Super Preview"
+            $appAppxFullName = "Mentenaz.Forge.Super.Preview_1.0.0.0_neutral__654wrvrakbnw4"
         }
         "nightly" {
-            $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
+            $appId = "{{8A3F0E4C-6B21-4C7D-9E10-2D5A7B9C1F03}"
             $appIconName = "app-icon-nightly"
-            $appName = "Zed Nightly"
-            $appDisplayName = "Zed Nightly"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Nightly-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedNightly"
-            $appUserId = "ZedIndustries.Zed.Nightly"
-            $appShellNameShort = "Z&ed Editor Nightly"
-            $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Mentenaz Forge Super Nightly"
+            $appDisplayName = "Mentenaz Forge Super Nightly"
+            $appSetupName = "Mentenaz-Forge-Super-Nightly-$Architecture"
+            # Must match app_names::IPC_NIGHTLY + "-Instance-Mutex".
+            $appMutex = "Forge-Super-Editor-Nightly-Instance-Mutex"
+            $appExeName = "ForgeSuper"
+            # Must match app_names::PRODUCT.dir.
+            $regValueName = "ForgeSuperNightly"
+            $appUserId = "dev.forge.super-Nightly"
+            $appShellNameShort = "Forge &Super Nightly"
+            $appAppxFullName = "Mentenaz.Forge.Super.Nightly_1.0.0.0_neutral__654wrvrakbnw4"
         }
         "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
+            $appId = "{{8A3F0E4C-6B21-4C7D-9E10-2D5A7B9C1F04}"
             $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
-            $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
-            $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Mentenaz Forge Super Dev"
+            $appDisplayName = "Mentenaz Forge Super Dev"
+            $appSetupName = "Mentenaz-Forge-Super-Dev-$Architecture"
+            # Must match app_names::IPC_DEV + "-Instance-Mutex".
+            $appMutex = "Forge-Super-Editor-Dev-Instance-Mutex"
+            $appExeName = "ForgeSuper"
+            # Must match app_names::PRODUCT.dir.
+            $regValueName = "ForgeSuperDev"
+            $appUserId = "dev.forge.super-Dev"
+            $appShellNameShort = "Forge &Super Dev"
+            # Dev packs the nightly manifest (see MakeAppx), so it uses the nightly package.
+            $appAppxFullName = "Mentenaz.Forge.Super.Nightly_1.0.0.0_neutral__654wrvrakbnw4"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -364,9 +374,11 @@ function BuildInstaller {
         "ResourcesDir"   = "$innoDir"
         "ShellNameShort" = $appShellNameShort
         "AppUserId"      = $appUserId
-        "Version"        = "$env:RELEASE_VERSION"
+        "Version"        = "$env:INSTALLER_VERSION"
         "SourceDir"      = "$env:ZED_WORKSPACE"
         "AppxFullName"   = $appAppxFullName
+        # Must match the edition's `scheme` in editions.json.
+        "UrlScheme"      = "forgesuper"
     }
 
     $defs = @()
@@ -388,7 +400,10 @@ function BuildInstaller {
 
     if ($process.ExitCode -eq 0) {
         Write-Host "✅ Inno Setup successfully compiled the installer"
-        Write-Output "SETUP_PATH=target/$appSetupName.exe" >> $env:GITHUB_ENV
+        $script:setupPath = Join-Path $env:ZED_WORKSPACE "target\$appSetupName.exe"
+        if ($env:GITHUB_ENV) {
+            Write-Output "SETUP_PATH=target/$appSetupName.exe" >> $env:GITHUB_ENV
+        }
         $script:buildSuccess = $true
     }
     else {
@@ -399,8 +414,8 @@ function BuildInstaller {
 
 ParseZedWorkspace
 $innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
-$debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-$debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+# $debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+# $debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
 
 CheckEnvironmentVariables
 PrepareForBundle
@@ -422,8 +437,8 @@ if($env:CI) {
 if ($buildSuccess) {
     Write-Output "Build successful"
     if ($Install) {
-        Write-Output "Installing Zed..."
-        Start-Process -FilePath "$env:ZED_WORKSPACE/target/ZedEditorUserSetup-x64-$env:RELEASE_VERSION.exe"
+        Write-Output "Installing $setupPath..."
+        Start-Process -FilePath $setupPath
     }
     exit 0
 }

@@ -61,16 +61,43 @@ form, `Tag::custom(color.opacity(0.2), color, color.opacity(0.3))`, or
 
 - Always pass `-j 8` to cargo on this machine.
 - For a manual test run use `script/run-isolated.ps1`, which builds and runs
-  the app as a separate "ZedDevBuild" with its own data directory.
+  the app as a separate "ForgeSuperBuild" with its own data directory and
+  instance lock. A plain `cargo run` shares both with an installed Forge and
+  will not start while it is running.
 - A cargo command left running holds the target-directory lock and blocks any
   other build, so do not leave one in the background while someone else builds.
 - A crate's package name can differ from its directory
   (`crates/gpui_component_fps` is package `gpui-fps`); check its `Cargo.toml`
   before `cargo -p`.
-- The dev build (`target/debug/zeddev.exe`) logs to
-  `%LOCALAPPDATA%\ZedDev\logs\ZedDev.log`; the installed release logs to
-  `%LOCALAPPDATA%\Zed\logs\Zed.log`. A build launched from a terminal logs to
-  that terminal instead.
+- The data and log folder is `%LOCALAPPDATA%\<dir>`, where `<dir>` is the
+  edition's `dir` from `editions.json` plus the channel. On the `stable`
+  channel the installed app and a plain `target/debug/forgedev.exe` both log
+  to `%LOCALAPPDATA%\ForgeSuper\logs\ForgeSuper.log`; `run-isolated.ps1` builds
+  log to `%LOCALAPPDATA%\ForgeSuperBuild\logs\ForgeSuperBuild.log`. A build
+  launched from a terminal logs to that terminal instead.
+
+# App names and channel
+
+- This app is the `forge-super` edition (Mentenaz Forge Super, winget
+  `Mentenaz.Forge.Super`, URL scheme `forgesuper://`). Product names
+  (display name, data folder, exe and CLI names, mutex, app id, URL scheme)
+  come from `editions.json`, turned into constants by
+  `crates/app_names/build.rs`. Change names there, not in code.
+- The installer side does not read `editions.json` yet: `bundle-windows.ps1`,
+  `zed.iss`, `zed.sh` and the `AppxManifest*.xml` files repeat the
+  `forge-super` values by hand, and their comments say what each must match.
+- Only `forgesuper://` is registered with the OS, but `zed://` links are still
+  accepted and open the same thing (`client::normalize_app_url`). Internal
+  `zed:///agent/…` and `zed-cli://` addresses stay as upstream has them.
+- Keychain entries are stored as `forgesuper:<url>`, apart from Zed's.
+  Entries saved under the bare URL by earlier builds are copied across on
+  first read (`zed_credentials_provider`).
+- The channel is the one word in `crates/zed/RELEASE_CHANNEL` (now `stable`).
+  `ZED_RELEASE_CHANNEL` overrides it at build time; nothing else does.
+- The built-in updater is always off, in every build (`update_explanation`
+  in `crates/auto_update`), because it would fetch upstream Zed from
+  zed.dev. Updates come from winget and the `.deb`; "Check for Updates" only
+  says so. `ZED_UPDATE_EXPLANATION` changes that message.
 
 # Releases
 

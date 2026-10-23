@@ -1929,6 +1929,30 @@ impl ProtoClient for Client {
 /// prefix for the zed:// url scheme
 pub const ZED_URL_SCHEME: &str = "zed";
 
+/// The URL scheme this app registers with the OS, from the edition's
+/// `scheme` in `editions.json` (e.g. `forgesuper`).
+pub const APP_URL_SCHEME: &str = app_names::PRODUCT.scheme;
+
+/// Rewrites a link in the app's own scheme (`forgesuper://settings`) to the
+/// `zed://` form the link handlers understand (`zed://settings`), so links in
+/// either scheme open the same thing. Other links are returned unchanged.
+pub fn normalize_app_url(url: &str) -> std::borrow::Cow<'_, str> {
+    if APP_URL_SCHEME != ZED_URL_SCHEME
+        && let Some(rest) = url
+            .strip_prefix(APP_URL_SCHEME)
+            .and_then(|rest| rest.strip_prefix("://"))
+    {
+        format!("{ZED_URL_SCHEME}://{rest}").into()
+    } else {
+        url.into()
+    }
+}
+
+/// Whether `url` uses the app's own scheme or the `zed://` scheme.
+pub fn is_app_url(url: &str) -> bool {
+    normalize_app_url(url).starts_with("zed://")
+}
+
 /// A parsed Zed link that can be handled internally by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZedLink {
@@ -1953,6 +1977,7 @@ pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
         .and_then(|result| result.strip_prefix('/'))
         .or_else(|| {
             link.strip_prefix(ZED_URL_SCHEME)
+                .or_else(|| link.strip_prefix(APP_URL_SCHEME))
                 .and_then(|result| result.strip_prefix("://"))
         })?;
 

@@ -15,6 +15,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+app_names.workspace = true
 credentials_provider.workspace = true
 futures.workspace = true
 gpui.workspace = true

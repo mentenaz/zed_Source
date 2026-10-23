@@ -5,14 +5,14 @@ mod reliability;
 mod watcher_debug;
 mod zed;
 
-// Ensure the binary name stays in sync with APP_NAME so that the paths used
-// at runtime (data dir, config dir, etc.) match what the binary is called.
+// Keep the development binary name in sync with `editions.json` (via
+// `app_names`) so packaging scripts and Cargo agree on the artifact name.
 const _: () = assert!(
-    paths::APP_NAME_LOWERCASE
+    app_names::DEV_BIN
         .as_bytes()
         .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes()),
-    "paths::APP_NAME_LOWERCASE must match the binary name. \
-     Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
+    "app_names::DEV_BIN must match the `[[bin]]` name in crates/zed/Cargo.toml. \
+     Update editions.json (dev_bin) and Cargo.toml together.",
 );
 
 use agent_ui::AgentPanel;
@@ -515,7 +515,7 @@ fn main() {
                         app_version.patch,
                     )
                     .to_string(),
-                    binary: "zeddev".to_string(),
+                    binary: app_names::DEV_BIN.to_string(),
                     release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
                     commit_sha: app_commit_sha
                         .as_ref()
@@ -1950,7 +1950,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
             if arg.starts_with("file://")
-                || arg.starts_with("zed://")
+                || client::is_app_url(arg)
                 || arg.starts_with("zed-cli://")
                 || arg.starts_with("ssh://")
                 || parse_zed_link(arg, cx).is_some()

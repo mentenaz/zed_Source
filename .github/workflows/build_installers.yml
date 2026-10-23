@@ -94,6 +94,7 @@ jobs:
       build_macos: ${{ steps.resolve.outputs.build_macos }}
       publish_release: ${{ steps.resolve.outputs.publish_release }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
     steps:
       - name: Resolve build parameters
         id: resolve
@@ -102,7 +103,11 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
-            echo "build_linux=true" >> "$GITHUB_OUTPUT"
+            # Disabled on tag push until Linux packaging is renamed to Forge
+            # Super: script/bundle-linux still builds the old `zeddev` binary
+            # and packages it as `zed`. Still available manually via
+            # workflow_dispatch's build_linux input.
+            echo "build_linux=false" >> "$GITHUB_OUTPUT"
             # Disabled on tag push: webrtc-sys fails to build against every
             # Xcode on the macos-14 runner we've tried so far (15.4's libc++
             # tightened a C++20 concept check that cxx-rs's generated
@@ -112,6 +117,13 @@ jobs:
             echo "build_macos=false" >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
             echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            # dev-v38 -> 38: the fourth part of the installer version
+            # (1.27.0.38), so winget and Windows see each release as newer.
+            build_number="${GITHUB_REF_NAME#dev-v}"
+            case "$build_number" in
+              ''|*[!0-9]*) build_number=0 ;;
+            esac
+            echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
           else
             echo "architecture=${{ inputs.architecture }}" >> "$GITHUB_OUTPUT"
             echo "build_windows=${{ inputs.build_windows }}" >> "$GITHUB_OUTPUT"
@@ -119,6 +131,8 @@ jobs:
             echo "build_macos=${{ inputs.build_macos }}" >> "$GITHUB_OUTPUT"
             echo "publish_release=${{ inputs.publish_release }}" >> "$GITHUB_OUTPUT"
             echo "release_tag=dev-build" >> "$GITHUB_OUTPUT"
+            # Untagged test builds: lower than any tagged release.
+            echo "build_number=0" >> "$GITHUB_OUTPUT"
           fi
 
   build_windows:
@@ -134,6 +148,9 @@ jobs:
     # cache key (keyed off Cargo.lock et al.) changes enough since the last
     # run, so budget for a from-scratch build, not just a warm-cache one.
     timeout-minutes: 180
+    env:
+      # Read by script/lib/workspace.ps1 for the installer version.
+      FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -147,7 +164,7 @@ jobs:
 
       # Skips code signing gracefully when the Azure signing secrets aren't
       # set (they aren't here) — see its own CheckEnvironmentVariables.
-      # The resulting Zed-<arch>.exe will trigger a Windows SmartScreen
+      # The resulting installer .exe will trigger a Windows SmartScreen
       # warning on first run ("Windows protected your PC") — bypass with
       # "More info" -> "Run anyway". Expected for an unsigned installer,
       # not a build failure.
@@ -158,8 +175,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Zed-${{ needs.prepare.outputs.architecture }}.exe
-          path: target/Zed-${{ needs.prepare.outputs.architecture }}.exe
+          name: windows-installer-${{ needs.prepare.outputs.architecture }}
+          # bundle-windows.ps1 exports the installer's path (its file name
+          # comes from the channel's $appSetupName), so this follows renames.
+          path: ${{ env.SETUP_PATH }}
           if-no-files-found: error
 
   build_linux:
@@ -339,7 +358,7 @@ jobs:
         if: ${{ needs.build_windows.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
-          name: Zed-${{ needs.prepare.outputs.architecture }}.exe
+          name: windows-installer-${{ needs.prepare.outputs.architecture }}
           path: dist
 
       - name: Download Linux artifacts
@@ -395,12 +414,12 @@ jobs:
           # lets the tag and architecture expand (backticks are escaped so the
           # shell does not treat them as command substitution).
           cat > release-notes.md <<EOF
-          **Mentenaz Forge** is an experimental *developer cockpit* built directly
-          into [Zed](https://github.com/zed-industries/zed): a native Rust/GPUI
-          workspace that folds the tooling normally scattered across separate
-          applications into the editor itself.
+          **Mentenaz Forge Super** is a *developer cockpit* built on the
+          open-source [Zed](https://github.com/zed-industries/zed) editor: a
+          native Rust/GPUI workspace that folds the tooling normally scattered
+          across separate applications into the editor itself.
 
-          This development build (\`${RELEASE_TAG}\`, \`${ARCH}\`) includes:
+          This build (\`${RELEASE_TAG}\`, \`${ARCH}\`) includes:
 
           - **Developer Cockpit & Dashboard** — project, runtime, dependency, Git
             and system health in one operational view.
@@ -416,7 +435,7 @@ jobs:
             tab for browsing files, commits, comparisons and code search.
           - **Git Insights, Process Monitor, Script Runner** and more.
 
-          > **This is an unsigned development build, not a stable release.**
+          > **This build is not code-signed yet.**
           >
           > - **Windows:** SmartScreen warns on first run ("Windows protected your
           >   PC") — choose **More info** then **Run anyway**.
@@ -432,15 +451,21 @@ jobs:
           gh attestation verify <downloaded file> --repo ${GH_REPO}
           \`\`\`
 
-          Built automatically by \`build_installers.yml\`. Mentenaz Forge is an
+          Built automatically by \`build_installers.yml\`. Mentenaz Forge Super is an
           unofficial personal fork, not affiliated with, endorsed by, or
           associated with Zed Industries.
           EOF
 
+          # Tagged releases are normal releases (winget installs from them);
+          # manual "dev-build" runs stay pre-releases.
+          release_kind=(--latest)
+          if [ "$RELEASE_TAG" = "dev-build" ]; then
+            release_kind=(--prerelease)
+          fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
-              --title "Mentenaz Forge dev build ${RELEASE_TAG} (${ARCH})" \
+              --title "Mentenaz Forge Super ${RELEASE_TAG} (${ARCH})" \
               --notes-file release-notes.md \
-              --prerelease
+              "${release_kind[@]}"
           fi
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

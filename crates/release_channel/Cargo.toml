@@ -12,5 +12,6 @@ workspace = true
 doctest = false
 
 [dependencies]
+app_names.workspace = true
 gpui.workspace = true
 semver.workspace = true

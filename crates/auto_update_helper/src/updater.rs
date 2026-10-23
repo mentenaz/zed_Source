@@ -21,6 +21,13 @@ use windows::{
 
 use crate::windows_impl::WM_JOB_UPDATED;
 
+use app_names::PRODUCT;
+use const_format::concatcp;
+
+const APP_EXE: &str = concatcp!(PRODUCT.install_name, ".exe"); // Forge.exe
+const CLI_EXE: &str = concatcp!("bin\\", PRODUCT.command, ".exe"); // bin\forge.exe
+const CLI_SCRIPT: &str = concatcp!("bin\\", PRODUCT.command); // bin\forge
+
 pub(crate) struct Job {
     pub apply: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
     pub rollback: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
@@ -172,10 +179,10 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         // Move old files
         // Not deleting because installing new files can fail
         Job::mkdir(p("old")),
-        Job::move_file(p("Zed.exe"), p("old\\Zed.exe")),
+        Job::move_file(p(APP_EXE), p(concatcp!("old\\", APP_EXE))),
         Job::mkdir(p("old\\bin")),
-        Job::move_file(p("bin\\Zed.exe"), p("old\\bin\\Zed.exe")),
-        Job::move_file(p("bin\\zed"), p("old\\bin\\zed")),
+        Job::move_file(p(CLI_EXE), p(concatcp!("old\\", CLI_EXE))),
+        Job::move_file(p(CLI_SCRIPT), p(concatcp!("old\\", CLI_SCRIPT))),
         //
         // TODO: remove after a few weeks once everyone is on the new version and this file never exists
         Job::move_if_exists(p("OpenConsole.exe"), p("old\\OpenConsole.exe")),
@@ -189,9 +196,9 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         //
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
         // Copy new files
-        Job::move_file(p("install\\Zed.exe"), p("Zed.exe")),
-        Job::move_file(p("install\\bin\\Zed.exe"), p("bin\\Zed.exe")),
-        Job::move_file(p("install\\bin\\zed"), p("bin\\zed")),
+        Job::move_file(p(concatcp!("install\\", APP_EXE)), p(APP_EXE)),
+        Job::move_file(p(concatcp!("install\\", CLI_EXE)), p(CLI_EXE)),
+        Job::move_file(p(concatcp!("install\\", CLI_SCRIPT)), p(CLI_SCRIPT)),
         //
         Job::mkdir_if_exists(p("x64"), p("install\\x64")),
         Job::mkdir_if_exists(p("arm64"), p("install\\arm64")),
@@ -279,9 +286,9 @@ pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
 fn release_file_handles(app_dir: &Path) -> Result<()> {
     // Files that commonly get locked by Explorer or other processes
     let files_to_release = [
-        app_dir.join("Zed.exe"),
-        app_dir.join("bin\\Zed.exe"),
-        app_dir.join("bin\\zed"),
+        app_dir.join(APP_EXE),
+        app_dir.join(CLI_EXE),
+        app_dir.join(CLI_SCRIPT),
         app_dir.join("conpty.dll"),
     ];
 
@@ -365,7 +372,7 @@ fn release_file_handles(app_dir: &Path) -> Result<()> {
 
 #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
 fn zed_launch_command(app_dir: &Path, launch_arguments: &[OsString]) -> std::process::Command {
-    let mut command = std::process::Command::new(app_dir.join("Zed.exe"));
+    let mut command = std::process::Command::new(app_dir.join(APP_EXE));
     command.args(launch_arguments);
     command
 }
@@ -442,7 +449,7 @@ pub(crate) fn perform_update(
         #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
         let _child = zed_launch_command(app_dir, launch_arguments)
             .spawn()
-            .context("Failed to launch Zed after update")?;
+            .with_context(|| format!("Failed to launch {} after update", PRODUCT.brand))?;
     }
     log::info!("Update completed successfully");
     Ok(())
@@ -464,7 +471,9 @@ mod test {
 
         assert_eq!(
             command.get_program(),
-            Path::new(r"C:\Program Files\Zed\Zed.exe").as_os_str()
+            Path::new(r"C:\Program Files\Zed")
+                .join(super::APP_EXE)
+                .as_os_str()
         );
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),

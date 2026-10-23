@@ -24,3 +24,4 @@ nightly = []
 windows = { workspace = true, features = ["Win32_Globalization", "Win32_System_SystemServices"] }
 windows-core.workspace = true
 windows-registry.workspace = true
+app_names.workspace = true

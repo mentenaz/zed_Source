@@ -1,21 +1,15 @@
 <#
 .SYNOPSIS
-    Builds and runs a local Zed dev build as a separate app ("ZedDevBuild"),
-    isolated from your regular installed Zed's settings/data and Windows
-    single-instance lock.
+    Builds and runs a local Forge dev build as a separate app
+    ("ForgeSuperBuild"), isolated from your regular installed Forge's
+    settings/data and Windows single-instance lock.
 
 .DESCRIPTION
-    Temporarily patches two files (APP_NAME in crates/paths/src/paths.rs,
-    and the single-instance mutex name in
-    crates/zed/src/zed/windows_only_instance.rs) so the build uses its own
-    %APPDATA%\ZedDevBuild / %LOCALAPPDATA%\ZedDevBuild directories and its
-    own mutex, then builds, runs, and reverts the patch — even if the build
-    or run fails — via a try/finally, so the repo is always left clean
-    afterward. Mirrors .github/workflows/build_windows_dev.yml's "isolate"
-    step, for local use.
-
-    Aborts up front if either target file already has uncommitted changes,
-    so this script never discards real work sitting in those files.
+    Sets FORGE_DIR_SUFFIX/FORGE_IPC_SUFFIX, which `crates/app_names/build.rs`
+    bakes into the generated paths and mutex names, so the build uses its own
+    %APPDATA%\ForgeSuperBuild / %LOCALAPPDATA%\ForgeSuperBuild directories
+    and its own mutex. No source files are modified; the environment variables
+    are restored after the build.
 
 .PARAMETER Jobs
     Passed through to `cargo build -j`. Defaults to 8 — see the reasoning
@@ -54,31 +48,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Push-Location $repoRoot
 
-$pathsFile = "crates/paths/src/paths.rs"
-$instanceFile = "crates/zed/src/zed/windows_only_instance.rs"
-
-function Assert-Clean([string]$file) {
-    $diff = & git diff --quiet -- $file
-    if ($LASTEXITCODE -ne 0) {
-        throw "$file has uncommitted changes — commit or stash them first. " +
-              "This script reverts the file via 'git checkout' when it's done, " +
-              "which would discard those changes."
-    }
-}
+$oldDirSuffix = $env:FORGE_DIR_SUFFIX
+$oldIpcSuffix = $env:FORGE_IPC_SUFFIX
 
 try {
-    Assert-Clean $pathsFile
-    Assert-Clean $instanceFile
+    $env:FORGE_DIR_SUFFIX = "Build"
+    $env:FORGE_IPC_SUFFIX = "-CI"
 
-    Write-Host "Patching APP_NAME and instance mutex for an isolated build..." -ForegroundColor Cyan
-
-    (Get-Content $pathsFile -Raw) `
-        -replace 'pub const APP_NAME: &str = "Zed";', 'pub const APP_NAME: &str = "ZedDevBuild";' |
-        Set-Content $pathsFile -NoNewline
-
-    (Get-Content $instanceFile -Raw) `
-        -replace '"\{\}-Instance-Mutex"', '"{}-CI-Instance-Mutex"' |
-        Set-Content $instanceFile -NoNewline
+    Write-Host "Building an isolated Forge dev binary (ForgeSuperBuild)..." -ForegroundColor Cyan
 
     $profile = if ($Release) { "release" } else { "debug" }
     $cargoArgs = @("build", "-p", $Package, "-j", $Jobs)
@@ -92,22 +69,22 @@ try {
         throw "cargo build failed (exit code $LASTEXITCODE)."
     }
 
-    # The fork's `zed` package builds a binary named `zeddev`, not `zed`.
-    $binName = if ($Package -eq "zed") { "zeddev" } else { $Package }
+    # The fork's `zed` package builds a binary named `forgedev`, not `zed`.
+    $binName = if ($Package -eq "zed") { "forgedev" } else { $Package }
     $exePath = "target/$profile/$binName.exe"
     if (-not (Test-Path $exePath)) {
         throw "Build succeeded but $exePath was not found."
     }
 
     if ($NoRun) {
-        Write-Host "Built $exePath (isolated as ZedDevBuild). Skipping launch (-NoRun)." -ForegroundColor Green
+        Write-Host "Built $exePath (isolated as ForgeSuperBuild). Skipping launch (-NoRun)." -ForegroundColor Green
     } else {
-        Write-Host "Launching $exePath (isolated as ZedDevBuild)..." -ForegroundColor Cyan
+        Write-Host "Launching $exePath (isolated as ForgeSuperBuild)..." -ForegroundColor Cyan
         Start-Process -FilePath $exePath -Wait
     }
 }
 finally {
-    Write-Host "Reverting isolation patch..." -ForegroundColor Cyan
-    & git checkout -- $pathsFile $instanceFile
+    if ($null -eq $oldDirSuffix) { Remove-Item Env:FORGE_DIR_SUFFIX -ErrorAction SilentlyContinue } else { $env:FORGE_DIR_SUFFIX = $oldDirSuffix }
+    if ($null -eq $oldIpcSuffix) { Remove-Item Env:FORGE_IPC_SUFFIX -ErrorAction SilentlyContinue } else { $env:FORGE_IPC_SUFFIX = $oldIpcSuffix }
     Pop-Location
 }

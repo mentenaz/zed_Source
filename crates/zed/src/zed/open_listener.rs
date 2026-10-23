@@ -155,6 +155,8 @@ impl OpenRequest {
         }
 
         for url in request.urls {
+            // `forgesuper://…` and `zed://…` open the same thing.
+            let url = client::normalize_app_url(&url).into_owned();
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {

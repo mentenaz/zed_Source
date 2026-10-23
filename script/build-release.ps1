@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Builds `zeddev` in release mode — the plain, no-signing, no-installer
+    Builds `forgedev` in release mode — the plain, no-signing, no-installer
     equivalent of `script/bundle-windows.ps1`.
 
 .DESCRIPTION
-    Just `cargo build -p zed --bin zeddev --release`, with the same `-j 8`
+    Just `cargo build -p zed --bin forgedev --release`, with the same `-j 8`
     default as `run-isolated.ps1` (see that script's own doc comment for why:
     this machine has far more logical cores than free RAM can support
     building in parallel). No NSIS/Inno Setup installer, no code signing, no
@@ -15,7 +15,7 @@
     Passed through to `cargo build -j`. Defaults to 8.
 
 .PARAMETER Run
-    Launch the resulting `zeddev.exe` after a successful build.
+    Launch the resulting `forgedev.exe` after a successful build.
 
 .EXAMPLE
     ./script/build-release.ps1
@@ -38,14 +38,14 @@ if ($LASTEXITCODE -ne 0) {
 Push-Location $repoRoot
 
 try {
-    $cargoArgs = @("build", "-p", "zed", "--bin", "zeddev", "--release", "-j", $Jobs)
+    $cargoArgs = @("build", "-p", "zed", "--bin", "forgedev", "--release", "-j", $Jobs)
     Write-Host "Building: cargo $($cargoArgs -join ' ')" -ForegroundColor Cyan
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed (exit code $LASTEXITCODE)."
     }
 
-    $exePath = "target/release/zeddev.exe"
+    $exePath = "target/release/forgedev.exe"
     if (-not (Test-Path $exePath)) {
         throw "Build succeeded but $exePath was not found."
     }
