@@ -49,6 +49,9 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
         _ => ("app-icon-dev.ico", app_names::DISPLAY_DEV),
     };
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
+    // Without this a cached build keeps embedding the old icon after the
+    // .ico is replaced.
+    println!("cargo:rerun-if-changed={}", icon.display());
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
 
     let manifest_line = if manifest {
