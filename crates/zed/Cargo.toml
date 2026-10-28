@@ -115,6 +115,7 @@ debugger_ui.workspace = true
 designer_panel.workspace = true
 dev_container.workspace = true
 diagnostics.workspace = true
+dirs.workspace = true
 dotnet_panel.workspace = true
 editor.workspace = true
 encoding_selector.workspace = true
@@ -267,6 +268,7 @@ nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 etw_tracing.workspace = true
+junction.workspace = true
 windows = { workspace = true, features = ["Win32_System_Console", "Win32_System_Pipes"] }
 gpui = { workspace = true, features = ["profiler", "windows-manifest"] }
 

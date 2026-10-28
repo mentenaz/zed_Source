@@ -92,6 +92,11 @@ form, `Tag::custom(color.opacity(0.2), color, color.opacity(0.3))`, or
 - Keychain entries are stored as `forgesuper:<url>`, apart from Zed's.
   Entries saved under the bare URL by earlier builds are copied across on
   first read (`zed_credentials_provider`).
+- Settings and data from the fork's earlier builds (`ZedDev` folders) are
+  copied in by `crates/zed/src/zed/import_previous_data.rs`: automatically
+  on the first launch, and through the "Import Data From Previous Version"
+  command (which restarts and imports before anything opens the database).
+  It never touches upstream Zed's `Zed` folders.
 - The channel is the one word in `crates/zed/RELEASE_CHANNEL` (now `stable`).
   `ZED_RELEASE_CHANNEL` overrides it at build time; nothing else does.
 - The built-in updater is always off, in every build (`update_explanation`
@@ -103,7 +108,20 @@ form, `Tag::custom(color.opacity(0.2), color, color.opacity(0.3))`, or
 
 A release is an annotated tag `dev-vN` on `main`, pushed to `origin`
 (`mentenaz/zed_Source`). The tag push runs the `build_installers` workflow,
-which publishes the "Mentenaz Forge dev build dev-vN" pre-release. Use the
-next number after the latest `dev-v*` tag, and a message of the form
+which publishes a normal (not pre-) release "Mentenaz Forge Super dev-vN
+(x86_64)" with `Mentenaz-Forge-Super-x86_64.exe`. Use the next number after
+the latest `dev-v*` tag, and a message of the form
 `dev-vN: comma-separated summary of what changed since the last tag`.
 `gh` resolves to upstream Zed by default here; pass `-R mentenaz/zed_Source`.
+
+- The `N` in the tag is the fourth part of the installer version
+  (`1.27.0.N`), which winget and Windows compare, so tag numbers must only
+  go up. `RELEASE_VERSION` stays the crate version.
+- Tag builds are Windows-only until the Linux packaging (`bundle-linux`,
+  `bundle-deb`) is renamed to Forge Super; macOS is off because webrtc-sys
+  fails to build there. Both can still be run manually from the Actions tab,
+  and manual runs publish a "dev-build" pre-release.
+- A new tag push cancels a `build_installers` run still in progress, so
+  wait for it to finish first. Pushes to `main` alone do not start a build.
+- Pushing needs the `mentenaz` GitHub account active (`gh auth switch -u
+  mentenaz`); the work account gets a 403.

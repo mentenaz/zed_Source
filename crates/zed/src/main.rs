@@ -386,6 +386,14 @@ fn main() {
         }
     }
 
+    // Copies the previous version's settings and data (first launch, or after
+    // the import action), before anything creates or opens these folders.
+    let previous_data_import = if args.user_data_dir.is_none() {
+        zed::import_previous_data::import_if_due()
+    } else {
+        None
+    };
+
     let file_errors = init_paths();
     if !file_errors.is_empty() {
         files_not_created_on_launch(file_errors);
@@ -404,6 +412,10 @@ fn main() {
         };
     }
     ztracing::init();
+
+    if let Some(summary) = previous_data_import {
+        log::info!("previous version data {summary}");
+    }
 
     #[cfg(unix)]
     util::increase_open_file_limit().log_err();

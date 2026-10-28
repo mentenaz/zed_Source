@@ -794,19 +794,23 @@ pub fn is_agents_skills_path(path: &Path) -> bool {
     false
 }
 
-/// The `zed://` scheme used by share links.
-const SKILL_SHARE_LINK_SCHEME: &str = "zed";
-/// The host (the part after `zed://`) that identifies a skill share link.
+/// The scheme new share links use: the app's own, from `editions.json`
+/// (e.g. `forgesuper`).
+const SKILL_SHARE_LINK_SCHEME: &str = app_names::PRODUCT.scheme;
+/// Links shared from upstream Zed or earlier builds use `zed://`; they are
+/// still accepted.
+const ZED_SKILL_SHARE_LINK_SCHEME: &str = "zed";
+/// The host (the part after `forgesuper://`) that identifies a skill share link.
 const SKILL_SHARE_LINK_HOST: &str = "skill";
 /// The query parameter that carries the embedded `SKILL.md` payload.
 const SKILL_SHARE_LINK_DATA_PARAM: &str = "data";
 
-/// The `zed://` deep-link prefix for a shared skill. Opening a link with this
+/// The deep-link prefix for a shared skill (`forgesuper://skill`). Opening a link with this
 /// prefix prompts the recipient to review and install the embedded skill.
 pub const SKILL_SHARE_LINK_PREFIX: &str =
     concatcp!(SKILL_SHARE_LINK_SCHEME, "://", SKILL_SHARE_LINK_HOST);
 
-/// Build a shareable `zed://skill?data=…` link that fully embeds the given
+/// Build a shareable `forgesuper://skill?data=…` link that fully embeds the given
 /// `SKILL.md` file contents.
 ///
 /// The contents are base64url-encoded (no padding) so the link is
@@ -822,13 +826,14 @@ pub fn encode_skill_share_link(skill_file_content: &str) -> String {
     url.into()
 }
 
-/// Recover the `SKILL.md` contents embedded in a `zed://skill?data=…` link
-/// produced by [`encode_skill_share_link`].
+/// Recover the `SKILL.md` contents embedded in a `forgesuper://skill?data=…`
+/// link produced by [`encode_skill_share_link`], or in the `zed://` form.
 pub fn decode_skill_share_link(link: &str) -> Result<String> {
     use base64::Engine as _;
     let url = Url::parse(link).context("skill share link is not a valid URL")?;
     anyhow::ensure!(
-        url.scheme() == SKILL_SHARE_LINK_SCHEME && url.host_str() == Some(SKILL_SHARE_LINK_HOST),
+        (url.scheme() == SKILL_SHARE_LINK_SCHEME || url.scheme() == ZED_SKILL_SHARE_LINK_SCHEME)
+            && url.host_str() == Some(SKILL_SHARE_LINK_HOST),
         "not a skill share link"
     );
     let data = url
@@ -2185,11 +2190,14 @@ description: A skill with no body content
             "---\nname: my-skill\ndescription: Does a thing.\n---\n\n## Steps\n\nDo the thing.\n";
         let link = encode_skill_share_link(content);
         let data = link
-            .strip_prefix("zed://skill?data=")
+            .strip_prefix(&format!("{SKILL_SHARE_LINK_PREFIX}?data="))
             .expect("link should start with the skill share prefix");
         // base64url (no-pad) output must not require percent-encoding.
         assert!(!data.contains('+') && !data.contains('/') && !data.contains('='));
         assert_eq!(decode_skill_share_link(&link).unwrap(), content);
+        // The same link in the `zed://` form still decodes.
+        let zed_link = format!("zed://skill?data={data}");
+        assert_eq!(decode_skill_share_link(&zed_link).unwrap(), content);
     }
 
     #[test]
