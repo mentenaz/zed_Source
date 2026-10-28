@@ -29,6 +29,7 @@ pub(crate) fn db_type_label(db_type: DbType) -> &'static str {
         DbType::Postgres => "PostgreSQL",
         DbType::MySql => "MySQL / MariaDB",
         DbType::MsSql => "MSSQL",
+        DbType::Oracle => "Oracle",
     }
 }
 
@@ -296,7 +297,11 @@ impl DatabasePanel {
         // stacking on top of it. "Open existing" isn't a page: it's a
         // `Popover` (below), an overlay that floats on top of whatever's
         // already showing instead of pushing it down the page.
-        let page = if is_creating {
+        let page = if connection.db_type == DbType::Oracle {
+            // One Oracle service is one database: nothing to create, and no
+            // other databases to open from this connection.
+            div().into_any_element()
+        } else if is_creating {
             h_flex()
                 .w_full()
                 .px_3()

@@ -50,6 +50,10 @@ pub struct SchemaGraphView {
     table_count: usize,
     relationship_count: usize,
     ignored_cycle_relationships: usize,
+    /// Kept so `update_schema` can rebuild the node renderer, whose context
+    /// menus call back into the panel.
+    panel: WeakEntity<super::DatabasePanel>,
+    connection_id: super::ConnectionId,
 }
 
 impl SchemaGraphView {
@@ -60,16 +64,7 @@ impl SchemaGraphView {
         connection_id: super::ConnectionId,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (nodes, edges) = flow_graph(graph, layout);
-        let menu_items = Rc::new(table_menu_items_by_table(graph));
-        let state = cx.new(|_| FlowState::new(nodes, edges));
-        let flow = cx.new(|cx| {
-            FlowGraph::new(state.clone(), cx).default_renderer(move |node, window, cx| {
-                render_table_card(node, &menu_items, panel.clone(), connection_id, window, cx)
-            })
-        });
-        let controls = cx.new(|_| Controls::new(state.clone()));
-        let minimap = cx.new(|_| Minimap::new(state));
+        let (flow, controls, minimap) = Self::build_flow(graph, layout, &panel, connection_id, cx);
         Self {
             flow,
             controls,
@@ -78,7 +73,51 @@ impl SchemaGraphView {
             table_count: graph.tables.len(),
             relationship_count: graph.relationships.len(),
             ignored_cycle_relationships: layout.ignored_cycle_relationships.len(),
+            panel,
+            connection_id,
         }
+    }
+
+    fn build_flow(
+        graph: &SchemaGraph,
+        layout: &SchemaLayout,
+        panel: &WeakEntity<super::DatabasePanel>,
+        connection_id: super::ConnectionId,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Entity<FlowGraph>, gpui::Entity<Controls>, gpui::Entity<Minimap>) {
+        let (nodes, edges) = flow_graph(graph, layout);
+        let menu_items = Rc::new(table_menu_items_by_table(graph));
+        let state = cx.new(|_| FlowState::new(nodes, edges));
+        let panel = panel.clone();
+        let flow = cx.new(|cx| {
+            FlowGraph::new(state.clone(), cx).default_renderer(move |node, window, cx| {
+                render_table_card(node, &menu_items, panel.clone(), connection_id, window, cx)
+            })
+        });
+        let controls = cx.new(|_| Controls::new(state.clone()));
+        let minimap = cx.new(|_| Minimap::new(state));
+        (flow, controls, minimap)
+    }
+
+    /// Rebuilds the graph in place from a freshly fetched schema, so a graph
+    /// tab that is already open follows a Refresh (or a DDL statement)
+    /// instead of showing the tables it was first opened with. Pan and zoom
+    /// reset, since the layout is recomputed.
+    pub(crate) fn update_schema(
+        &mut self,
+        graph: &SchemaGraph,
+        layout: &SchemaLayout,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = self.panel.clone();
+        let (flow, controls, minimap) = Self::build_flow(graph, layout, &panel, self.connection_id, cx);
+        self.flow = flow;
+        self.controls = controls;
+        self.minimap = minimap;
+        self.table_count = graph.tables.len();
+        self.relationship_count = graph.relationships.len();
+        self.ignored_cycle_relationships = layout.ignored_cycle_relationships.len();
+        cx.notify();
     }
 }
 
@@ -370,6 +409,27 @@ impl super::DatabasePanel {
         workspace.update(cx, |workspace, cx| {
             open_schema_graph(graph, key, title, workspace, window, cx);
         });
+    }
+
+    /// Pushes a freshly fetched schema into `key`'s graph view, if one has
+    /// been created — `schema_graph_for_key` only builds it once, so without
+    /// this a Refresh would update the tree but leave the graph stale.
+    pub(crate) fn refresh_schema_graph(
+        &mut self,
+        key: &super::SchemaKey,
+        tables: &[database_backend::TableInfo],
+        cx: &mut Context<super::DatabasePanel>,
+    ) {
+        let Some(view) = self.schema_graphs.get(key).cloned() else {
+            return;
+        };
+        let schema = database_backend::Schema {
+            tables: tables.to_vec(),
+            views: Vec::new(),
+        };
+        let graph = SchemaGraph::from_schema(&schema);
+        let layout = SchemaLayout::compute(&graph, crate::layout::LayoutConfig::default());
+        view.update(cx, |view, cx| view.update_schema(&graph, &layout, cx));
     }
 
     pub(crate) fn schema_graph_for_key(

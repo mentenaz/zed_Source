@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::drivers::{
-    DbType, mssql, mysql, postgres, sqlite,
+    DbType, mssql, mysql, oracle, postgres, sqlite,
 };
 use crate::errors::DatabaseError;
 
@@ -83,6 +83,7 @@ pub async fn list_databases(
         DbType::Postgres => postgres::list_databases(params).await,
         DbType::MySql => mysql::list_databases(params).await,
         DbType::MsSql => mssql::list_databases(params).await,
+        DbType::Oracle => oracle::list_databases(params).await,
     }
 }
 
@@ -100,6 +101,9 @@ pub async fn create_database(
         DbType::Postgres => postgres::create_database(params, name).await,
         DbType::MySql => mysql::create_database(params, name).await,
         DbType::MsSql => mssql::create_database(params, name).await,
+        DbType::Oracle => Err(DatabaseError::Unsupported(
+            "Oracle has no server-level database creation; a service is provisioned by a DBA".into(),
+        )),
     }
 }
 
@@ -114,6 +118,7 @@ enum DbConn {
     Postgres(Arc<AsyncMutex<tokio_postgres::Client>>),
     MySql(mysql_async::Pool),
     MsSql(Arc<AsyncMutex<mssql::MsSqlClient>>),
+    Oracle(oracle::OracleClient),
 }
 
 /// Live-session registry, keyed by `(ConnectionId, String)` — the string being
@@ -208,6 +213,25 @@ impl ConnectionRegistry {
             (id, database.clone()),
             DbConn::MsSql(Arc::new(AsyncMutex::new(client))),
         );
+        self.register_first_database_as_active(id, &database);
+        Ok(())
+    }
+
+    /// Opens an Oracle connection to the service named `params.database`,
+    /// registering it under `(id, params.database)`. The driver is
+    /// synchronous; `oracle::connect` moves the blocking work onto
+    /// `spawn_blocking`, so callers need a tokio runtime but not a thread of
+    /// their own.
+    pub async fn connect_oracle(
+        &mut self,
+        id: ConnectionId,
+        params: NetworkConnectParams,
+    ) -> Result<(), DatabaseError> {
+        self.reject_if_database_already_connected(id, &params.database)?;
+        let database = params.database.clone();
+        let client = oracle::connect(params).await?;
+        self.sessions
+            .insert((id, database.clone()), DbConn::Oracle(client));
         self.register_first_database_as_active(id, &database);
         Ok(())
     }
@@ -348,6 +372,7 @@ impl ConnectionRegistry {
                 let mut client = client.lock().await;
                 mssql::fetch_schema(&mut client).await
             }
+            Some(DbConn::Oracle(client)) => oracle::fetch_schema(client).await,
         }
     }
 
@@ -387,6 +412,7 @@ impl ConnectionRegistry {
                 let mut client = client.lock().await;
                 mssql::execute_query(&mut client, sql).await
             }
+            Some(DbConn::Oracle(client)) => oracle::execute_query(client, sql).await,
         }
     }
 }

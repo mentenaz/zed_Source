@@ -600,6 +600,7 @@ impl DatabasePanel {
         self.registry_busy = true;
         cx.notify();
 
+        let refresh_schema = may_change_schema(&sql);
         let registry = std::mem::take(&mut self.registry);
 
         cx.spawn(async move |this, cx| {
@@ -617,6 +618,11 @@ impl DatabasePanel {
                         if let Some(workbench) = this.workbenches.get_mut(&key) {
                             workbench.running = false;
                             workbench.result = Some(outcome.map_err(|err| err.to_string()));
+                        }
+                        // Even a failed script may have applied its earlier
+                        // statements, so refresh regardless of the outcome.
+                        if refresh_schema {
+                            this.fetch_schema(id, cx);
                         }
                     }
                     Err(err) => {
@@ -1380,8 +1386,59 @@ impl workspace::SerializableItem for WorkbenchTab {
     }
 }
 
+/// True when running `sql` may have changed the database's structure, so the
+/// cached schema (tree, explorer, graph) is out of date. Looks at the first
+/// word of each `;`-separated statement, skipping leading comments — a
+/// deliberately cheap test: a false positive only costs one extra schema
+/// fetch, and a plain `SELECT`/`INSERT`/`UPDATE`/`DELETE` never triggers one.
+fn may_change_schema(sql: &str) -> bool {
+    sql.split(';').any(|statement| {
+        let mut rest = statement.trim_start();
+        loop {
+            if let Some(after) = rest.strip_prefix("--") {
+                rest = after.split_once('\n').map_or("", |(_, tail)| tail).trim_start();
+            } else if let Some(after) = rest.strip_prefix("/*") {
+                rest = after.split_once("*/").map_or("", |(_, tail)| tail).trim_start();
+            } else {
+                break;
+            }
+        }
+        let word: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        matches!(word.as_str(), "create" | "alter" | "drop" | "rename")
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ddl_statements_may_change_the_schema() {
+        assert!(may_change_schema("CREATE TABLE t (id int)"));
+        assert!(may_change_schema("  alter table t add x int;"));
+        assert!(may_change_schema("drop view v"));
+        assert!(may_change_schema("rename t to u"));
+        assert!(may_change_schema("-- note\ncreate table t (id int)"));
+        assert!(may_change_schema("/* hi */ DROP TABLE t"));
+    }
+
+    #[test]
+    fn a_ddl_statement_later_in_a_script_counts() {
+        assert!(may_change_schema("insert into t values (1);\ncreate index i on t (id);"));
+        assert!(may_change_schema("select 1 from dual;; ; drop table t;"));
+    }
+
+    #[test]
+    fn data_statements_do_not_change_the_schema() {
+        assert!(!may_change_schema("SELECT * FROM t"));
+        assert!(!may_change_schema("insert into t values (1)"));
+        assert!(!may_change_schema("update t set x = 1; delete from t"));
+        assert!(!may_change_schema("select 'create table' from dual"));
+        assert!(!may_change_schema(""));
+    }
+
     use super::*;
 
     fn sample_result() -> QueryResult {

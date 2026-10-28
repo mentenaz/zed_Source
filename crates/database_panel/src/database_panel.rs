@@ -300,16 +300,18 @@ fn default_port(db_type: DbType) -> u16 {
         DbType::Postgres => 5432,
         DbType::MySql => 3306,
         DbType::MsSql => 1433,
+        DbType::Oracle => 1521,
     }
 }
 
 /// The panel-level type tabs, in display order — fixed regardless of how
 /// many connections (if any) exist for each type.
-const DB_TYPES: [DbType; 4] = [
+const DB_TYPES: [DbType; 5] = [
     DbType::Sqlite,
     DbType::Postgres,
     DbType::MySql,
     DbType::MsSql,
+    DbType::Oracle,
 ];
 
 actions!(
@@ -395,6 +397,11 @@ pub struct DatabasePanel {
     /// the type's default, since setting an input's value needs the window.
     new_connection_port_pending: bool,
     new_connection_username: Entity<InputState>,
+    /// Oracle only: the service name (a PDB such as `FREEPDB1`). Oracle has
+    /// no server-level database list to pick from, so unlike the other
+    /// network types this is asked for up front and saved as the
+    /// connection's `database`.
+    new_connection_service: Entity<InputState>,
     new_connection_ssl: bool,
     new_connection_password: Entity<InputState>,
     /// Set by `add_connection` when it bails out on a missing required
@@ -480,6 +487,8 @@ impl DatabasePanel {
             let new_connection_host = cx.new(|cx| InputState::new(window, cx));
             let new_connection_port = cx.new(|cx| InputState::new(window, cx));
             let new_connection_username = cx.new(|cx| InputState::new(window, cx));
+            let new_connection_service =
+                cx.new(|cx| InputState::new(window, cx).placeholder("e.g. FREEPDB1"));
             let new_connection_password = cx.new(|cx| InputState::new(window, cx).masked(true));
             let new_database_name = cx.new(|cx| InputState::new(window, cx));
             let schema_filter =
@@ -528,6 +537,7 @@ impl DatabasePanel {
                 new_connection_port,
                 new_connection_port_pending: false,
                 new_connection_username,
+                new_connection_service,
                 new_connection_ssl: false,
                 new_connection_password,
                 add_connection_error: None,
@@ -724,6 +734,14 @@ impl DatabasePanel {
                     Ok((registry, Ok(schema))) => {
                         this.registry = registry;
                         this.update_tree_items(key.clone(), &schema.tables, &schema.views, cx);
+                        this.refresh_schema_graph(&key, &schema.tables, cx);
+                        // The workbench sidebar keeps its own tree (so its
+                        // scroll and selection don't follow the explorer's),
+                        // so it needs the new tables pushed in too.
+                        if let Some(tree_state) = this.workbench_tree_states.get(&key) {
+                            let items = schema_tree_items(&schema.tables, &schema.views, "");
+                            tree_state.update(cx, |tree_state, cx| tree_state.set_items(items, cx));
+                        }
                         this.schemas.insert(
                             key.clone(),
                             SchemaState::Loaded {
@@ -983,6 +1001,7 @@ impl DatabasePanel {
         let host = value(&self.new_connection_host, cx);
         let username = value(&self.new_connection_username, cx);
         let port = value(&self.new_connection_port, cx);
+        let service = value(&self.new_connection_service, cx);
         let db_type = self.active_type;
         let id = ConnectionId(self.next_connection_id);
 
@@ -1000,6 +1019,9 @@ impl DatabasePanel {
             if username.is_empty() {
                 missing.push("Username");
             }
+        }
+        if db_type == DbType::Oracle && service.is_empty() {
+            missing.push("Service Name");
         }
         if !missing.is_empty() {
             self.add_connection_error = Some(format!("{} required.", missing.join(", ")));
@@ -1023,7 +1045,7 @@ impl DatabasePanel {
                     databases: Vec::new(),
                 }
             }
-            DbType::Postgres | DbType::MySql | DbType::MsSql => {
+            DbType::Postgres | DbType::MySql | DbType::MsSql | DbType::Oracle => {
                 let port = port.parse().unwrap_or_else(|_| default_port(db_type));
                 ConnectionConfig {
                     id,
@@ -1035,8 +1057,10 @@ impl DatabasePanel {
                     sqlite_path: None,
                     // No database picked yet — `connect` discovers what's on
                     // the server and lets the user pick from that list
-                    // instead of requiring the exact name upfront.
-                    database: None,
+                    // instead of requiring the exact name upfront. Oracle has
+                    // nothing to discover (one service is one database), so
+                    // its service name is the database from the start.
+                    database: (db_type == DbType::Oracle).then_some(service),
                     ssl: self.new_connection_ssl,
                     databases: Vec::new(),
                 }
@@ -1057,6 +1081,7 @@ impl DatabasePanel {
             &self.new_connection_host,
             &self.new_connection_port,
             &self.new_connection_username,
+            &self.new_connection_service,
             &self.new_connection_password,
         ] {
             state.update(cx, |state, cx| state.set_value("", window, cx));
@@ -1065,10 +1090,10 @@ impl DatabasePanel {
 
         match db_type {
             DbType::Sqlite => self.connect(id, cx),
-            DbType::Postgres | DbType::MySql | DbType::MsSql if !password.is_empty() => {
+            DbType::Postgres | DbType::MySql | DbType::MsSql | DbType::Oracle if !password.is_empty() => {
                 self.save_password_and_connect(config, password, cx);
             }
-            DbType::Postgres | DbType::MySql | DbType::MsSql => self.connect(id, cx),
+            DbType::Postgres | DbType::MySql | DbType::MsSql | DbType::Oracle => self.connect(id, cx),
         }
     }
 
@@ -1137,7 +1162,14 @@ impl DatabasePanel {
                 }
                 cx.notify();
             }
-            DbType::Postgres | DbType::MySql | DbType::MsSql => {
+            DbType::Oracle if connection.database.is_none() => {
+                self.statuses.insert(
+                    id,
+                    ConnectionStatus::Error("This Oracle connection has no service name.".into()),
+                );
+                cx.notify();
+            }
+            DbType::Postgres | DbType::MySql | DbType::MsSql | DbType::Oracle => {
                 if connection.database.is_some() {
                     // A specific database was already picked (either just
                     // now via `select_database`, or this is a persisted
@@ -1349,6 +1381,7 @@ impl DatabasePanel {
                     DbType::Postgres => registry.connect_postgres(id, params).await,
                     DbType::MySql => registry.connect_mysql(id, params).await,
                     DbType::MsSql => registry.connect_mssql(id, params).await,
+                    DbType::Oracle => registry.connect_oracle(id, params).await,
                     DbType::Sqlite => {
                         unreachable!("sqlite connections never reach connect_network")
                     }
@@ -1910,6 +1943,7 @@ impl DatabasePanel {
         let host = self.new_connection_host.clone();
         let port = self.new_connection_port.clone();
         let username = self.new_connection_username.clone();
+        let service = self.new_connection_service.clone();
         let password = self.new_connection_password.clone();
         let ssl = self.new_connection_ssl;
 
@@ -1927,11 +1961,17 @@ impl DatabasePanel {
             let form = v_form().columns(2).child(text_field("Title", &title));
             let form = match db_type {
                 DbType::Sqlite => form,
-                DbType::Postgres | DbType::MySql | DbType::MsSql => {
+                DbType::Postgres | DbType::MySql | DbType::MsSql | DbType::Oracle => {
                     let ssl_entity = ssl_entity.clone();
-                    form.child(text_field("Host", &host))
-                        .child(text_field("Port", &port))
-                        .child(text_field("Username", &username))
+                    let form = form
+                        .child(text_field("Host", &host))
+                        .child(text_field("Port", &port));
+                    let form = if db_type == DbType::Oracle {
+                        form.child(text_field("Service Name", &service))
+                    } else {
+                        form
+                    };
+                    form.child(text_field("Username", &username))
                         .child(
                             field().label("Password").child(
                                 Input::new(&password)

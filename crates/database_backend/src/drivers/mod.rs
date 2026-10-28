@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod mssql;
 pub mod mysql;
+pub mod oracle;
 pub mod postgres;
 pub mod sqlite;
 
@@ -13,6 +14,7 @@ pub enum DbType {
     Postgres,
     MySql,
     MsSql,
+    Oracle,
 }
 
 impl DbType {
@@ -25,6 +27,7 @@ impl DbType {
             DbType::Postgres => "postgres",
             DbType::MySql => "mysql",
             DbType::MsSql => "mssql",
+            DbType::Oracle => "oracle",
         }
     }
 }
