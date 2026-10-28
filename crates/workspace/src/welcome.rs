@@ -16,7 +16,7 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, forge_logo, prelude::*};
 use util::ResultExt;
 use zed_actions::{
     Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
@@ -447,10 +447,11 @@ impl Render for WelcomePage {
                 .into_any_element()
         };
 
+        let app_name = app_names::PRODUCT.display;
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            format!("Welcome back to {app_name}")
         } else {
-            "Welcome to Zed"
+            format!("Welcome to {app_name}")
         };
 
         h_flex()
@@ -475,9 +476,10 @@ impl Render for WelcomePage {
                         h_flex()
                             .w_full()
                             .justify_center()
+                            .items_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45_f32)))
+                            .child(forge_logo(rems_from_px(135_f32)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
                                     Label::new("The editor for what's next")

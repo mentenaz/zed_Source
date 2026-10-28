@@ -13993,6 +13993,7 @@ name = "onboarding"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_names",
  "client",
  "cloud_api_types",
  "collections",
@@ -24841,6 +24842,7 @@ dependencies = [
  "agent_settings",
  "any_vec",
  "anyhow",
+ "app_names",
  "async-recursion",
  "chrono",
  "client",

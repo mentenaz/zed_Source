@@ -21,6 +21,7 @@ pub enum VectorName {
     StudentStamp,
     ZedLogo,
     ZedXCopilot,
+    MentenazForgeSuper,
 }
 
 impl VectorName {
@@ -29,6 +30,12 @@ impl VectorName {
         let file_stem: &'static str = self.into();
         format!("images/{file_stem}.svg").into()
     }
+}
+
+/// The Mentenaz Forge Super logo at `size` (a square). It is a single-colour
+/// outline, so like any [`Vector`] it is painted in the theme's text colour.
+pub fn forge_logo(size: Rems) -> impl IntoElement {
+    Vector::square(VectorName::MentenazForgeSuper, size)
 }
 
 /// A vector image, such as an SVG.
@@ -175,5 +182,9 @@ mod tests {
     #[test]
     fn vector_path() {
         assert_eq!(VectorName::ZedLogo.path().as_ref(), "images/zed_logo.svg");
+        assert_eq!(
+            VectorName::MentenazForgeSuper.path().as_ref(),
+            "images/mentenaz_forge_super.svg"
+        );
     }
 }
