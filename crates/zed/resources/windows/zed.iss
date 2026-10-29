@@ -1360,16 +1360,51 @@ begin
   Exec(ExpandConstant('{sys}\icacls.exe'), ExpandConstant('"{app}" /inheritancelevel:r ') + Permissions, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// Classic per-type context-menu verbs, as a fallback for when the modern
+// appx-based extension (below) fails to install — e.g. an unsigned or
+// identity-mismatched .appx, which `Add-AppxPackage` rejects outright.
+procedure WriteLegacyContextMenuKeys();
+begin
+  RegWriteStringValue(HKCU, 'Software\Classes\*\shell\{#RegValueName}', '', ExpandConstant('{cm:OpenWithContextMenu,{#ShellNameShort}}'));
+  RegWriteStringValue(HKCU, 'Software\Classes\*\shell\{#RegValueName}', 'Icon', ExpandConstant('{app}\{#AppExeName}.exe'));
+  RegWriteStringValue(HKCU, 'Software\Classes\*\shell\{#RegValueName}\command', '', ExpandConstant('"{app}\{#AppExeName}.exe" "%1"'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\shell\{#RegValueName}', '', ExpandConstant('{cm:OpenWithContextMenu,{#ShellNameShort}}'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\shell\{#RegValueName}', 'Icon', ExpandConstant('{app}\{#AppExeName}.exe'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\shell\{#RegValueName}\command', '', ExpandConstant('"{app}\{#AppExeName}.exe" "%V"'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\background\shell\{#RegValueName}', '', ExpandConstant('{cm:OpenWithContextMenu,{#ShellNameShort}}'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\background\shell\{#RegValueName}', 'Icon', ExpandConstant('{app}\{#AppExeName}.exe'));
+  RegWriteStringValue(HKCU, 'Software\Classes\directory\background\shell\{#RegValueName}\command', '', ExpandConstant('"{app}\{#AppExeName}.exe" "%V"'));
+  RegWriteStringValue(HKCU, 'Software\Classes\Drive\shell\{#RegValueName}', '', ExpandConstant('{cm:OpenWithContextMenu,{#ShellNameShort}}'));
+  RegWriteStringValue(HKCU, 'Software\Classes\Drive\shell\{#RegValueName}', 'Icon', ExpandConstant('{app}\{#AppExeName}.exe'));
+  RegWriteStringValue(HKCU, 'Software\Classes\Drive\shell\{#RegValueName}\command', '', ExpandConstant('"{app}\{#AppExeName}.exe" "%V"'));
+end;
+
+procedure RemoveLegacyContextMenuKeys();
+begin
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\*\shell\{#RegValueName}');
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\directory\shell\{#RegValueName}');
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\directory\background\shell\{#RegValueName}');
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\Drive\shell\{#RegValueName}');
+end;
+
 procedure AddAppxPackage();
 var
   AddAppxPackageResultCode: Integer;
 begin
   if WizardIsTaskSelected('addcontextmenufiles') then begin
     ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Add-AppxPackage -Path ''' + ExpandConstant('{app}\appx\zed_explorer_command_injector.appx') + ''' -ExternalLocation ''' + ExpandConstant('{app}\appx') + ''''), '', SW_HIDE, ewWaitUntilTerminated, AddAppxPackageResultCode);
-    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\*\shell\{#RegValueName}');
-    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\directory\shell\{#RegValueName}');
-    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\directory\background\shell\{#RegValueName}');
-    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\Drive\shell\{#RegValueName}');
+    if AddAppxPackageResultCode = 0 then begin
+      // The appx's modern context-menu extension covers files, folders,
+      // folder backgrounds and drives on its own — remove the legacy keys
+      // so the two mechanisms don't both show an entry.
+      RemoveLegacyContextMenuKeys();
+    end else begin
+      // Add-AppxPackage failed (e.g. the .appx isn't signed, or its
+      // signature's subject doesn't match AppxManifest.xml's declared
+      // Publisher) — fall back to the classic verbs instead of silently
+      // ending up with no context-menu entry at all.
+      WriteLegacyContextMenuKeys();
+    end;
   end;
 end;
 
@@ -1378,6 +1413,7 @@ var
   RemoveAppxPackageResultCode: Integer;
 begin
   ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Remove-AppxPackage -Package ''{#AppxFullName}'''), '', SW_HIDE, ewWaitUntilTerminated, RemoveAppxPackageResultCode);
+  RemoveLegacyContextMenuKeys();
   if not WizardIsTaskSelected('addcontextmenufiles') then begin
     RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\{#RegValueName}ContextMenu');
   end;
