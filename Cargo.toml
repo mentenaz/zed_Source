@@ -622,7 +622,7 @@ forge-scaffold-sdk = { git = "https://github.com/mentenaz/Forge.Scaffold.SDK", t
 # checked against the release's SHASUMS256.txt before anything is unpacked).
 # `default-features = false` leaves out its command-line program: argument
 # completions, progress bars, shell detection and its Windows manifest.
-fnm = { git = "https://github.com/mentenaz/fnm", rev = "ecbecf998f425b884f5be91058d1d87e4cf9c7d1", default-features = false }
+fnm = { git = "https://github.com/mentenaz/fnm", rev = "9a70961a80d19a256f0cb892c03511308196f724", default-features = false }
 any_vec = "0.14"
 anyhow = "1.0.86"
 arc-swap = "1.9.0"
