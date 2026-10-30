@@ -616,11 +616,13 @@ agent-client-protocol = { version = "=3.4.0", features = ["schemars", "unstable"
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 forge-scaffold-sdk = { git = "https://github.com/mentenaz/Forge.Scaffold.SDK", tag = "v0.1.0" }
-# fnm as a library (the `library` branch of the fork adds the lib target;
-# the pinned commit is on `checked-downloads`, which adds checksum checks).
+# fnm as a library (the `library` branch of the fork adds the lib target,
+# and now also carries the checksum-verification work merged in from
+# `checked-downloads`/`typed-verification-error`: Node.js downloads are
+# checked against the release's SHASUMS256.txt before anything is unpacked).
 # `default-features = false` leaves out its command-line program: argument
 # completions, progress bars, shell detection and its Windows manifest.
-fnm = { git = "https://github.com/mentenaz/fnm", rev = "4a35f31866ab0cb6117c93087151bca03b0cadbf", default-features = false }
+fnm = { git = "https://github.com/mentenaz/fnm", rev = "ecbecf998f425b884f5be91058d1d87e4cf9c7d1", default-features = false }
 any_vec = "0.14"
 anyhow = "1.0.86"
 arc-swap = "1.9.0"
