@@ -39,17 +39,17 @@ channel=$(<crates/zed/RELEASE_CHANNEL)
 version=$(script/get-crate-version zed)
 
 # Same channel-suffix convention as bundle-linux/bundle-mac's own $suffix —
-# "zed" for stable, "zed-dev"/"zed-nightly"/"zed-preview" otherwise, so a
-# dev build's .deb can never collide with (or accidentally upgrade) a real
-# stable install.
+# "forge-super" for stable, "forge-super-dev"/"forge-super-nightly"/
+# "forge-super-preview" otherwise, so a dev build's .deb can never collide
+# with (or accidentally upgrade) a real stable install.
 suffix=""
 if [[ "$channel" != "stable" ]]; then
   suffix="-${channel}"
 fi
-pkg_name="zed${suffix}"
+pkg_name="forge-super${suffix}"
 
 target_dir="${CARGO_TARGET_DIR:-target}"
-tarball="${target_dir}/release/zed-linux-${arch}.tar.gz"
+tarball="${target_dir}/release/forge-super-linux-${arch}.tar.gz"
 if [[ ! -f "$tarball" ]]; then
   echo "error: ${tarball} not found — run script/bundle-linux first (same architecture)." >&2
   exit 1
@@ -69,9 +69,10 @@ if [[ -z "$app_dir" ]]; then
 fi
 
 # /usr/lib/<pkg>/{bin,libexec,lib} as siblings, exactly as bundle-linux laid
-# them out inside the .app — bin/zed locates libexec/zed-editor by a path
-# relative to itself, which is the whole reason the tarball is relocatable
-# to begin with. Installing them as siblings elsewhere preserves that.
+# them out inside the .app — bin/forge-super locates
+# libexec/forge-super-editor by a path relative to itself, which is the
+# whole reason the tarball is relocatable to begin with. Installing them as
+# siblings elsewhere preserves that.
 pkg_root="${work_dir}/pkg"
 install_dir="${pkg_root}/usr/lib/${pkg_name}"
 mkdir -p \
@@ -82,12 +83,12 @@ mkdir -p \
   "${pkg_root}/DEBIAN"
 
 cp -a "${app_dir}/bin" "${app_dir}/libexec" "${app_dir}/lib" "$install_dir/"
-ln -s "/usr/lib/${pkg_name}/bin/zed" "${pkg_root}/usr/bin/zed"
+ln -s "/usr/lib/${pkg_name}/bin/forge-super" "${pkg_root}/usr/bin/forge-super"
 
 # The bundled .desktop's Exec/TryExec/Icon are the bare command/icon names
 # (envsubst'd from $APP_CLI/$APP_ICON in bundle-linux, not absolute paths),
-# so it works as-is once /usr/bin/zed and the icon below are both in the
-# usual system search paths.
+# so it works as-is once /usr/bin/forge-super and the icon below are both in
+# the usual system search paths.
 desktop_file=$(find "${app_dir}/share/applications" -name '*.desktop' | head -n1)
 if [[ -z "$desktop_file" ]]; then
   echo "error: no .desktop file found inside ${tarball}" >&2
@@ -148,10 +149,11 @@ Installed-Size: ${installed_size_kb}
 Depends: libc6, libgcc-s1, libstdc++6, libglib2.0-0t64 | libglib2.0-0, libasound2t64 | libasound2, libvulkan1, libegl1
 Recommends: mesa-vulkan-drivers, libgl1-mesa-dri, libwayland-client0, libwayland-cursor0, libwayland-egl1
 Maintainer: Unofficial build <noreply@example.invalid>
-Description: Zed code editor (unofficial .deb, ${channel} channel)
- High-performance, multiplayer code editor. Repackaged from the same
- relocatable tarball script/bundle-linux produces for this fork — not an
- official Zed Industries package, and not published or supported by them.
+Description: Mentenaz Forge Super code editor (unofficial .deb, ${channel} channel)
+ High-performance, multiplayer code editor, based on Zed. Repackaged from
+ the same relocatable tarball script/bundle-linux produces for this fork —
+ not an official Zed Industries package, and not published or supported by
+ them.
 EOF
 
 deb_path="${target_dir}/release/${pkg_name}_${version}_${deb_arch}.deb"

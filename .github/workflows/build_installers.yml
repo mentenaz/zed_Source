@@ -103,11 +103,7 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
-            # Disabled on tag push until Linux packaging is renamed to Forge
-            # Super: script/bundle-linux still builds the old `zeddev` binary
-            # and packages it as `zed`. Still available manually via
-            # workflow_dispatch's build_linux input.
-            echo "build_linux=false" >> "$GITHUB_OUTPUT"
+            echo "build_linux=true" >> "$GITHUB_OUTPUT"
             # Disabled on tag push: webrtc-sys fails to build against every
             # Xcode on the macos-14 runner we've tried so far (15.4's libc++
             # tightened a C++20 concept check that cxx-rs's generated
@@ -225,44 +221,45 @@ jobs:
       - name: Download the WASI SDK (for bundled extensions)
         run: ./script/download-wasi-sdk
 
-      # Produces a .tar.gz containing a self-contained zed.app/ directory
-      # (binary + bundled libs + .desktop file + icons) — this is the only
-      # format Zed's own scripts produce for Linux (besides, separately,
-      # script/bundle-flatpak for Flatpak). Extract the tarball and run
-      # bin/zed, or copy the .desktop file into
-      # ~/.local/share/applications for a menu entry.
+      # Produces a .tar.gz containing a self-contained forge-super.app/
+      # directory (binary + bundled libs + .desktop file + icons) — this is
+      # the only format Zed's own scripts produce for Linux (besides,
+      # separately, script/bundle-flatpak for Flatpak, which this fork
+      # hasn't rebranded). Extract the tarball and run bin/forge-super, or
+      # copy the .desktop file into ~/.local/share/applications for a menu
+      # entry.
       - name: Build the bundle (script/bundle-linux)
         run: ./script/bundle-linux
 
       # Not an official Zed artifact — script/bundle-deb is this fork's own
       # addition, repackaging the tarball above into a real .deb (installs
-      # to /usr/lib/<pkg>, /usr/bin/zed symlink, desktop/icon entries) since
-      # nothing upstream produces one. See that script's own comments for
-      # what it does and doesn't handle (there's no Depends: — the bundled
-      # libs cover most of it, see the script for why the rest is left
-      # undeclared rather than guessed).
+      # to /usr/lib/<pkg>, /usr/bin/forge-super symlink, desktop/icon
+      # entries) since nothing upstream produces one. See that script's own
+      # comments for what it does and doesn't handle (there's no Depends: —
+      # the bundled libs cover most of it, see the script for why the rest
+      # is left undeclared rather than guessed).
       - name: Build the .deb package (script/bundle-deb)
         run: ./script/bundle-deb ${{ needs.prepare.outputs.architecture }}
 
-      - name: Upload artifact — Zed (tarball)
+      - name: Upload artifact — Forge Super (tarball)
         uses: actions/upload-artifact@v4
         with:
-          name: zed-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
-          path: target/release/zed-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
+          name: forge-super-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
+          path: target/release/forge-super-linux-${{ needs.prepare.outputs.architecture }}.tar.gz
           if-no-files-found: error
 
-      - name: Upload artifact — Zed (.deb)
+      - name: Upload artifact — Forge Super (.deb)
         uses: actions/upload-artifact@v4
         with:
-          name: zed-linux-${{ needs.prepare.outputs.architecture }}.deb
+          name: forge-super-linux-${{ needs.prepare.outputs.architecture }}.deb
           path: target/release/*.deb
           if-no-files-found: error
 
       - name: Upload artifact — remote_server
         uses: actions/upload-artifact@v4
         with:
-          name: zed-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
-          path: target/zed-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
+          name: forge-super-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
+          path: target/forge-super-remote-server-linux-${{ needs.prepare.outputs.architecture }}.gz
           if-no-files-found: error
 
   build_macos:
@@ -365,7 +362,7 @@ jobs:
         if: ${{ needs.build_linux.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
-          pattern: zed*-linux-${{ needs.prepare.outputs.architecture }}.*
+          pattern: forge-super*-linux-${{ needs.prepare.outputs.architecture }}.*
           path: dist
           merge-multiple: true
 
