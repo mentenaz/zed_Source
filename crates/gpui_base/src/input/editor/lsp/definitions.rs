@@ -167,7 +167,7 @@ impl InputBaseState<EditorMode> {
         window: &mut Window,
         cx: &mut Context<InputBaseState<EditorMode>>,
     ) -> bool {
-        if !event.modifiers.secondary() {
+        if !event.modifiers.secondary(cx) {
             return false;
         }
 

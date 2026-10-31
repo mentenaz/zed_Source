@@ -88,7 +88,7 @@ impl InputBaseState<EditorMode> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.modifiers.secondary() {
+        if event.modifiers.secondary(cx) {
             self.handle_hover_definition(offset, window, cx);
         } else {
             self.extras.hover_definition.clear();
