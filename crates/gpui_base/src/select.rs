@@ -17,11 +17,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new(
-            "secondary-enter",
-            Confirm { secondary: true },
-            Some(CONTEXT),
-        ),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-enter", Confirm { secondary: true }, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-enter", Confirm { secondary: true }, Some(CONTEXT)),
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
     ]);
 }

@@ -20,7 +20,10 @@ actions!(editor_story, [Save]);
 const CONTEXT: &str = "EditorStory";
 
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("secondary-s", Save, Some(CONTEXT))]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-s", Save, Some(CONTEXT))]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([KeyBinding::new("ctrl-s", Save, Some(CONTEXT))]);
 }
 
 /// Emitted when the user saves the active tab (`Ctrl`/`Cmd`-`S`, or the

@@ -156,8 +156,18 @@ pub(crate) fn init(cx: &mut App) {
             },
             Some(CONTEXT),
         ),
+        #[cfg(target_os = "macos")]
         KeyBinding::new(
-            "secondary-enter",
+            "cmd-enter",
+            Enter {
+                secondary: true,
+                shift: false,
+            },
+            Some(CONTEXT),
+        ),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new(
+            "ctrl-enter",
             Enter {
                 secondary: true,
                 shift: false,
